@@ -1,0 +1,39 @@
+[submodule "third_party/build"]
+	path = third_party/build
+	url = git@github.com:OP-TEE/build.git
+[submodule "third_party/optee_os"]
+	path = third_party/optee_os
+	url = git@github.com:OP-TEE/optee_os.git
+[submodule "third_party/optee_client"]
+	path = third_party/optee_client
+	url = git@github.com:OP-TEE/optee_client.git
+[submodule "third_party/optee_examples"]
+	path = third_party/optee_examples
+	url = git@github.com:linaro-swg/optee_examples.git
+[submodule "third_party/trusted-firmware-a"]
+	path = third_party/trusted-firmware-a
+	url = git@github.com:ARM-software/arm-trusted-firmware.git
+[submodule "third_party/qemu"]
+	path = third_party/qemu
+	url = git@github.com:qemu/qemu.git
+[submodule "third_party/u-boot"]
+	path = third_party/u-boot
+	url = git@github.com:u-boot/u-boot.git
+[submodule "third_party/hafnium"]
+	path = third_party/hafnium
+	url = https://review.trustedfirmware.org/hafnium/hafnium
+[submodule "third_party/xen"]
+	path = third_party/xen
+	url = http://xenbits.xen.org/git-http/xen.git
+[submodule "third_party/mbedtls"]
+	path = third_party/mbedtls
+	url = git@github.com:Mbed-TLS/mbedtls.git
+[submodule "third_party/SCP-firmware"]
+	path = third_party/SCP-firmware
+	url = git@github.com:ARM-software/SCP-firmware.git
+[submodule "third_party/buildroot"]
+	path = third_party/buildroot
+	url = git@github.com:buildroot/buildroot.git
+[submodule "third_party/linux"]
+	path = third_party/linux
+	url = git@github.com:linaro-swg/linux.git
