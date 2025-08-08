@@ -47,6 +47,154 @@
 
 ---
 
+## 📋 重新规划: 基于eth_wallet架构的AirAccount开发计划
+
+> **核心策略变更**: 将Apache Teaclave eth_wallet作为架构模板和核心参考，深度学习其TEE设计模式、安全机制和实现逻辑，在此基础上扩展AirAccount的高级功能。
+
+## 📋 架构确认后的实施TODO清单
+
+> **当前状态**: 架构设计和技术选型阶段，待确认后执行
+> **核心原则**: 基于eth_wallet架构，批判性融合我们的安全增强，实现AirAccount业务模型
+
+### Phase 1: eth_wallet学习与核心架构确立 🔴 P0 (预计3周)
+
+#### Task 1.8.1: eth_wallet深度研究与授权机制分析 🔴 P0-Critical (5天)
+- [ ] **1.8.1.1 eth_wallet完整代码分析**
+  - 克隆和构建Apache Teaclave eth_wallet项目
+  - 深入分析TA授权验证机制 (重点关注如何控制私钥访问)
+  - 理解OP-TEE会话管理和权限控制
+  - 分析BIP32/BIP39/secp256k1密码学实现
+
+- [ ] **1.8.1.2 TEE授权机制对比设计**
+  - 对比eth_wallet vs AirAccount的授权需求差异
+  - 设计四层授权架构：TA访问控制→会话管理→用户认证→操作授权
+  - 确定WebAuthn/Passkey集成方案 (非生物特征提取)
+  - 设计用户-钱包权限绑定机制
+
+- [ ] **1.8.1.3 架构融合策略确定**
+  - 确定保留我们安全模块的具体内容
+  - 确定采用eth_wallet的具体组件  
+  - 设计融合后的目录结构和接口
+  - 制定分阶段实施计划
+
+#### Task 1.8.2: 业务模型与技术架构融合设计 🔴 P0 (4天)
+- [ ] **1.8.2.1 用户账户生命周期设计**
+  - 设计Web2用户注册→TEE钱包创建的完整流程
+  - 设计用户ID与钱包ID的安全绑定机制
+  - 确定多钱包管理策略 (主钱包+子钱包)
+  - 设计账户恢复和迁移机制
+
+- [ ] **1.8.2.2 WebAuthn/Passkey授权集成**
+  - 设计Node.js前端→系统生物识别→TEE验证的完整流程
+  - 确定Passkey签名验证在TEE中的实现方式
+  - 设计会话管理和授权令牌机制
+  - 制定多因素认证策略
+
+- [ ] **1.8.2.3 数据模型和接口设计**
+  - 设计用户表、钱包绑定表、权限表的数据库结构
+  - 定义Proto层的命令和数据结构扩展
+  - 设计RESTful API接口规范
+  - 制定前后端通信协议
+
+#### Task 1.8.3: 代码融合策略确定 🟡 P1 (5天)
+- [ ] **1.8.3.1 安全模块保留决策**
+  - 确认保留我们的: constant_time, memory_protection, audit系统
+  - 确认采用eth_wallet的: BIP32/BIP39/secp256k1, TA架构, 存储接口
+  - 设计安全模块与eth_wallet核心的集成方式
+  - 制定性能基准和安全测试要求
+
+- [ ] **1.8.3.2 实施优先级排序**
+  - P0: TEE授权机制实现 (关键安全基础)
+  - P1: 基础钱包功能集成 (创建、签名、地址派生)
+  - P2: WebAuthn/Passkey用户认证
+  - P3: 多签钱包和高级功能
+
+**Phase 1 验收标准**: 
+- ✅ 完成架构设计文档和技术选型确认
+- ✅ TEE授权机制清晰定义，安全风险可控
+- ✅ 前后端接口规范确定，数据模型设计完成
+- ✅ 代码融合策略明确，实施计划可执行
+
+---
+
+### Phase 2: AirAccount核心功能扩展 🟡 P1 (预计4周)
+
+#### Task 2.1: 多重签名钱包实现
+- [ ] **2.1.1 多签架构设计** (3天)
+  ```rust
+  pub struct MultiSigWallet {
+      threshold: u8,           // 签名阈值
+      signers: Vec<PublicKey>, // 签名者公钥
+      pending_txs: HashMap<TxHash, PartialSignature>, // 待签名交易
+  }
+  ```
+- [ ] **2.1.2 分布式签名协议** (5天)
+- [ ] **2.1.3 签名聚合和验证** (4天)
+
+#### Task 2.2: 生物识别集成  
+- [ ] **2.2.1 指纹识别TA模块** (4天)
+- [ ] **2.2.2 安全模板存储** (3天)  
+- [ ] **2.2.3 活体检测机制** (3天)
+
+#### Task 2.3: 跨链支持扩展
+- [ ] **2.3.1 多链适配器设计** (4天)
+- [ ] **2.3.2 BTC/其他UTXO链支持** (5天)
+
+**Phase 2 验收标准**: 完整的多签钱包功能，生物识别验证，多链交易签名
+
+---
+
+### Phase 3: 分布式网络与高级功能 🟢 P2 (预计3周)
+
+#### Task 3.1: P2P网络层实现
+- [ ] **3.1.1 libp2p集成** (5天)
+- [ ] **3.1.2 节点发现和通信** (4天)  
+- [ ] **3.1.3 消息加密和认证** (3天)
+
+#### Task 3.2: 密钥分片和恢复
+- [ ] **3.2.1 Shamir秘密分享** (4天)
+- [ ] **3.2.2 社交恢复机制** (3天)
+
+#### Task 3.3: 零知识证明支持
+- [ ] **3.3.1 zk-SNARK集成** (5天)
+- [ ] **3.3.2 隐私交易支持** (4天)
+
+---
+
+### Phase 4: 安全加固与生产优化 🟢 P2 (预计2周)
+
+#### Task 4.1: 基于审查报告的安全修复
+- [ ] **4.1.1 密钥派生函数(KDF)实现** (3天)
+  - 集成Argon2id替代直接密钥使用
+  - 增强熵源质量检查
+- [ ] **4.1.2 审计系统加固** (2天)  
+  - 防篡改日志链
+  - 敏感信息脱敏
+- [ ] **4.1.3 性能优化** (3天)
+  - 批量操作优化
+  - SIMD加速
+
+#### Task 4.2: 测试与文档完善
+- [ ] **4.2.1 安全渗透测试** (2天)
+- [ ] **4.2.2 性能基准测试** (2天)
+- [ ] **4.2.3 API文档和用户指南** (2天)
+
+---
+
+### 关键里程碑和验收标准
+
+| 阶段 | 里程碑 | 验收标准 | 时间 |
+|------|--------|----------|------|
+| Phase 1 | eth_wallet学习完成 | PoC运行，安全风险修复 | 3周 |
+| Phase 2 | 核心功能实现 | 多签+生物识别+多链 | 7周 |  
+| Phase 3 | 高级功能开发 | P2P网络+密钥恢复+ZK | 10周 |
+| Phase 4 | 生产就绪 | 安全审计通过+性能达标 | 12周 |
+
+**总预计工期**: 12周 (3个月)
+**核心原则**: 以eth_wallet为模板，学习其精华，修复其不足，扩展我们需要的功能
+
+---
+
 ## V0.1 详细执行计划：基于TEE开发指南的可执行子任务
 
 ### Phase 1: 环境准备与基础设施搭建
@@ -95,6 +243,296 @@
   make run-qemuv8
   # 在Normal World终端运行: xtest -l 3
   ```
+
+---
+
+## Phase 1.6: 安全强化与代码质量提升 (基于专家审查报告)
+
+### 优先级分类说明
+- 🔴 **P0 - 严重**: 影响安全性的关键问题，必须立即修复
+- 🟡 **P1 - 高**: 功能完整性和性能问题，短期内修复  
+- 🟢 **P2 - 中**: 代码质量和维护性改进，中期规划
+- 🔵 **P3 - 低**: 增强功能和优化，长期规划
+
+---
+
+### Task 1.6.1: 关键安全漏洞修复 🔴 P0
+
+#### 子任务 1.6.1.1: 密钥管理系统重构
+- [ ] **实现密钥派生函数(KDF)**
+  ```rust
+  // 新增: src/security/key_derivation.rs
+  pub struct KeyDerivationManager {
+      algorithm: KdfAlgorithm, // Argon2id, PBKDF2, scrypt
+      salt_size: usize,
+      iterations: u32,
+  }
+  ```
+- [ ] **替换直接密钥使用**
+  - 修复 `audit.rs:155` 中的直接密钥创建
+  - 所有密钥操作通过KDF处理
+- [ ] **实现密钥生命周期管理**
+  - 密钥生成、轮换、销毁流程
+  - 安全密钥存储机制
+- [ ] **添加密钥强度验证**
+  - 熵质量检查
+  - 密钥复杂度验证
+
+#### 子任务 1.6.1.2: 增强随机数生成安全
+- [ ] **实现TEE专用熵源**
+  ```rust
+  // 新增: src/security/entropy.rs
+  pub trait EntropySource {
+      fn gather_entropy(&mut self, buf: &mut [u8]) -> Result<(), EntropyError>;
+      fn entropy_estimate(&self) -> f64;
+  }
+  
+  pub struct TEEEntropySource {
+      hw_rng: Option<HardwareRng>,
+      timing_jitter: TimingJitterCollector,
+      physical_noise: NoiseCollector,
+  }
+  ```
+- [ ] **改进栈金丝雀强度**
+  - 增加金丝雀位数到128位
+  - 实现多层金丝雀保护
+- [ ] **添加熵质量监控**
+  - 熵池状态检查
+  - 随机性统计测试
+
+#### 子任务 1.6.1.3: 审计安全加固
+- [ ] **实现防篡改审计日志**
+  ```rust
+  // 增强: src/security/audit.rs
+  pub struct TamperProofAuditLog {
+      hmac_key: SecureBytes,
+      sequence_number: AtomicU64,
+      chain_hash: Mutex<[u8; 32]>,
+  }
+  ```
+- [ ] **敏感信息脱敏**
+  - 审计日志中的密钥信息移除
+  - 实现结构化脱敏规则
+- [ ] **审计日志完整性验证**
+  - HMAC链式验证
+  - 日志序列号检查
+
+**预计工期**: 2周
+**验收标准**: 通过安全渗透测试，无已知密码学漏洞
+
+---
+
+### Task 1.6.2: eth_wallet示例集成与核心功能实现 🟡 P1
+
+#### 子任务 1.6.2.1: 研究和集成eth_wallet代码
+- [ ] **分析eth_wallet架构**
+  - 研究TA入口点设计模式
+  - 理解OP-TEE系统调用使用
+  - 学习TEE内存管理机制
+- [ ] **提取可重用组件**
+  - 密钥生成和存储逻辑
+  - 数字签名实现
+  - TEE-Normal World通信协议
+- [ ] **适配到AirAccount架构**
+  - 集成到现有安全框架
+  - 保持模块化设计原则
+
+#### 子任务 1.6.2.2: 数字签名功能实现  
+- [ ] **ECDSA签名实现**
+  ```rust
+  // 新增: src/crypto/signature.rs
+  pub struct SignatureManager {
+      key_store: Arc<KeyStore>,
+      audit_logger: Arc<AuditLogger>,
+  }
+  
+  impl SignatureManager {
+      pub fn sign_message(&self, key_id: &str, message: &[u8]) -> Result<Signature>;
+      pub fn verify_signature(&self, pubkey: &PublicKey, message: &[u8], sig: &Signature) -> bool;
+  }
+  ```
+- [ ] **支持多种签名算法**
+  - secp256k1 (以太坊标准)
+  - Ed25519 (现代椭圆曲线)
+  - secp256r1 (NIST标准)
+- [ ] **签名操作审计**
+  - 签名请求完整记录
+  - 频率限制和异常检测
+
+#### 子任务 1.6.2.3: 密钥存储系统
+- [ ] **安全密钥存储**
+  ```rust
+  // 新增: src/security/key_store.rs
+  pub struct SecureKeyStore {
+      storage_backend: Box<dyn StorageBackend>,
+      encryption_key: SecureBytes,
+  }
+  ```
+- [ ] **密钥备份和恢复**
+  - 助记词生成 (BIP39)
+  - 分片备份机制
+  - 恢复流程实现
+
+**预计工期**: 3周  
+**验收标准**: 能够生成密钥、签名交易、通过兼容性测试
+
+---
+
+### Task 1.6.3: 性能优化和效率提升 🟡 P1
+
+#### 子任务 1.6.3.1: 审计日志性能优化
+- [ ] **批量日志处理**
+  ```rust
+  // 优化: src/security/audit.rs  
+  pub struct BatchAuditLogger {
+      batch_size: usize,
+      flush_interval: Duration,
+      buffer: Arc<Mutex<Vec<AuditLogEntry>>>,
+  }
+  ```
+- [ ] **异步日志写入**
+  - 非阻塞日志记录
+  - 后台批量刷盘
+- [ ] **日志级别过滤**
+  - 运行时日志级别控制
+  - 热路径日志优化
+
+#### 子任务 1.6.3.2: 内存管理优化
+- [ ] **内存池实现**
+  ```rust
+  // 新增: src/security/memory_pool.rs
+  pub struct SecureMemoryPool {
+      pools: Vec<FixedSizePool>,
+      large_alloc_threshold: usize,
+  }
+  ```
+- [ ] **减少内存清零开销**
+  - 延迟清零策略
+  - 批量清零操作
+- [ ] **SIMD加速内存操作**
+  - AVX2/NEON指令优化
+  - 平台特定优化
+
+#### 子任务 1.6.3.3: 加密操作优化
+- [ ] **硬件加速支持**
+  - AES-NI指令集支持
+  - ARM Crypto Extensions
+- [ ] **算法性能调优**
+  - ChaCha20多线程优化
+  - 批量加密操作
+
+**预计工期**: 2周
+**验收标准**: 关键操作性能提升50%以上
+
+---
+
+### Task 1.6.4: 代码质量和维护性改进 🟢 P2
+
+#### 子任务 1.6.4.1: 错误处理系统重构
+- [ ] **结构化错误类型**
+  ```rust
+  // 重构: src/lib.rs
+  #[derive(Debug, thiserror::Error)]
+  pub enum SecurityError {
+      #[error("Cryptographic operation failed: {operation} - {details}")]
+      CryptoError { 
+          operation: String, 
+          details: String,
+          context: ErrorContext 
+      },
+      
+      #[error("Memory protection violation at {address:#x}")]
+      MemoryViolation { 
+          address: usize, 
+          operation: String,
+          stack_trace: Vec<String>
+      },
+      
+      #[error("Key management error: {kind}")]
+      KeyManagementError {
+          kind: KeyErrorKind,
+          key_id: Option<String>
+      }
+  }
+  ```
+- [ ] **错误上下文增强**
+  - 调用栈信息
+  - 操作时间戳
+  - 相关组件状态
+- [ ] **错误恢复机制**
+  - 自动重试逻辑
+  - 优雅降级处理
+
+#### 子任务 1.6.4.2: 配置系统增强
+- [ ] **运行时配置验证**
+  ```rust
+  // 新增: src/config/validator.rs
+  #[derive(serde::Deserialize, Debug, validator::Validate)]
+  pub struct SecurityConfig {
+      #[validate(range(min = 1000, max = 100000))]
+      pub pbkdf2_iterations: u32,
+      
+      #[validate(length(min = 32, max = 64))]
+      pub salt_size: usize,
+      
+      #[validate]
+      pub entropy_config: EntropyConfig,
+  }
+  ```
+- [ ] **配置热更新**
+  - 非关键配置动态更新
+  - 配置变更审计
+- [ ] **环境适配配置**
+  - 开发/测试/生产环境配置
+  - 平台特定参数
+
+#### 子任务 1.6.4.3: 测试增强和文档完善
+- [ ] **模糊测试集成**
+  ```rust
+  // 新增: fuzz/fuzz_targets/crypto_operations.rs
+  use libfuzzer_sys::fuzz_target;
+  
+  fuzz_target!(|data: &[u8]| {
+      // 测试密码学操作的边界情况
+  });
+  ```
+- [ ] **基准测试扩展**
+  - 更全面的性能基准
+  - 回归测试自动化
+- [ ] **API文档生成**
+  - rustdoc完整覆盖
+  - 使用示例和最佳实践
+
+**预计工期**: 1.5周
+**验收标准**: 代码质量检查通过，文档覆盖率>90%
+
+---
+
+### Task 1.6.5: 监控和运维支持 🔵 P3
+
+#### 子任务 1.6.5.1: 指标收集系统
+- [ ] **性能指标**
+  ```rust
+  // 新增: src/monitoring/metrics.rs
+  pub struct SecurityMetrics {
+      crypto_ops_total: Counter,
+      memory_alloc_histogram: Histogram,
+      audit_events_total: Counter,
+      error_count_by_type: CounterVec,
+  }
+  ```
+- [ ] **健康检查接口**
+- [ ] **资源使用监控**
+
+#### 子任务 1.6.5.2: 调试和诊断工具
+- [ ] **内存使用分析器**
+- [ ] **性能分析工具**
+- [ ] **安全状态检查器**
+
+**预计工期**: 1周
+**验收标准**: 运维工具完整，监控指标准确
+
+---
 
 ### Phase 2: AirAccount项目结构创建
 

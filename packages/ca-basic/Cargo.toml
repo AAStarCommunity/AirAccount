@@ -1,0 +1,17 @@
+[package]
+name = "airaccout-ca-basic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# TEE Client dependencies - following eth_wallet pattern
+optee-teec = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+
+# Command line interface
+clap = { version = "4.0", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+
+# UUID handling
+uuid = "1.8"

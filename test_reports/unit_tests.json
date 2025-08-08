@@ -1,0 +1,1096 @@
+    Updating crates.io index
+     Locking 58 packages to latest compatible versions
+      Adding anyhow v1.0.98
+      Adding async-trait v0.1.88
+      Adding autocfg v1.5.0
+      Adding base16ct v0.1.1
+      Adding bincode v1.3.3 (available: v2.0.1)
+      Adding bip32 v0.3.0 (available: v0.5.3)
+      Adding block-buffer v0.9.0
+      Adding block-buffer v0.10.4
+      Adding block-padding v0.2.1
+      Adding bs58 v0.4.0
+      Adding cc v1.2.31
+      Adding const-oid v0.7.1
+      Adding crunchy v0.2.4
+      Adding crypto-bigint v0.3.2
+      Adding crypto-mac v0.11.0 (available: v0.11.1)
+      Adding der v0.5.1
+      Adding digest v0.9.0
+      Adding digest v0.10.7
+      Adding ecdsa v0.13.4
+      Adding elliptic-curve v0.11.12
+      Adding equivalent v1.0.2
+      Adding ethereum-tx-sign v6.1.3
+      Adding ff v0.11.1
+      Adding getrandom v0.3.3
+      Adding group v0.11.0
+      Adding hashbrown v0.15.4
+      Adding hex v0.4.3
+      Adding hmac v0.11.0
+      Adding indexmap v2.10.0
+      Adding k256 v0.10.4
+      Adding keccak v0.1.5
+      Adding num-traits v0.2.19
+      Adding num_enum v0.7.4
+      Adding num_enum_derive v0.7.4
+      Adding once_cell v1.21.3
+      Adding pbkdf2 v0.9.0
+      Adding proc-macro-crate v3.3.0
+      Adding r-efi v5.3.0
+      Adding rfc6979 v0.1.0
+      Adding ripemd160 v0.9.1
+      Adding rlp v0.5.2
+      Adding rustc-hex v2.1.0
+      Adding rustversion v1.0.21
+      Adding sec1 v0.2.1
+      Adding secp256k1 v0.27.0 (available: v0.31.1)
+      Adding secp256k1-sys v0.8.2
+      Adding sha2 v0.9.9
+      Adding sha3 v0.9.1
+      Adding sha3 v0.10.8
+      Adding shlex v1.3.0
+      Adding signature v1.4.0 (available: v1.6.4)
+      Adding tiny-keccak v2.0.2
+      Adding toml_datetime v0.6.11
+      Adding toml_edit v0.22.27
+      Adding uuid v1.17.0
+      Adding wasi v0.14.2+wasi-0.2.4
+      Adding winnow v0.7.12
+      Adding wit-bindgen-rt v0.39.0
+ Downloading crates ...
+  Downloaded der v0.5.1
+  Downloaded hmac v0.11.0
+  Downloaded sha2 v0.9.9
+  Downloaded secp256k1 v0.27.0
+  Downloaded crypto-mac v0.11.0
+  Downloaded base16ct v0.1.1
+  Downloaded bs58 v0.4.0
+  Downloaded block-buffer v0.9.0
+  Downloaded bincode v1.3.3
+  Downloaded signature v1.4.0
+  Downloaded ripemd160 v0.9.1
+  Downloaded ff v0.11.1
+  Downloaded sec1 v0.2.1
+  Downloaded block-padding v0.2.1
+  Downloaded const-oid v0.7.1
+  Downloaded ecdsa v0.13.4
+  Downloaded rfc6979 v0.1.0
+  Downloaded sha3 v0.9.1
+  Downloaded group v0.11.0
+  Downloaded crypto-bigint v0.3.2
+  Downloaded pbkdf2 v0.9.0
+  Downloaded bip32 v0.3.0
+  Downloaded elliptic-curve v0.11.12
+  Downloaded ethereum-tx-sign v6.1.3
+  Downloaded k256 v0.10.4
+  Downloaded secp256k1-sys v0.8.2
+   Compiling block-padding v0.2.1
+   Compiling const-oid v0.7.1
+   Compiling shlex v1.3.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.15.4
+   Compiling winnow v0.7.12
+   Compiling digest v0.9.0
+   Compiling crypto-mac v0.11.0
+   Compiling crypto-common v0.1.6
+   Compiling crypto-bigint v0.3.2
+   Compiling ff v0.11.1
+   Compiling block-buffer v0.9.0
+   Compiling cc v1.2.31
+   Compiling der v0.5.1
+   Compiling group v0.11.0
+   Compiling hmac v0.11.0
+   Compiling keccak v0.1.5
+   Compiling toml_datetime v0.6.11
+   Compiling crunchy v0.2.4
+   Compiling base16ct v0.1.1
+   Compiling autocfg v1.5.0
+   Compiling cipher v0.4.4
+   Compiling indexmap v2.10.0
+   Compiling rfc6979 v0.1.0
+   Compiling sha2 v0.9.9
+   Compiling signature v1.4.0
+   Compiling universal-hash v0.5.1
+   Compiling tiny-keccak v2.0.2
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.3.3
+   Compiling sec1 v0.2.1
+   Compiling rustversion v1.0.21
+   Compiling polyval v0.6.2
+   Compiling elliptic-curve v0.11.12
+   Compiling sha3 v0.9.1
+   Compiling ecdsa v0.13.4
+   Compiling block-buffer v0.10.4
+   Compiling anyhow v1.0.98
+   Compiling rustc-hex v2.1.0
+   Compiling toml_edit v0.22.27
+   Compiling rlp v0.5.2
+   Compiling k256 v0.10.4
+   Compiling digest v0.10.7
+   Compiling secp256k1-sys v0.8.2
+   Compiling ghash v0.5.1
+   Compiling bs58 v0.4.0
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling ripemd160 v0.9.1
+   Compiling aead v0.5.2
+   Compiling pbkdf2 v0.9.0
+   Compiling hex v0.4.3
+   Compiling once_cell v1.21.3
+   Compiling bip32 v0.3.0
+   Compiling aes-gcm v0.10.3
+   Compiling sha3 v0.10.8
+   Compiling bincode v1.3.3
+   Compiling proc-macro-crate v3.3.0
+   Compiling async-trait v0.1.88
+   Compiling num_enum_derive v0.7.4
+   Compiling uuid v1.17.0
+   Compiling num_enum v0.7.4
+   Compiling secp256k1 v0.27.0
+   Compiling ethereum-tx-sign v6.1.3
+   Compiling airaccount-core-logic v0.1.0 (/Volumes/UltraDisk/Dev2/aastar/AirAccount/packages/core-logic)
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+   --> src/wallet/mod.rs:281:7
+    |
+281 |     #[tokio::test]
+    |       ^^^^^ use of unresolved module or unlinked crate `tokio`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+   --> src/tee/mod.rs:314:7
+    |
+314 |     #[tokio::test]
+    |       ^^^^^ use of unresolved module or unlinked crate `tokio`
+
+warning: unused import: `ConstantTimeOps`
+ --> src/wallet/core_wallet.rs:4:53
+  |
+4 | use crate::security::{SecurityManager, SecureBytes, ConstantTimeOps, SecureMemory, AuditEvent};
+  |                                                     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Result` and `anyhow`
+ --> src/wallet/core_wallet.rs:8:14
+  |
+8 | use anyhow::{anyhow, Result};
+  |              ^^^^^^  ^^^^^^
+
+warning: unused import: `ZeroizeOnDrop`
+  --> src/wallet/core_wallet.rs:11:24
+   |
+11 | use zeroize::{Zeroize, ZeroizeOnDrop};
+   |                        ^^^^^^^^^^^^^
+
+warning: unused import: `WalletError`
+ --> src/wallet/biometric_integration.rs:6:13
+  |
+6 | use super::{WalletError, WalletResult};
+  |             ^^^^^^^^^^^
+
+warning: unused import: `WalletError`
+ --> src/wallet/multi_chain_support.rs:4:13
+  |
+4 | use super::{WalletError, WalletResult};
+  |             ^^^^^^^^^^^
+
+error[E0599]: no method named `clone` found for struct `SecurityManager` in the current scope
+  --> src/wallet/wallet_manager.rs:94:76
+   |
+94 |         Ok(AirAccountWallet::from_core(core.clone(), self.security_manager.clone()))
+   |                                                                            ^^^^^ method not found in `SecurityManager`
+   |
+  ::: src/security/mod.rs:33:1
+   |
+33 | pub struct SecurityManager {
+   | -------------------------- method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+
+error[E0599]: no method named `clone` found for struct `security::SecurityManager` in the current scope
+  --> src/wallet/wallet_manager.rs:94:76
+   |
+94 |         Ok(AirAccountWallet::from_core(core.clone(), self.security_manager.clone()))
+   |                                                                            ^^^^^ method not found in `SecurityManager`
+   |
+  ::: src/security/mod.rs:33:1
+   |
+33 | pub struct SecurityManager {
+   | -------------------------- method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+
+error[E0277]: the trait bound `SecureBytes: Serialize` is not satisfied
+    --> src/wallet/core_wallet.rs:19:10
+     |
+19   | #[derive(Serialize, Deserialize, Debug, Clone)]
+     |          ^^^^^^^^^ the trait `Serialize` is not implemented for `SecureBytes`
+...
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |     ------- required by a bound introduced by this call
+     |
+     = note: for local types consider adding `#[derive(serde::Serialize)]` to your `SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Serialize`:
+               &'a T
+               &'a mut T
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+               (T0, T1, T2, T3, T4)
+             and 172 others
+note: required by a bound in `proto::_::_serde::ser::SerializeStruct::serialize_field`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+     |
+1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+     |        --------------- required by a bound in this associated function
+1865 |     where
+1866 |         T: ?Sized + Serialize;
+     |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+     = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `SecureBytes: Deserialize<'_>` is not satisfied
+    --> src/wallet/core_wallet.rs:22:14
+     |
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |              ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `SecureBytes`
+     |
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               &'a Path
+               &'a [u8]
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+             and 180 others
+note: required by a bound in `next_element`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+     |
+1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+     |        ------------ required by a bound in this associated function
+1731 |     where
+1732 |         T: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+error[E0277]: the trait bound `SecureBytes: Deserialize<'_>` is not satisfied
+    --> src/wallet/core_wallet.rs:22:14
+     |
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |              ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `SecureBytes`
+     |
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               &'a Path
+               &'a [u8]
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+             and 180 others
+note: required by a bound in `next_value`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+     |
+1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+     |        ---------- required by a bound in this associated function
+1870 |     where
+1871 |         V: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+error[E0277]: the trait bound `SecureBytes: Deserialize<'_>` is not satisfied
+  --> src/wallet/core_wallet.rs:19:21
+   |
+19 | #[derive(Serialize, Deserialize, Debug, Clone)]
+   |                     ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `SecureBytes`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `SecureBytes` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and 180 others
+note: required by a bound in `proto::_::_serde::__private::de::missing_field`
+  --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+   |
+23 | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+   |        ------------- required by a bound in this function
+24 | where
+25 |     V: Deserialize<'de>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+   = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `zeroize` exists for struct `SecureBytes`, but its trait bounds were not satisfied
+   --> src/wallet/core_wallet.rs:30:22
+    |
+30  |         self.entropy.zeroize();
+    |                      ^^^^^^^ method cannot be called on `SecureBytes` due to unsatisfied trait bounds
+    |
+   ::: src/security/constant_time.rs:6:1
+    |
+6   | pub struct SecureBytes {
+    | ---------------------- method `zeroize` not found for this struct because it doesn't satisfy `SecureBytes: DefaultIsZeroes` or `SecureBytes: Zeroize`
+    |
+    = note: the following trait bounds were not satisfied:
+            `SecureBytes: DefaultIsZeroes`
+            which is required by `SecureBytes: Zeroize`
+note: the trait `DefaultIsZeroes` must be implemented
+   --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zeroize-1.8.1/src/lib.rs:282:1
+    |
+282 | pub trait DefaultIsZeroes: Copy + Default + Sized {}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `zeroize`, perhaps you need to implement it:
+            candidate #1: `Zeroize`
+
+error[E0599]: no method named `secure_rng` found for reference `&SecurityManager` in the current scope
+  --> src/wallet/core_wallet.rs:48:26
+   |
+48 |         security_manager.secure_rng().fill_bytes(&mut entropy_bytes);
+   |                          ^^^^^^^^^^
+   |
+help: there is a method `create_secure_rng` with a similar name
+   |
+48 |         security_manager.create_secure_rng().fill_bytes(&mut entropy_bytes);
+   |                          +++++++
+
+error[E0277]: the trait bound `constant_time::SecureBytes: Serialize` is not satisfied
+    --> src/wallet/core_wallet.rs:19:10
+     |
+19   | #[derive(Serialize, Deserialize, Debug, Clone)]
+     |          ^^^^^^^^^ the trait `Serialize` is not implemented for `constant_time::SecureBytes`
+...
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |     ------- required by a bound introduced by this call
+     |
+     = note: for local types consider adding `#[derive(serde::Serialize)]` to your `constant_time::SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Serialize`:
+               &'a T
+               &'a mut T
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+               (T0, T1, T2, T3, T4)
+             and 172 others
+note: required by a bound in `proto::_::_serde::ser::SerializeStruct::serialize_field`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+     |
+1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+     |        --------------- required by a bound in this associated function
+1865 |     where
+1866 |         T: ?Sized + Serialize;
+     |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+     = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `constant_time::SecureBytes: Deserialize<'_>` is not satisfied
+    --> src/wallet/core_wallet.rs:22:14
+     |
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |              ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `constant_time::SecureBytes`
+     |
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `constant_time::SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               &'a Path
+               &'a [u8]
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+             and 180 others
+note: required by a bound in `next_element`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+     |
+1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+     |        ------------ required by a bound in this associated function
+1731 |     where
+1732 |         T: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+error[E0308]: mismatched types
+  --> src/wallet/core_wallet.rs:49:41
+   |
+49 |         let entropy = SecureBytes::from(entropy_bytes);
+   |                       ----------------- ^^^^^^^^^^^^^ expected `SecureBytes`, found `Vec<u8>`
+   |                       |
+   |                       arguments to this function are incorrect
+   |
+   = note: expected struct `SecureBytes`
+              found struct `Vec<u8>`
+note: associated function defined here
+  --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/convert/mod.rs:587:8
+help: try wrapping the expression in `security::constant_time::SecureBytes` (its field is private, but it's local to this crate and its privacy can be changed)
+   |
+49 |         let entropy = SecureBytes::from(security::constant_time::SecureBytes { data: entropy_bytes });
+   |                                         ++++++++++++++++++++++++++++++++++++++++++++               +
+
+error[E0277]: the trait bound `constant_time::SecureBytes: Deserialize<'_>` is not satisfied
+    --> src/wallet/core_wallet.rs:22:14
+     |
+22   |     entropy: SecureBytes,  // 使用我们的SecureBytes而不是Vec<u8>
+     |              ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `constant_time::SecureBytes`
+     |
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `constant_time::SecureBytes` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               &'a Path
+               &'a [u8]
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+             and 180 others
+note: required by a bound in `next_value`
+    --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+     |
+1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+     |        ---------- required by a bound in this associated function
+1870 |     where
+1871 |         V: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+error[E0277]: the trait bound `constant_time::SecureBytes: Deserialize<'_>` is not satisfied
+  --> src/wallet/core_wallet.rs:19:21
+   |
+19 | #[derive(Serialize, Deserialize, Debug, Clone)]
+   |                     ^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `constant_time::SecureBytes`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `constant_time::SecureBytes` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and 180 others
+note: required by a bound in `proto::_::_serde::__private::de::missing_field`
+  --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+   |
+23 | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+   |        ------------- required by a bound in this function
+24 | where
+25 |     V: Deserialize<'de>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+   = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `secure_rng` found for reference `&SecurityManager` in the current scope
+  --> src/wallet/core_wallet.rs:53:26
+   |
+53 |         security_manager.secure_rng().fill_bytes(&mut uuid_bytes);
+   |                          ^^^^^^^^^^
+   |
+help: there is a method `create_secure_rng` with a similar name
+   |
+53 |         security_manager.create_secure_rng().fill_bytes(&mut uuid_bytes);
+   |                          +++++++
+
+error[E0559]: variant `AuditEvent::KeyGeneration` has no field named `operation`
+  --> src/wallet/core_wallet.rs:73:17
+   |
+73 |                 operation: "wallet_creation".to_string(),
+   |                 ^^^^^^^^^ `AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `AuditEvent::KeyGeneration` has no field named `key_type`
+  --> src/wallet/core_wallet.rs:74:17
+   |
+74 |                 key_type: "hd_wallet_seed".to_string(),
+   |                 ^^^^^^^^ `AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `AuditEvent::KeyGeneration` has no field named `duration_ms`
+  --> src/wallet/core_wallet.rs:75:17
+   |
+75 |                 duration_ms,
+   |                 ^^^^^^^^^^^ `AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `AuditEvent::KeyGeneration` has no field named `entropy_bits`
+  --> src/wallet/core_wallet.rs:76:17
+   |
+76 |                 entropy_bits: 256,
+   |                 ^^^^^^^^^^^^ `AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0599]: the method `zeroize` exists for struct `SecureBytes`, but its trait bounds were not satisfied
+   --> src/wallet/core_wallet.rs:30:22
+    |
+30  |         self.entropy.zeroize();
+    |                      ^^^^^^^ method cannot be called on `SecureBytes` due to unsatisfied trait bounds
+    |
+   ::: src/security/constant_time.rs:6:1
+    |
+6   | pub struct SecureBytes {
+    | ---------------------- method `zeroize` not found for this struct because it doesn't satisfy `constant_time::SecureBytes: DefaultIsZeroes` or `constant_time::SecureBytes: Zeroize`
+    |
+    = note: the following trait bounds were not satisfied:
+            `constant_time::SecureBytes: DefaultIsZeroes`
+            which is required by `constant_time::SecureBytes: Zeroize`
+note: the trait `DefaultIsZeroes` must be implemented
+   --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zeroize-1.8.1/src/lib.rs:282:1
+    |
+282 | pub trait DefaultIsZeroes: Copy + Default + Sized {}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `zeroize`, perhaps you need to implement it:
+            candidate #1: `Zeroize`
+
+error[E0599]: no method named `expose_secret` found for struct `SecureBytes` in the current scope
+  --> src/wallet/core_wallet.rs:91:42
+   |
+91 |         let entropy_slice = self.entropy.expose_secret();
+   |                                          ^^^^^^^^^^^^^ method not found in `SecureBytes`
+   |
+  ::: src/security/constant_time.rs:6:1
+   |
+6  | pub struct SecureBytes {
+   | ---------------------- method `expose_secret` not found for this struct
+
+error[E0599]: no method named `secure_rng` found for reference `&security::SecurityManager` in the current scope
+  --> src/wallet/core_wallet.rs:48:26
+   |
+48 |         security_manager.secure_rng().fill_bytes(&mut entropy_bytes);
+   |                          ^^^^^^^^^^
+   |
+help: there is a method `create_secure_rng` with a similar name
+   |
+48 |         security_manager.create_secure_rng().fill_bytes(&mut entropy_bytes);
+   |                          +++++++
+
+error[E0599]: no method named `expose_secret` found for struct `SecureBytes` in the current scope
+   --> src/wallet/core_wallet.rs:107:42
+    |
+107 |         let entropy_slice = self.entropy.expose_secret();
+    |                                          ^^^^^^^^^^^^^ method not found in `SecureBytes`
+    |
+   ::: src/security/constant_time.rs:6:1
+    |
+6   | pub struct SecureBytes {
+    | ---------------------- method `expose_secret` not found for this struct
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:117:30
+    |
+117 |         Ok(SecureMemory::new(seed_bytes))
+    |            ----------------- ^^^^^^^^^^ expected `usize`, found `Vec<u8>`
+    |            |
+    |            arguments to this function are incorrect
+    |
+    = note: expected type `usize`
+             found struct `Vec<u8>`
+note: associated function defined here
+   --> src/security/memory_protection.rs:15:12
+    |
+15  |     pub fn new(size: usize) -> Result<Self, &'static str> {
+    |            ^^^ -----------
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:117:12
+    |
+117 |         Ok(SecureMemory::new(seed_bytes))
+    |         -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecureMemory`, found `Result<SecureMemory, &str>`
+    |         |
+    |         arguments to this enum variant are incorrect
+    |
+    = note: expected struct `SecureMemory`
+                 found enum `std::result::Result<SecureMemory, &'static str>`
+help: the type constructed contains `std::result::Result<SecureMemory, &'static str>` due to the type of the argument passed
+   --> src/wallet/core_wallet.rs:117:9
+    |
+117 |         Ok(SecureMemory::new(seed_bytes))
+    |         ^^^-----------------------------^
+    |            |
+    |            this argument influences the type of `Ok`
+note: tuple variant defined here
+   --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/result.rs:552:5
+help: use the `?` operator to extract the `std::result::Result<SecureMemory, &'static str>` value, propagating a `Result::Err` value to the caller
+    |
+117 |         Ok(SecureMemory::new(seed_bytes)?)
+    |                                         +
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:132:30
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+    |            ----------------- ^^^^^^^^^^^^^^^^^^^^^^^^^ expected `usize`, found `Vec<u8>`
+    |            |
+    |            arguments to this function are incorrect
+    |
+    = note: expected type `usize`
+             found struct `Vec<u8>`
+note: associated function defined here
+   --> src/security/memory_protection.rs:15:12
+    |
+15  |     pub fn new(size: usize) -> Result<Self, &'static str> {
+    |            ^^^ -----------
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:132:12
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+    |         -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecureMemory`, found `Result<SecureMemory, &str>`
+    |         |
+    |         arguments to this enum variant are incorrect
+    |
+    = note: expected struct `SecureMemory`
+                 found enum `std::result::Result<SecureMemory, &'static str>`
+help: the type constructed contains `std::result::Result<SecureMemory, &'static str>` due to the type of the argument passed
+   --> src/wallet/core_wallet.rs:132:9
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+    |         ^^^--------------------------------------------^
+    |            |
+    |            this argument influences the type of `Ok`
+note: tuple variant defined here
+   --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/result.rs:552:5
+help: use the `?` operator to extract the `std::result::Result<SecureMemory, &'static str>` value, propagating a `Result::Err` value to the caller
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec())?)
+    |                                                        +
+
+error[E0599]: no method named `ecdsa` found for struct `LegacyTransaction` in the current scope
+   --> src/wallet/core_wallet.rs:184:40
+    |
+184 |         let ecdsa = legacy_transaction.ecdsa(xprv_bytes).map_err(|e| {
+    |                                        ^^^^^ method not found in `LegacyTransaction`
+    |
+   ::: /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ethereum-tx-sign-6.1.3/src/lib.rs:58:8
+    |
+58  |     fn ecdsa(&self, private_key: &[u8]) -> Result<EcdsaSig, Error> {
+    |        ----- the method is available for `LegacyTransaction` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Transaction` which provides `ecdsa` is implemented but not in scope; perhaps you want to import it
+    |
+4   + use ethereum_tx_sign::Transaction;
+    |
+
+error[E0308]: mismatched types
+  --> src/wallet/core_wallet.rs:49:41
+   |
+49 |         let entropy = SecureBytes::from(entropy_bytes);
+   |                       ----------------- ^^^^^^^^^^^^^ expected `SecureBytes`, found `Vec<u8>`
+   |                       |
+   |                       arguments to this function are incorrect
+   |
+   = note: expected struct `constant_time::SecureBytes`
+              found struct `Vec<u8>`
+note: associated function defined here
+  --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/convert/mod.rs:587:8
+help: try wrapping the expression in `security::constant_time::SecureBytes` (its field is private, but it's local to this crate and its privacy can be changed)
+   |
+49 |         let entropy = SecureBytes::from(security::constant_time::SecureBytes { data: entropy_bytes });
+   |                                         ++++++++++++++++++++++++++++++++++++++++++++               +
+
+error[E0599]: no method named `sign` found for struct `LegacyTransaction` in the current scope
+   --> src/wallet/core_wallet.rs:189:44
+    |
+189 |         let signature = legacy_transaction.sign(&ecdsa);
+    |                                            ^^^^ method not found in `LegacyTransaction`
+    |
+   ::: /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ethereum-tx-sign-6.1.3/src/lib.rs:86:8
+    |
+86  |     fn sign(&self, ecdsa: &EcdsaSig) -> Vec<u8>;
+    |        ---- the method is available for `LegacyTransaction` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Transaction` which provides `sign` is implemented but not in scope; perhaps you want to import it
+    |
+4   + use ethereum_tx_sign::Transaction;
+    |
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:234:31
+    |
+234 |             security_manager: security_manager.clone(),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+    |
+note: `SecurityManager` does not implement `Clone`, so `&SecurityManager` was cloned instead
+   --> src/wallet/core_wallet.rs:234:31
+    |
+234 |             security_manager: security_manager.clone(),
+    |                               ^^^^^^^^^^^^^^^^
+help: consider annotating `SecurityManager` with `#[derive(Clone)]`
+   --> src/security/mod.rs:33:1
+    |
+33  + #[derive(Clone)]
+34  | pub struct SecurityManager {
+    |
+
+error[E0599]: no method named `secure_rng` found for reference `&security::SecurityManager` in the current scope
+  --> src/wallet/core_wallet.rs:53:26
+   |
+53 |         security_manager.secure_rng().fill_bytes(&mut uuid_bytes);
+   |                          ^^^^^^^^^^
+   |
+help: there is a method `create_secure_rng` with a similar name
+   |
+53 |         security_manager.create_secure_rng().fill_bytes(&mut uuid_bytes);
+   |                          +++++++
+
+error[E0559]: variant `audit::AuditEvent::KeyGeneration` has no field named `operation`
+  --> src/wallet/core_wallet.rs:73:17
+   |
+73 |                 operation: "wallet_creation".to_string(),
+   |                 ^^^^^^^^^ `audit::AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `audit::AuditEvent::KeyGeneration` has no field named `key_type`
+  --> src/wallet/core_wallet.rs:74:17
+   |
+74 |                 key_type: "hd_wallet_seed".to_string(),
+   |                 ^^^^^^^^ `audit::AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `audit::AuditEvent::KeyGeneration` has no field named `duration_ms`
+  --> src/wallet/core_wallet.rs:75:17
+   |
+75 |                 duration_ms,
+   |                 ^^^^^^^^^^^ `audit::AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0559]: variant `audit::AuditEvent::KeyGeneration` has no field named `entropy_bits`
+  --> src/wallet/core_wallet.rs:76:17
+   |
+76 |                 entropy_bits: 256,
+   |                 ^^^^^^^^^^^^ `audit::AuditEvent::KeyGeneration` does not have this field
+   |
+   = note: available fields are: `algorithm`, `key_size`
+
+error[E0599]: no method named `audit_warning` found for struct `SecurityManager` in the current scope
+   --> src/wallet/core_wallet.rs:253:31
+    |
+253 |         self.security_manager.audit_warning(
+    |         ----------------------^^^^^^^^^^^^^ method not found in `SecurityManager`
+    |
+   ::: src/security/mod.rs:33:1
+    |
+33  | pub struct SecurityManager {
+    | -------------------------- method `audit_warning` not found for this struct
+
+error[E0599]: no variant named `SecurityOperation` found for enum `AuditEvent`
+   --> src/wallet/core_wallet.rs:254:25
+    |
+254 |             AuditEvent::SecurityOperation {
+    |                         ^^^^^^^^^^^^^^^^^
+    |
+   ::: src/security/audit.rs:18:1
+    |
+18  | pub enum AuditEvent {
+    | ------------------- variant `SecurityOperation` not found here
+    |
+help: there is a variant with a similar name
+    |
+254 -             AuditEvent::SecurityOperation {
+254 +             AuditEvent::SecurityViolation {
+    |
+
+error[E0599]: no variant named `SecurityOperation` found for enum `AuditEvent`
+   --> src/wallet/core_wallet.rs:287:25
+    |
+287 |             AuditEvent::SecurityOperation {
+    |                         ^^^^^^^^^^^^^^^^^
+    |
+   ::: src/security/audit.rs:18:1
+    |
+18  | pub enum AuditEvent {
+    | ------------------- variant `SecurityOperation` not found here
+    |
+help: there is a variant with a similar name
+    |
+287 -             AuditEvent::SecurityOperation {
+287 +             AuditEvent::SecurityViolation {
+    |
+
+error[E0599]: no method named `expose_secret` found for struct `constant_time::SecureBytes` in the current scope
+  --> src/wallet/core_wallet.rs:91:42
+   |
+91 |         let entropy_slice = self.entropy.expose_secret();
+   |                                          ^^^^^^^^^^^^^ method not found in `SecureBytes`
+   |
+  ::: src/security/constant_time.rs:6:1
+   |
+6  | pub struct SecureBytes {
+   | ---------------------- method `expose_secret` not found for this struct
+
+error[E0599]: no function or associated item named `parse` found for struct `Mnemonic` in the current scope
+   --> src/wallet/core_wallet.rs:329:19
+    |
+329 |         Mnemonic::parse(mnemonic, bip32::Language::English).is_ok()
+    |                   ^^^^^ function or associated item not found in `Mnemonic`
+    |
+note: if you're trying to build a new `Mnemonic` consider using one of the following associated functions:
+      Mnemonic::random
+      Mnemonic::from_entropy
+      Mnemonic::new
+   --> /Users/nicolasshuaishuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bip32-0.3.0/src/mnemonic/phrase.rs:38:5
+    |
+38  |       pub fn random(mut rng: impl RngCore + CryptoRng, language: Language) -> Self {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+45  |       pub fn from_entropy(entropy: Entropy, language: Language) -> Self {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+80  | /     pub fn new<S>(phrase: S, language: Language) -> Result<Self, Error>
+81  | |     where
+82  | |         S: AsRef<str>,
+    | |______________________^
+
+error[E0599]: no method named `expose_secret` found for struct `constant_time::SecureBytes` in the current scope
+   --> src/wallet/core_wallet.rs:107:42
+    |
+107 |         let entropy_slice = self.entropy.expose_secret();
+    |                                          ^^^^^^^^^^^^^ method not found in `SecureBytes`
+    |
+   ::: src/security/constant_time.rs:6:1
+    |
+6   | pub struct SecureBytes {
+    | ---------------------- method `expose_secret` not found for this struct
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:117:12
+    |
+117 |         Ok(SecureMemory::new(seed_bytes))
+    |         -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecureMemory`, found `Result<SecureMemory, &str>`
+    |         |
+    |         arguments to this enum variant are incorrect
+    |
+    = note: expected struct `memory_protection::SecureMemory`
+                 found enum `std::result::Result<memory_protection::SecureMemory, &'static str>`
+help: the type constructed contains `std::result::Result<memory_protection::SecureMemory, &'static str>` due to the type of the argument passed
+   --> src/wallet/core_wallet.rs:117:9
+    |
+117 |         Ok(SecureMemory::new(seed_bytes))
+    |         ^^^-----------------------------^
+    |            |
+    |            this argument influences the type of `Ok`
+note: tuple variant defined here
+   --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/result.rs:552:5
+help: use the `?` operator to extract the `std::result::Result<memory_protection::SecureMemory, &'static str>` value, propagating a `Result::Err` value to the caller
+    |
+117 |         Ok(SecureMemory::new(seed_bytes)?)
+    |                                         +
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:132:12
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+    |         -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecureMemory`, found `Result<SecureMemory, &str>`
+    |         |
+    |         arguments to this enum variant are incorrect
+    |
+    = note: expected struct `memory_protection::SecureMemory`
+                 found enum `std::result::Result<memory_protection::SecureMemory, &'static str>`
+help: the type constructed contains `std::result::Result<memory_protection::SecureMemory, &'static str>` due to the type of the argument passed
+   --> src/wallet/core_wallet.rs:132:9
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+    |         ^^^--------------------------------------------^
+    |            |
+    |            this argument influences the type of `Ok`
+note: tuple variant defined here
+   --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/result.rs:552:5
+help: use the `?` operator to extract the `std::result::Result<memory_protection::SecureMemory, &'static str>` value, propagating a `Result::Err` value to the caller
+    |
+132 |         Ok(SecureMemory::new(child_xprv_bytes.to_vec())?)
+    |                                                        +
+
+error[E0308]: mismatched types
+  --> src/wallet/wallet_manager.rs:63:31
+   |
+63 |             security_manager: security_manager.clone(),
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+   |
+note: `SecurityManager` does not implement `Clone`, so `&SecurityManager` was cloned instead
+  --> src/wallet/wallet_manager.rs:63:31
+   |
+63 |             security_manager: security_manager.clone(),
+   |                               ^^^^^^^^^^^^^^^^
+help: consider annotating `SecurityManager` with `#[derive(Clone)]`
+  --> src/security/mod.rs:33:1
+   |
+33 + #[derive(Clone)]
+34 | pub struct SecurityManager {
+   |
+
+error[E0308]: mismatched types
+  --> src/wallet/biometric_integration.rs:15:32
+   |
+15 |             _security_manager: security_manager.clone(),
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+   |
+note: `SecurityManager` does not implement `Clone`, so `&SecurityManager` was cloned instead
+  --> src/wallet/biometric_integration.rs:15:32
+   |
+15 |             _security_manager: security_manager.clone(),
+   |                                ^^^^^^^^^^^^^^^^
+help: consider annotating `SecurityManager` with `#[derive(Clone)]`
+  --> src/security/mod.rs:33:1
+   |
+33 + #[derive(Clone)]
+34 | pub struct SecurityManager {
+   |
+
+error[E0308]: mismatched types
+   --> src/wallet/core_wallet.rs:234:31
+    |
+234 |             security_manager: security_manager.clone(),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+    |
+note: `security::SecurityManager` does not implement `Clone`, so `&security::SecurityManager` was cloned instead
+   --> src/wallet/core_wallet.rs:234:31
+    |
+234 |             security_manager: security_manager.clone(),
+    |                               ^^^^^^^^^^^^^^^^
+help: consider annotating `security::SecurityManager` with `#[derive(Clone)]`
+   --> src/security/mod.rs:33:1
+    |
+33  + #[derive(Clone)]
+34  | pub struct SecurityManager {
+    |
+
+error[E0599]: no method named `audit_warning` found for struct `security::SecurityManager` in the current scope
+   --> src/wallet/core_wallet.rs:253:31
+    |
+253 |         self.security_manager.audit_warning(
+    |         ----------------------^^^^^^^^^^^^^ method not found in `SecurityManager`
+    |
+   ::: src/security/mod.rs:33:1
+    |
+33  | pub struct SecurityManager {
+    | -------------------------- method `audit_warning` not found for this struct
+
+error[E0599]: no variant named `SecurityOperation` found for enum `audit::AuditEvent`
+   --> src/wallet/core_wallet.rs:254:25
+    |
+254 |             AuditEvent::SecurityOperation {
+    |                         ^^^^^^^^^^^^^^^^^
+    |
+   ::: src/security/audit.rs:18:1
+    |
+18  | pub enum AuditEvent {
+    | ------------------- variant `SecurityOperation` not found here
+    |
+help: there is a variant with a similar name
+    |
+254 -             AuditEvent::SecurityOperation {
+254 +             AuditEvent::SecurityViolation {
+    |
+
+error[E0599]: no variant named `SecurityOperation` found for enum `audit::AuditEvent`
+   --> src/wallet/core_wallet.rs:287:25
+    |
+287 |             AuditEvent::SecurityOperation {
+    |                         ^^^^^^^^^^^^^^^^^
+    |
+   ::: src/security/audit.rs:18:1
+    |
+18  | pub enum AuditEvent {
+    | ------------------- variant `SecurityOperation` not found here
+    |
+help: there is a variant with a similar name
+    |
+287 -             AuditEvent::SecurityOperation {
+287 +             AuditEvent::SecurityViolation {
+    |
+
+error[E0308]: mismatched types
+  --> src/wallet/wallet_manager.rs:63:31
+   |
+63 |             security_manager: security_manager.clone(),
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+   |
+note: `security::SecurityManager` does not implement `Clone`, so `&security::SecurityManager` was cloned instead
+  --> src/wallet/wallet_manager.rs:63:31
+   |
+63 |             security_manager: security_manager.clone(),
+   |                               ^^^^^^^^^^^^^^^^
+help: consider annotating `security::SecurityManager` with `#[derive(Clone)]`
+  --> src/security/mod.rs:33:1
+   |
+33 + #[derive(Clone)]
+34 | pub struct SecurityManager {
+   |
+
+error[E0308]: mismatched types
+  --> src/wallet/biometric_integration.rs:15:32
+   |
+15 |             _security_manager: security_manager.clone(),
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^ expected `SecurityManager`, found `&SecurityManager`
+   |
+note: `security::SecurityManager` does not implement `Clone`, so `&security::SecurityManager` was cloned instead
+  --> src/wallet/biometric_integration.rs:15:32
+   |
+15 |             _security_manager: security_manager.clone(),
+   |                                ^^^^^^^^^^^^^^^^
+help: consider annotating `security::SecurityManager` with `#[derive(Clone)]`
+  --> src/security/mod.rs:33:1
+   |
+33 + #[derive(Clone)]
+34 | pub struct SecurityManager {
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `proto::WalletCommand`
+   --> src/proto/mod.rs:291:9
+    |
+291 |         assert_eq!(cmd, cmd_back);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         |
+    |         proto::WalletCommand
+    |         proto::WalletCommand
+    |
+note: an implementation of `PartialEq` might be missing for `proto::WalletCommand`
+   --> src/proto/mod.rs:11:1
+    |
+11  | pub enum WalletCommand {
+    | ^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+    = note: this error originates in the macro `assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `proto::WalletCommand` with `#[derive(PartialEq)]`
+    |
+11  + #[derive(PartialEq)]
+12  | pub enum WalletCommand {
+    |
+
+Some errors have detailed explanations: E0277, E0308, E0559, E0599.
+For more information about an error, try `rustc --explain E0277`.
+warning: `airaccount-core-logic` (lib) generated 5 warnings
+error: could not compile `airaccount-core-logic` (lib) due to 28 previous errors; 5 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+Some errors have detailed explanations: E0277, E0308, E0369, E0433, E0559, E0599.
+warning: `airaccount-core-logic` (lib test) generated 5 warnings (5 duplicates)
+error: could not compile `airaccount-core-logic` (lib test) due to 31 previous errors; 5 warnings emitted
