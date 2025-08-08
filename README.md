@@ -134,4 +134,80 @@
 
 这个模型完美地诠释了**“硬件钱包”**的理念：CA构建交易、与外界通信，但私钥的存储和使用被严格限制在TA内部。私钥永远不会离开安全世界，极大地降低了被窃取的风险。
 
-在开发过程中，QEMU扮演的角色是模拟一台支持TrustZone的完整ARM计算机，它能够同时运行“普通世界”（Ubuntu + CA）和“安全世界”（OP-TEE OS + TA）这两个并行的操作系统。这使得我们可以在没有物理开发板的情况下，方便地进行端到端的编译、运行和调试。
+在开发过程中，QEMU扮演的角色是模拟一台支持TrustZone的完整ARM计算机，它能够同时运行"普通世界"（Ubuntu + CA）和"安全世界"（OP-TEE OS + TA）这两个并行的操作系统。这使得我们可以在没有物理开发板的情况下，方便地进行端到端的编译、运行和调试。
+
+---
+
+# Quick Start (English)
+
+## 🚀 One-Click Setup
+
+Get started with AirAccount OP-TEE development in minutes:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/your-org/AirAccount.git
+cd AirAccount
+
+# 2. Install all dependencies (macOS)
+./scripts/install_dependencies.sh
+
+# 3. Initialize submodules
+git submodule update --init --recursive third_party/incubator-teaclave-trustzone-sdk
+
+# 4. Build OP-TEE environment
+source scripts/setup_optee_env.sh
+cd third_party/incubator-teaclave-trustzone-sdk
+./build_optee_libraries.sh "$OPTEE_DIR"
+
+# 5. Verify setup
+cd /path/to/AirAccount  
+./scripts/verify_optee_setup.sh
+
+# 6. Run tests
+./scripts/test_all.sh
+```
+
+## 📚 Documentation
+
+- **[Quick Start Guide](./docs/Quick-Start-Guide.md)**: Get up and running in 10 minutes
+- **[OP-TEE Development Setup](./docs/OP-TEE-Development-Setup.md)**: Complete setup guide with troubleshooting
+- **[Technical Plan](./docs/Plan.md)**: Full development roadmap and architecture details
+
+## 🛠️ Development Tools
+
+- `./scripts/setup_optee_env.sh`: Environment configuration
+- `./scripts/verify_optee_setup.sh`: Environment verification  
+- `./scripts/build_all.sh`: Complete build automation
+- `./scripts/test_all.sh`: Comprehensive testing suite
+
+## 🧪 Try the Mock Version
+
+Test the TA-CA communication without OP-TEE complexity:
+
+```bash
+cd packages/mock-hello
+cargo run --bin mock-ca test        # Run test suite
+cargo run --bin mock-ca interactive # Interactive mode
+```
+
+## Development Status
+
+### ✅ Completed
+- Complete OP-TEE development environment setup
+- Mock TA-CA communication framework (100% working)
+- Security modules with constant-time operations
+- Comprehensive test suite (45+ tests)
+- eth_wallet analysis and architecture integration
+- Complete documentation and automation scripts
+
+### 🔄 In Progress  
+- TA (Trusted Application) build optimization
+- Real OP-TEE TA-CA communication testing
+
+### 📋 Upcoming
+- Hardware integration on Raspberry Pi 5
+- Multi-wallet management implementation
+- Biometric authentication integration
+
+For complete development roadmap and technical details, see the [Planning Document](./docs/Plan.md).

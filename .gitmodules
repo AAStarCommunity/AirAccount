@@ -37,3 +37,6 @@
 [submodule "third_party/linux"]
 	path = third_party/linux
 	url = git@github.com:linaro-swg/linux.git
+[submodule "third_party/incubator-teaclave-trustzone-sdk"]
+	path = third_party/incubator-teaclave-trustzone-sdk
+	url = https://github.com/apache/incubator-teaclave-trustzone-sdk.git

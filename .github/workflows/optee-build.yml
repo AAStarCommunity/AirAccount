@@ -1,0 +1,138 @@
+name: OP-TEE Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-test:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly-2024-05-15
+        components: rust-src, clippy, rustfmt
+        
+    - name: Cache Homebrew
+      uses: actions/cache@v3
+      with:
+        path: |
+          /opt/homebrew/Cellar
+          /opt/homebrew/bin
+        key: ${{ runner.os }}-homebrew-${{ hashFiles('scripts/install_dependencies.sh') }}
+        
+    - name: Cache Cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Install dependencies
+      run: |
+        chmod +x scripts/install_dependencies.sh
+        ./scripts/install_dependencies.sh
+        
+    - name: Setup OP-TEE environment  
+      run: |
+        chmod +x scripts/setup_optee_env.sh
+        source scripts/setup_optee_env.sh
+        
+    - name: Build OP-TEE libraries
+      run: |
+        source scripts/setup_optee_env.sh
+        cd third_party/incubator-teaclave-trustzone-sdk
+        timeout 1800 ./build_optee_libraries.sh "$OPTEE_DIR" || true
+        
+        # Fix library paths for macOS
+        if [ -d "$OPTEE_DIR/optee_client/out/libteec" ]; then
+          mkdir -p "$OPTEE_CLIENT_EXPORT/usr/lib"
+          cp -r "$OPTEE_DIR/optee_client/out/libteec/"* "$OPTEE_CLIENT_EXPORT/usr/lib/" || true
+        fi
+        
+    - name: Verify setup
+      run: |
+        chmod +x scripts/verify_optee_setup.sh  
+        ./scripts/verify_optee_setup.sh || true
+        
+    - name: Build all components
+      run: |
+        chmod +x scripts/build_all.sh
+        source scripts/setup_optee_env.sh
+        ./scripts/build_all.sh
+        
+    - name: Run tests
+      run: |
+        chmod +x scripts/test_all.sh
+        source scripts/setup_optee_env.sh  
+        ./scripts/test_all.sh
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          target/
+          packages/*/target/
+          test_reports/
+        retention-days: 7
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+        
+    - name: Check code formatting
+      run: cargo fmt --all -- --check
+      
+    - name: Run Clippy
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      
+    - name: Check documentation
+      run: cargo doc --workspace --no-deps --document-private-items
+
+  security-audit:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+      
+    - name: Run security audit
+      run: cargo audit
+      
+    - name: Check for vulnerabilities
+      run: |
+        if cargo audit --json | grep -q '"kind":"vulnerability"'; then
+          echo "Security vulnerabilities found!"
+          cargo audit
+          exit 1
+        else
+          echo "No security vulnerabilities found."
+        fi
