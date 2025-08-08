@@ -1,15 +1,12 @@
-use optee_utee_build::*;
-use uuid::Uuid;
+use optee_utee_build::{TaConfig, RustEdition, Error};
 
-const UUID: &str = "11223344-5566-7788-99aa-bbccddeeff01"; // 稍微不同的UUID避免冲突
+const UUID: &str = "11223344-5566-7788-99aa-bbccddeeff01";
 
-fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let uuid = Uuid::parse_str(UUID)?;
-
-    optee_utee_build::ta_builder()
-        .uuid(uuid.as_bytes())
-        .single_instance()
-        .build()?;
-
-    Ok(())
+fn main() -> Result<(), Error> {
+    let config = TaConfig::new_default(
+        UUID,
+        "0.1.0",
+        "AirAccount Simple TA for testing"
+    )?;
+    optee_utee_build::build(RustEdition::Before2024, config)
 }

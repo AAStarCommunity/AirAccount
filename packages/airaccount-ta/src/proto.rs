@@ -34,69 +34,72 @@ impl From<u32> for Command {
     }
 }
 
-// Simplified structures for now - will add serialization later
-#[derive(Debug)]
+// 生产级序列化结构 - 完整的 serde 支持
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HelloWorldOutput {
     pub message: String,
     pub version: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EchoInput {
     pub message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EchoOutput {
     pub echoed_message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetVersionOutput {
     pub version: String,
     pub build_info: String,
 }
 
 // Wallet management commands (compatible with eth_wallet)
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateWalletInput {
     // Empty for now, could add entropy or other parameters
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateWalletOutput {
     pub wallet_id: uuid::Uuid,
     pub mnemonic: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RemoveWalletInput {
     pub wallet_id: uuid::Uuid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RemoveWalletOutput {
-    // Empty response
+    // Empty response - could add confirmation message
+    pub success: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeriveAddressInput {
     pub wallet_id: uuid::Uuid,
     pub hd_path: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeriveAddressOutput {
     pub address: [u8; 20],
     pub public_key: [u8; 65],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetWalletInfoInput {
     pub wallet_id: uuid::Uuid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetWalletInfoOutput {
     pub wallet_id: uuid::Uuid,
     pub created_at: u64,
@@ -104,7 +107,7 @@ pub struct GetWalletInfoOutput {
 }
 
 // Ethereum transaction structure (compatible with eth_wallet)
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EthTransaction {
     pub chain_id: u64,
     pub nonce: u128,
@@ -115,14 +118,14 @@ pub struct EthTransaction {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignTransactionInput {
     pub wallet_id: uuid::Uuid,
     pub hd_path: String,
     pub transaction: EthTransaction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignTransactionOutput {
     pub signature: Vec<u8>,
 }

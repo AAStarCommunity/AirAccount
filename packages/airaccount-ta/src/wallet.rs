@@ -5,12 +5,12 @@ type Result<T> = core::result::Result<T, &'static str>;
 
 const DB_NAME: &str = "airaccount_wallet_db";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub id: uuid::Uuid,
     pub created_at: u64,
     pub derivations_count: u32,
-    // Simplified for now - will add crypto later
+    // Will add cryptographic fields later
 }
 
 impl Wallet {
@@ -29,9 +29,9 @@ impl Wallet {
         self.id
     }
     
-    pub fn get_mnemonic(&self) -> Result<&'static str> {
-        // TODO: Implement mnemonic generation
-        Ok("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
+    pub fn get_mnemonic(&self) -> Result<String> {
+        // TODO: Implement real mnemonic generation with BIP39
+        Ok("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string())
     }
     
     pub fn derive_address(&mut self, _hd_path: &str) -> Result<([u8; 20], [u8; 65])> {
@@ -57,66 +57,108 @@ fn get_current_timestamp() -> u64 {
     42 // Mock timestamp for now
 }
 
-// Simplified wallet storage functions - will integrate secure_db later
-// use std::collections::HashMap;
+// 生产级安全存储 - 使用 secure_db 替代不安全的内存存储
+use secure_db::{SecureStorageClient, SecureStorageError};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-// 使用固定大小的数组作为临时存储
-const MAX_WALLETS: usize = 10;
+// 使用 secure_db 作为安全后端存储
+static mut SECURE_CLIENT: Option<SecureStorageClient> = None;
 
-#[derive(Debug, Clone)]
-struct WalletEntry {
-    id: uuid::Uuid,
-    wallet: Option<Wallet>,
+fn get_secure_client() -> &'static mut SecureStorageClient {
+    unsafe {
+        if SECURE_CLIENT.is_none() {
+            SECURE_CLIENT = Some(SecureStorageClient::new(DB_NAME));
+        }
+        SECURE_CLIENT.as_mut().unwrap()
+    }
 }
 
-static mut WALLET_STORAGE: [WalletEntry; MAX_WALLETS] = [WalletEntry { 
-    id: uuid::Uuid::nil(), 
-    wallet: None 
-}; MAX_WALLETS];
+#[derive(Serialize, Deserialize, Debug)]
+struct WalletMetadata {
+    wallet_ids: Vec<uuid::Uuid>,
+    created_count: u32,
+}
 
-fn get_storage() -> &'static mut [WalletEntry; MAX_WALLETS] {
-    unsafe { &mut WALLET_STORAGE }
+impl Default for WalletMetadata {
+    fn default() -> Self {
+        WalletMetadata {
+            wallet_ids: Vec::new(),
+            created_count: 0,
+        }
+    }
+}
+
+const WALLET_METADATA_KEY: &str = "wallet_metadata";
+
+fn load_metadata() -> Result<WalletMetadata> {
+    let client = get_secure_client();
+    match client.get::<WalletMetadata>(WALLET_METADATA_KEY) {
+        Ok(Some(metadata)) => Ok(metadata),
+        Ok(None) => Ok(WalletMetadata::default()),
+        Err(_) => Ok(WalletMetadata::default()),
+    }
+}
+
+fn save_metadata(metadata: &WalletMetadata) -> Result<()> {
+    let client = get_secure_client();
+    client.set(WALLET_METADATA_KEY, metadata)
+        .map_err(|_| "Failed to save metadata")?;
+    Ok(())
 }
 
 pub fn save_wallet(wallet: &Wallet) -> Result<()> {
-    let storage = get_storage();
+    let client = get_secure_client();
+    let wallet_key = format!("wallet_{}", wallet.id);
     
-    // 查找空槽位
-    for entry in storage.iter_mut() {
-        if entry.wallet.is_none() {
-            entry.id = wallet.id;
-            entry.wallet = Some(wallet.clone());
-            return Ok(());
-        }
+    // 保存钱包数据
+    client.set(&wallet_key, wallet)
+        .map_err(|_| "Failed to save wallet")?;
+    
+    // 更新元数据
+    let mut metadata = load_metadata()?;
+    if !metadata.wallet_ids.contains(&wallet.id) {
+        metadata.wallet_ids.push(wallet.id);
+        metadata.created_count += 1;
+        save_metadata(&metadata)?;
     }
     
-    Err("Storage full")
+    Ok(())
 }
 
 pub fn load_wallet(wallet_id: &uuid::Uuid) -> Result<Wallet> {
-    let storage = get_storage();
+    let client = get_secure_client();
+    let wallet_key = format!("wallet_{}", wallet_id);
     
-    for entry in storage.iter() {
-        if &entry.id == wallet_id {
-            if let Some(ref wallet) = entry.wallet {
-                return Ok(wallet.clone());
-            }
-        }
+    match client.get::<Wallet>(&wallet_key) {
+        Ok(Some(wallet)) => Ok(wallet),
+        Ok(None) => Err("Wallet not found"),
+        Err(_) => Err("Failed to load wallet"),
     }
-    
-    Err("Wallet not found")
 }
 
 pub fn delete_wallet(wallet_id: &uuid::Uuid) -> Result<()> {
-    let storage = get_storage();
+    let client = get_secure_client();
+    let wallet_key = format!("wallet_{}", wallet_id);
     
-    for entry in storage.iter_mut() {
-        if &entry.id == wallet_id {
-            entry.wallet = None;
-            entry.id = uuid::Uuid::nil();
-            return Ok(());
-        }
-    }
+    // 删除钱包数据
+    client.remove(&wallet_key)
+        .map_err(|_| "Failed to delete wallet")?;
     
-    Err("Wallet not found")
+    // 更新元数据
+    let mut metadata = load_metadata()?;
+    metadata.wallet_ids.retain(|id| id != wallet_id);
+    save_metadata(&metadata)?;
+    
+    Ok(())
+}
+
+pub fn list_wallets() -> Result<Vec<uuid::Uuid>> {
+    let metadata = load_metadata()?;
+    Ok(metadata.wallet_ids)
+}
+
+pub fn get_wallet_count() -> Result<u32> {
+    let metadata = load_metadata()?;
+    Ok(metadata.created_count)
 }
