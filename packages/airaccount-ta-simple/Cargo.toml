@@ -8,6 +8,9 @@ libc = { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/libc" }
 optee-utee-sys = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee/optee-utee-sys" }
 optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
 
+# 基础依赖
+uuid = { version = "1.8", default-features = false }
+
 [build-dependencies]
 optee-utee-build = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
 

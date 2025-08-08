@@ -4,12 +4,23 @@ use optee_teec::{Context, Operation, ParamType, Session, Uuid};
 use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
 use std::io::{self, Write};
 
-// AirAccount TA UUID - matches the one in TA's build.rs
-const AIRACCOUNT_TA_UUID: &str = "11223344-5566-7788-99aa-bbccddeeff00";
+mod wallet_test;
+
+// AirAccount Simple TA UUID - matches the one in simple TA's build.rs
+const AIRACCOUNT_TA_UUID: &str = "11223344-5566-7788-99aa-bbccddeeff01";
 
 // Command constants - matches the TA implementation  
 const CMD_HELLO_WORLD: u32 = 0;
 const CMD_ECHO: u32 = 1;
+const CMD_GET_VERSION: u32 = 2;
+
+// Wallet commands (10-15)
+const CMD_CREATE_WALLET: u32 = 10;
+const CMD_REMOVE_WALLET: u32 = 11;
+const CMD_DERIVE_ADDRESS: u32 = 12;
+const CMD_SIGN_TRANSACTION: u32 = 13;
+const CMD_GET_WALLET_INFO: u32 = 14;
+const CMD_LIST_WALLETS: u32 = 15;
 
 struct AirAccountClient {
     _context: Context,
@@ -244,7 +255,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("command")
                 .help("Command to execute")
-                .value_parser(["hello", "echo", "test", "interactive"])
+                .value_parser(["hello", "echo", "test", "interactive", "wallet"])
                 .index(1),
         )
         .arg(
@@ -270,11 +281,15 @@ fn main() -> Result<()> {
         Some("test") => {
             run_test_suite()?;
         }
+        Some("wallet") => {
+            println!("🏦 Running wallet functionality tests...");
+            wallet_test::test_wallet_functionality()?;
+        }
         Some("interactive") | None => {
             run_interactive_mode()?;
         }
         _ => {
-            println!("❌ Unknown command. Use: hello, echo <message>, test, or interactive");
+            println!("❌ Unknown command. Use: hello, echo <message>, test, wallet, or interactive");
         }
     }
     
