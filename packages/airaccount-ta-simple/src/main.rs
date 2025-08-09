@@ -471,7 +471,7 @@ mod basic_crypto {
     pub fn generate_mnemonic() -> Result<String, &'static str> {
         // 使用安全内存存储熵
         let security_manager = get_security_manager();
-        let mut secure_entropy = security_manager.lock().create_secure_memory(16)
+        let mut secure_entropy = security_manager.create_secure_memory(16)
             .map_err(|_| "Failed to allocate secure memory for entropy")?;
         
         let _random_result = Random::generate(secure_entropy.as_mut_slice() as _);
@@ -501,7 +501,7 @@ mod basic_crypto {
     pub fn derive_private_key(seed: &[u8; 64], derivation_index: u32) -> [u8; 32] {
         // 使用安全内存处理敏感数据
         let security_manager = get_security_manager();
-        if let Ok(mut secure_input) = security_manager.lock().create_secure_memory(seed.len() + 4) {
+        if let Ok(mut secure_input) = security_manager.create_secure_memory(seed.len() + 4) {
             // 在安全内存中组装输入数据
             secure_input.as_mut_slice()[..seed.len()].copy_from_slice(seed);
             secure_input.as_mut_slice()[seed.len()..].copy_from_slice(&derivation_index.to_le_bytes());
@@ -625,8 +625,9 @@ mod wallet_storage {
     
     const MAX_WALLETS: usize = 10;
     
-    // 线程安全的钱包存储 - P0安全修复
-    static WALLET_STORAGE: spin::Once<spin::Mutex<WalletStorage>> = spin::Once::new();
+    // OP-TEE环境下的安全存储 - P0安全修复
+    // 注意：OP-TEE TA 通常是单线程运行，所以我们使用简化的安全存储
+    static mut WALLET_STORAGE: Option<WalletStorage> = None;
     
     struct WalletStorage {
         wallets: Vec<Option<Wallet>>,
@@ -644,17 +645,21 @@ mod wallet_storage {
         }
     }
     
-    fn get_wallet_storage() -> &'static spin::Mutex<WalletStorage> {
-        WALLET_STORAGE.call_once(|| spin::Mutex::new(WalletStorage::new()))
+    fn get_wallet_storage() -> &'static mut WalletStorage {
+        unsafe {
+            if WALLET_STORAGE.is_none() {
+                WALLET_STORAGE = Some(WalletStorage::new());
+            }
+            WALLET_STORAGE.as_mut().unwrap()
+        }
     }
     
     pub fn create_wallet() -> Option<WalletId> {
         let storage = get_wallet_storage();
-        let mut guard = storage.lock();
         
-        if let Some(slot) = guard.wallets.iter_mut().find(|w| w.is_none()) {
-            let id = guard.next_wallet_id;
-            guard.next_wallet_id += 1;
+        if let Some(slot) = storage.wallets.iter_mut().find(|w| w.is_none()) {
+            let id = storage.next_wallet_id;
+            storage.next_wallet_id += 1;
             let wallet = Wallet::new(id);
             let wallet_id = wallet.id;
             *slot = Some(wallet);
@@ -669,9 +674,8 @@ mod wallet_storage {
         F: FnOnce(&Wallet) -> T,
     {
         let storage = get_wallet_storage();
-        let guard = storage.lock();
         
-        guard.wallets.iter()
+        storage.wallets.iter()
             .find_map(|w| w.as_ref().filter(|wallet| wallet.id.0 == id.0))
             .map(f)
     }
@@ -681,9 +685,8 @@ mod wallet_storage {
         F: FnOnce(&mut Wallet) -> T,
     {
         let storage = get_wallet_storage();
-        let mut guard = storage.lock();
         
-        guard.wallets.iter_mut()
+        storage.wallets.iter_mut()
             .find_map(|w| w.as_mut().filter(|wallet| wallet.id.0 == id.0))
             .map(f)
     }
@@ -699,9 +702,7 @@ mod wallet_storage {
     
     pub fn remove_wallet(id: WalletId) -> bool {
         let storage = get_wallet_storage();
-        let mut guard = storage.lock();
-        
-        if let Some(slot) = guard.wallets.iter_mut()
+        if let Some(slot) = storage.wallets.iter_mut()
             .find(|w| w.as_ref().map_or(false, |wallet| wallet.id.0 == id.0)) {
             *slot = None;
             true
@@ -715,9 +716,7 @@ mod wallet_storage {
         let mut count = 0;
         
         let storage = get_wallet_storage();
-        let guard = storage.lock();
-        
-        for (i, wallet_opt) in guard.wallets.iter().enumerate() {
+        for (i, wallet_opt) in storage.wallets.iter().enumerate() {
             if let Some(wallet) = wallet_opt {
                 ids[i] = Some(wallet.id);
                 count += 1;
@@ -729,15 +728,20 @@ mod wallet_storage {
 }
 
 use wallet::WalletId;
-use wallet_storage::{create_wallet, get_wallet, get_wallet_mut, remove_wallet, list_wallets};
+use wallet_storage::{create_wallet, get_wallet, with_wallet_mut, remove_wallet, list_wallets};
 use security::SecurityManager;
 use security::audit::AuditEvent;
 
-// 线程安全的全局安全管理器 - P0安全修复
-static SECURITY_MANAGER_STORAGE: spin::Once<spin::Mutex<SecurityManager>> = spin::Once::new();
+// 线程安全的全局安全管理器 - P0安全修复 (OP-TEE单线程环境)
+static mut SECURITY_MANAGER: Option<SecurityManager> = None;
 
-fn get_security_manager() -> &'static spin::Mutex<SecurityManager> {
-    SECURITY_MANAGER_STORAGE.call_once(|| spin::Mutex::new(SecurityManager::default()))
+fn get_security_manager() -> &'static mut SecurityManager {
+    unsafe {
+        if SECURITY_MANAGER.is_none() {
+            SECURITY_MANAGER = Some(SecurityManager::default());
+        }
+        SECURITY_MANAGER.as_mut().unwrap()
+    }
 }
 
 #[ta_create]
@@ -748,7 +752,7 @@ fn create() -> optee_utee::Result<()> {
     let security_manager = get_security_manager();
     
     // 审计 TA 创建事件
-    security_manager.lock().audit_info(
+    security_manager.audit_info(
         AuditEvent::TEEOperation {
             operation: "ta_create".to_string(),
             duration_ms: 0,
@@ -806,7 +810,7 @@ mod input_validation {
         InvalidParameterCount,
     }
     
-    pub fn validate_command_parameters(cmd_id: u32, params: &Parameters) -> Result<(), ValidationError> {
+    pub fn validate_command_parameters(cmd_id: u32, params: &mut Parameters) -> Result<(), ValidationError> {
         // 1. 验证命令ID范围
         if cmd_id > MAX_COMMAND_ID {
             return Err(ValidationError::InvalidCommand);
@@ -822,13 +826,13 @@ mod input_validation {
         }
         
         // 3. 验证参数缓冲区大小
-        if let Ok(p0) = unsafe { params.0.as_memref() } {
+        if let Ok(mut p0) = unsafe { params.0.as_memref() } {
             if p0.buffer().len() > MAX_BUFFER_SIZE {
                 return Err(ValidationError::BufferTooLarge);
             }
         }
         
-        if let Ok(p1) = unsafe { params.1.as_memref() } {
+        if let Ok(mut p1) = unsafe { params.1.as_memref() } {
             if p1.buffer().len() > MAX_BUFFER_SIZE {
                 return Err(ValidationError::BufferTooLarge);
             }
@@ -838,7 +842,7 @@ mod input_validation {
         match cmd_id {
             CMD_ECHO => {
                 // Echo命令需要输入和输出缓冲区
-                if let (Ok(p0), Ok(p1)) = (unsafe { params.0.as_memref() }, unsafe { params.1.as_memref() }) {
+                if let (Ok(mut p0), Ok(mut p1)) = (unsafe { params.0.as_memref() }, unsafe { params.1.as_memref() }) {
                     if p0.buffer().is_empty() || p1.buffer().is_empty() {
                         return Err(ValidationError::BufferTooSmall);
                     }
@@ -848,7 +852,7 @@ mod input_validation {
             }
             CMD_REMOVE_WALLET | CMD_DERIVE_ADDRESS | CMD_SIGN_TRANSACTION | CMD_GET_WALLET_INFO => {
                 // 这些命令需要输入参数
-                if let Ok(p0) = unsafe { params.0.as_memref() } {
+                if let Ok(mut p0) = unsafe { params.0.as_memref() } {
                     if p0.buffer().len() < MIN_BUFFER_SIZE {
                         return Err(ValidationError::BufferTooSmall);
                     }
@@ -972,7 +976,7 @@ fn handle_create_wallet(output_buffer: &mut [u8]) -> Result<usize, &'static str>
     match create_wallet() {
         Some(wallet_id) => {
             // 审计钱包创建事件
-            get_security_manager().lock().audit_security_event(
+            get_security_manager().audit_security_event(
                 AuditEvent::WalletCreated { wallet_id: wallet_id.0 },
                 "wallet_manager"
             );
@@ -990,7 +994,7 @@ fn handle_create_wallet(output_buffer: &mut [u8]) -> Result<usize, &'static str>
         }
         None => {
             // 审计钱包创建失败事件
-            get_security_manager().lock().audit_security_event(
+            get_security_manager().audit_security_event(
                 AuditEvent::SecurityViolation {
                     violation_type: "wallet_storage_full".to_string(),
                     details: "Unable to create wallet: storage limit reached".to_string(),
@@ -1025,10 +1029,13 @@ fn handle_derive_address(input_buffer: &[u8], output_buffer: &mut [u8]) -> Resul
     let wallet_id = parse_u32_from_buffer(input_buffer)?;
     trace_println!("[+] Deriving address for wallet ID: {}", wallet_id);
     
-    if let Some(wallet) = get_wallet_mut(WalletId(wallet_id)) {
+    // 使用with_wallet_mut来直接操作钱包
+    if let Some((address, derivation_index)) = with_wallet_mut(WalletId(wallet_id), |wallet| {
         let hd_path = "m/44'/60'/0'/0/0"; // 默认以太坊路径
         let derivation_index = wallet.derivations_count + 1; // 下一个派生索引
         let (address, _public_key) = wallet.derive_address(hd_path);
+        (address, wallet.derivations_count) // 返回更新后的derivations_count
+    }) {
         
         // 审计地址派生事件
         get_security_manager().audit_security_event(
@@ -1314,7 +1321,7 @@ fn handle_test_security(output_buffer: &mut [u8]) -> Result<usize, &'static str>
     
     // 测试安全内存分配
     let security_manager = get_security_manager();
-    let test_results = match security_manager.lock().create_secure_memory(1024) {
+    let test_results = match security_manager.create_secure_memory(1024) {
         Ok(mut secure_mem) => {
             // 测试安全内存写入和读取
             secure_mem.as_mut_slice()[0] = 0xAB;

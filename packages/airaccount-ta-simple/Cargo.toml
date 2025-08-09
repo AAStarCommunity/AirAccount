@@ -10,7 +10,7 @@ optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-
 
 # 基础依赖
 uuid = { version = "1.8", default-features = false }
-spin = { version = "0.9", default-features = false }
+# spin = { version = "0.9", default-features = false, features = ["mutex"] }
 
 [build-dependencies]
 optee-utee-build = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
