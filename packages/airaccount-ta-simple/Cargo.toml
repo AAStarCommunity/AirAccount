@@ -10,10 +10,16 @@ optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-
 
 # 基础依赖
 uuid = { version = "1.8", default-features = false }
+spin = { version = "0.9", default-features = false }
 
 [build-dependencies]
 optee-utee-build = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
 
+[[bin]]
+name = "ta"
+path = "src/main.rs"
+
 [profile.release]
 lto = false
 opt-level = 3
+panic = "abort"
