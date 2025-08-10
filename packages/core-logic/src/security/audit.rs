@@ -338,7 +338,7 @@ pub fn audit_log(level: AuditLevel, event: AuditEvent, component: &str) {
 #[macro_export]
 macro_rules! audit_info {
     ($event:expr, $component:expr) => {
-        crate::security::audit::audit_log(
+        $crate::security::audit::audit_log(
             crate::security::audit::AuditLevel::Info,
             $event,
             $component
@@ -349,7 +349,7 @@ macro_rules! audit_info {
 #[macro_export]
 macro_rules! audit_security {
     ($event:expr, $component:expr) => {
-        crate::security::audit::audit_log(
+        $crate::security::audit::audit_log(
             crate::security::audit::AuditLevel::Security,
             $event,
             $component

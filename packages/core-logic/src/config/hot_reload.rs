@@ -246,8 +246,8 @@ impl Drop for HotReloadHandler {
 
 /// File watcher for monitoring configuration changes
 struct FileWatcher {
-    path: PathBuf,
-    last_modified: Option<std::time::SystemTime>,
+    _path: PathBuf,
+    _last_modified: Option<std::time::SystemTime>,
     _debounce_duration: Duration,
 }
 
@@ -263,35 +263,35 @@ impl FileWatcher {
         };
         
         Ok(Self {
-            path,
-            last_modified,
+            _path: path,
+            _last_modified: last_modified,
             _debounce_duration: Duration::from_millis(debounce_ms),
         })
     }
     
     /// Check if file has been modified
-    fn check_modified(&mut self) -> SecurityResult<bool> {
-        if !self.path.exists() {
+    fn _check_modified(&mut self) -> SecurityResult<bool> {
+        if !self._path.exists() {
             return Ok(false);
         }
         
-        let current_modified = std::fs::metadata(&self.path)
+        let current_modified = std::fs::metadata(&self._path)
             .and_then(|m| m.modified())
             .map_err(|e| SecurityError::config_error(
                 ConfigErrorKind::ParsingFailed,
                 "file_metadata",
-                Some(self.path.display().to_string()),
+                Some(self._path.display().to_string()),
                 Some(e.to_string()),
                 "file_watcher"
             ))?;
         
-        let is_modified = match self.last_modified {
+        let is_modified = match self._last_modified {
             Some(last) => current_modified > last,
             None => true,
         };
         
         if is_modified {
-            self.last_modified = Some(current_modified);
+            self._last_modified = Some(current_modified);
         }
         
         Ok(is_modified)
@@ -299,7 +299,7 @@ impl FileWatcher {
     
     /// Get file path
     fn _path(&self) -> &Path {
-        &self.path
+        &self._path
     }
 }
 
@@ -419,17 +419,17 @@ mod tests {
         let mut watcher = FileWatcher::new(path.clone(), 100).unwrap();
         
         // Initial check should return false (no change)
-        assert!(!watcher.check_modified().unwrap());
+        assert!(!watcher._check_modified().unwrap());
         
         // Modify file
         writeln!(temp_file, "test content").unwrap();
         temp_file.flush().unwrap();
         
         // Should detect modification
-        assert!(watcher.check_modified().unwrap());
+        assert!(watcher._check_modified().unwrap());
         
         // Second check should return false (no new change)
-        assert!(!watcher.check_modified().unwrap());
+        assert!(!watcher._check_modified().unwrap());
     }
     
     #[test]

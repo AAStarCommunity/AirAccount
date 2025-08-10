@@ -79,7 +79,7 @@ impl WalletManager {
         
         self.user_bindings
             .entry(binding.user_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(binding);
             
         Ok(())
@@ -89,7 +89,7 @@ impl WalletManager {
     pub async fn load_wallet(&self, wallet_id: &Uuid) -> WalletResult<AirAccountWallet> {
         let core = self.wallet_storage
             .get(wallet_id)
-            .ok_or_else(|| WalletError::WalletNotFound(*wallet_id))?;
+            .ok_or(WalletError::WalletNotFound(*wallet_id))?;
             
         Ok(AirAccountWallet::from_core(core.clone(), self.security_manager.clone()))
     }
