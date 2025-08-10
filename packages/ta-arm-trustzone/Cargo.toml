@@ -1,0 +1,25 @@
+[package]
+name = "airaccount-ta"
+version = "0.1.0"
+edition = "2021"
+authors = ["AirAccount Team"]
+description = "AirAccount Trusted Application for ARM TrustZone"
+license = "MIT"
+
+[dependencies]
+# OP-TEE SDK  
+optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
+optee-utee-sys = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee/optee-utee-sys" }
+libc = { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/libc" }
+
+uuid = { version = "1.8", default-features = false }
+hex = { version = "0.4", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+
+[build-dependencies]
+uuid = { version = "1.8", default-features = false }
+optee-utee-build = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
+
+[profile.release]
+lto = false
+opt-level = 3

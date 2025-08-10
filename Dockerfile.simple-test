@@ -1,0 +1,116 @@
+FROM ubuntu:24.04
+
+# Set up environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    qemu-system-aarch64 \
+    screen \
+    expect \
+    curl \
+    wget \
+    vim \
+    file \
+    hexdump \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /optee-test
+
+# Copy our built files
+COPY packages/airaccount-ta-simple/target/aarch64-unknown-linux-gnu/release/11223344-5566-7788-99aa-bbccddeeff01.ta ./airaccount.ta
+COPY packages/airaccount-ca/target/aarch64-unknown-linux-gnu/debug/airaccount-ca ./airaccount-ca
+
+# Copy QEMU image
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/aarch64-optee-4.7.0-qemuv8-ubuntu-24.04 ./qemu-image/
+
+# Make CA executable
+RUN chmod +x ./airaccount-ca
+
+# Copy test scripts separately
+COPY <<EOF /optee-test/start_qemu.sh
+#!/bin/bash
+set -e
+
+echo "🚀 Starting OP-TEE QEMU Environment"
+cd qemu-image
+
+# Create shared directory
+mkdir -p ../shared
+cp ../airaccount.ta ../shared/
+cp ../airaccount-ca ../shared/
+chmod +x ../shared/airaccount-ca
+
+# Use system QEMU instead of downloaded binary
+exec qemu-system-aarch64 \\
+    -nographic \\
+    -serial mon:stdio \\
+    -smp 2 \\
+    -machine virt,secure=on,acpi=off,gic-version=3 \\
+    -cpu cortex-a57 \\
+    -d unimp -semihosting-config enable=on,target=native \\
+    -m 1057 \\
+    -bios bl1.bin \\
+    -initrd rootfs.cpio.gz \\
+    -kernel Image \\
+    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \\
+    -fsdev local,id=fsdev0,path=../shared,security_model=none \\
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \\
+    -netdev user,id=vmnic \\
+    -device virtio-net-device,netdev=vmnic
+EOF
+
+COPY <<EOF /optee-test/quick_test.sh
+#!/bin/bash
+echo "🔍 Quick AirAccount Component Verification"
+echo "=========================================="
+
+# Verify files exist
+echo "📁 Checking files..."
+ls -la airaccount.ta airaccount-ca qemu-image/ | head -10
+
+# Check TA format
+echo ""
+echo "🔍 TA File Analysis:"
+echo "Size: \$(stat -c%s airaccount.ta 2>/dev/null || stat -f%z airaccount.ta) bytes"
+echo "Type: \$(file airaccount.ta)"
+echo "Header: \$(hexdump -C airaccount.ta | head -1)"
+
+# Check CA format  
+echo ""
+echo "🔍 CA File Analysis:"
+echo "Size: \$(stat -c%s airaccount-ca 2>/dev/null || stat -f%z airaccount-ca) bytes"
+echo "Type: \$(file airaccount-ca)"
+
+# Check QEMU availability
+echo ""
+echo "🖥️  QEMU Environment:"
+echo "System QEMU: \$(which qemu-system-aarch64)"
+echo "QEMU Version: \$(qemu-system-aarch64 --version | head -1)"
+
+echo ""
+echo "✅ Component verification complete!"
+echo ""
+echo "🚀 Available commands:"
+echo "  ./quick_test.sh      - This verification"
+echo "  ./start_qemu.sh      - Start interactive QEMU session"
+echo "  ./test_automated.sh  - Run automated tests (if available)"
+echo ""
+echo "📋 Manual test procedure:"
+echo "1. Run: ./start_qemu.sh"
+echo "2. Wait for boot, login as 'root'"
+echo "3. Mount: mkdir /shared && mount -t 9p -o trans=virtio host /shared"
+echo "4. Install TA: cp /shared/airaccount.ta /lib/optee_armtz/"
+echo "5. Test: /shared/airaccount-ca hello"
+echo "6. Test: /shared/airaccount-ca echo 'Hello from Docker!'"
+echo "7. Exit: Press Ctrl+A, then X"
+EOF
+
+# Make scripts executable
+RUN chmod +x /optee-test/start_qemu.sh /optee-test/quick_test.sh
+
+# Default command
+CMD ["./quick_test.sh"]

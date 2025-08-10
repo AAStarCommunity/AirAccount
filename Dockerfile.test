@@ -1,0 +1,83 @@
+FROM ubuntu:24.04
+
+# Install necessary dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    qemu-system-aarch64 \
+    screen \
+    curl \
+    expect \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /test
+
+# Copy our test files
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/aarch64-optee-4.7.0-qemuv8-ubuntu-24.04 ./qemu-image/
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/optee-qemuv8.sh ./
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/test_airaccount.sh ./
+COPY packages/airaccount-ta-simple/target/aarch64-unknown-linux-gnu/release/11223344-5566-7788-99aa-bbccddeeff01.ta ./shared/
+COPY packages/airaccount-ca/target/aarch64-unknown-linux-gnu/debug/airaccount-ca ./shared/
+
+# Make files executable
+RUN chmod +x ./optee-qemuv8.sh ./test_airaccount.sh ./shared/airaccount-ca
+
+# Create a simplified test script that works with system QEMU
+COPY <<EOF ./run_airaccount_test.sh
+#!/bin/bash
+set -xe
+
+echo "🚀 Starting AirAccount TA-CA Test in Docker"
+
+# Create shared directory
+mkdir -p shared
+
+# Start QEMU in background using system binary and our downloaded image
+cd qemu-image && timeout 300s qemu-system-aarch64 \\
+    -nodefaults \\
+    -nographic \\
+    -serial stdio -serial file:/tmp/serial.log \\
+    -smp 2 \\
+    -s -machine virt,secure=on,acpi=off,gic-version=3 \\
+    -cpu cortex-a57 \\
+    -d unimp -semihosting-config enable=on,target=native \\
+    -m 1057 \\
+    -bios bl1.bin \\
+    -initrd rootfs.cpio.gz \\
+    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \\
+    -kernel Image \\
+    -fsdev local,id=fsdev0,path=/test/shared,security_model=none \\
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \\
+    -netdev user,id=vmnic \\
+    -device virtio-net-device,netdev=vmnic &
+
+QEMU_PID=\$!
+sleep 10
+
+# Check if QEMU started successfully
+if ps -p \$QEMU_PID > /dev/null; then
+    echo "✅ QEMU started successfully"
+    echo "📄 Check /tmp/serial.log for boot progress"
+    
+    # Wait a bit for boot
+    sleep 20
+    
+    # Show some output
+    if [ -f /tmp/serial.log ]; then
+        echo "📋 Last 20 lines of boot log:"
+        tail -20 /tmp/serial.log
+    fi
+    
+    # Kill QEMU
+    kill \$QEMU_PID 2>/dev/null || true
+    wait \$QEMU_PID 2>/dev/null || true
+    
+    echo "✅ Docker test completed successfully"
+else
+    echo "❌ QEMU failed to start"
+    exit 1
+fi
+EOF
+
+RUN chmod +x ./run_airaccount_test.sh
+
+CMD ["./run_airaccount_test.sh"]

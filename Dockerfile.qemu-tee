@@ -1,0 +1,108 @@
+# Licensed to AirAccount under the Apache License, Version 2.0
+# QEMU-based OP-TEE环境用于真实TEE开发
+
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/bin:$PATH"
+
+# 安装必要工具
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    python3 \
+    python3-pip \
+    curl \
+    wget \
+    cmake \
+    libssl-dev \
+    pkg-config \
+    gcc-aarch64-linux-gnu \
+    qemu-system-arm \
+    device-tree-compiler \
+    bison \
+    flex \
+    bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Rust工具链
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:$PATH"
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# 工作目录
+WORKDIR /workspace
+
+# 复制源码
+COPY . .
+
+# 构建OP-TEE环境
+RUN cd third_party/build && \
+    make -j$(nproc) toolchains && \
+    make -j$(nproc) -f qemu_v8.mk all
+
+# 创建启动脚本
+RUN cat > /start_qemu.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "🚀 启动QEMU OP-TEE环境"
+echo "===================="
+
+cd /workspace/third_party/build
+
+# 检查是否需要构建example
+if [[ ! -d "../optee_examples" ]]; then
+    echo "📦 构建OP-TEE examples..."
+    make -f qemu_v8.mk ta-examples
+fi
+
+echo "🖥️  启动QEMU (ARMv8 + OP-TEE)..."
+echo "   用户: root (无密码)"
+echo "   TEE环境: OP-TEE OS"
+echo "   退出: Ctrl+A, X"
+
+# 启动QEMU
+make -f qemu_v8.mk run
+EOF
+
+RUN chmod +x /start_qemu.sh
+
+# 创建CA构建脚本(在QEMU内使用)
+RUN mkdir -p /workspace/shared && cat > /workspace/shared/build_ca_in_qemu.sh << 'EOF'
+#!/bin/bash
+# 在QEMU内部运行的CA构建脚本
+
+set -e
+cd /root
+
+echo "🔨 在TEE环境中构建AirAccount CA"
+echo "============================="
+
+# 安装Rust (如果需要)
+if ! command -v cargo &> /dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source ~/.cargo/env
+    rustup target add aarch64-unknown-linux-gnu
+fi
+
+# 构建CA
+if [[ -d "/mnt/airaccount-ca" ]]; then
+    cd /mnt/airaccount-ca
+    
+    # 使用真实TEE模式构建
+    export OPTEE_CLIENT_EXPORT="/usr"
+    cargo build --release --features real_tee
+    
+    echo "✅ CA构建成功!"
+    echo "🧪 运行集成测试..."
+    ./target/release/airaccount-ca test --verbose
+else
+    echo "❌ CA源码未找到，请挂载到/mnt/airaccount-ca"
+fi
+EOF
+
+RUN chmod +x /workspace/shared/build_ca_in_qemu.sh
+
+EXPOSE 54321
+CMD ["/start_qemu.sh"]

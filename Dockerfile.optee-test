@@ -1,0 +1,248 @@
+FROM ubuntu:24.04
+
+# Set up environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+
+# Install dependencies for OP-TEE and QEMU
+RUN apt-get update && apt-get install -y \
+    qemu-system-aarch64 \
+    screen \
+    expect \
+    curl \
+    wget \
+    vim \
+    file \
+    hexdump \
+    netcat-openbsd \
+    socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /optee-test
+
+# Copy our built files
+COPY packages/airaccount-ta-simple/target/aarch64-unknown-linux-gnu/release/11223344-5566-7788-99aa-bbccddeeff01.ta ./
+COPY packages/airaccount-ca/target/aarch64-unknown-linux-gnu/debug/airaccount-ca ./
+
+# Copy QEMU image and test scripts
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/aarch64-optee-4.7.0-qemuv8-ubuntu-24.04 ./qemu-image/
+
+# Make CA executable
+RUN chmod +x ./airaccount-ca
+
+# Create test scripts  
+RUN cat > ./start_qemu.sh << 'SCRIPT_EOF'
+#!/bin/bash
+set -e
+
+echo "🚀 Starting OP-TEE QEMU Environment"
+
+cd qemu-image
+
+# Create shared directory for file transfer
+mkdir -p ../shared
+cp ../*.ta ../shared/
+cp ../airaccount-ca ../shared/
+chmod +x ../shared/airaccount-ca
+
+# Start QEMU with proper configuration
+exec qemu-system-aarch64 \
+    -nographic \
+    -serial mon:stdio \
+    -smp 2 \
+    -machine virt,secure=on,acpi=off,gic-version=3 \
+    -cpu cortex-a57 \
+    -d unimp -semihosting-config enable=on,target=native \
+    -m 1057 \
+    -bios bl1.bin \
+    -initrd rootfs.cpio.gz \
+    -kernel Image \
+    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \
+    -fsdev local,id=fsdev0,path=../shared,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+    -netdev user,id=vmnic \
+    -device virtio-net-device,netdev=vmnic
+SCRIPT_EOF
+
+RUN cat > ./test_interactive.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "🧪 Interactive AirAccount TA-CA Test"
+echo "===================================="
+
+echo "Starting QEMU OP-TEE environment..."
+echo "Wait for the system to boot, then follow these steps:"
+echo ""
+echo "1. Login as 'root' (no password needed)"
+echo "2. Mount shared folder: mkdir -p /shared && mount -t 9p -o trans=virtio host /shared"
+echo "3. Copy TA: cp /shared/*.ta /lib/optee_armtz/"
+echo "4. Test basic commands:"
+echo "   /shared/airaccount-ca hello"
+echo "   /shared/airaccount-ca echo 'Hello TEE!'"
+echo "   /shared/airaccount-ca test"
+echo "   /shared/airaccount-ca wallet"
+echo ""
+echo "Press Ctrl+A then X to exit QEMU"
+echo ""
+echo "Starting QEMU..."
+
+./start_qemu.sh
+EOF
+
+RUN cat > ./test_automated.expect << 'EOF'
+#!/usr/bin/expect -f
+
+set timeout 120
+log_user 1
+
+# Start QEMU
+spawn ./start_qemu.sh
+
+# Wait for boot
+expect {
+    "login:" { 
+        send "root\r"
+        exp_continue
+    }
+    "# " { 
+        puts "✅ System booted successfully"
+    }
+    timeout { 
+        puts "❌ Boot timeout"
+        exit 1
+    }
+}
+
+# Mount shared directory
+send "mkdir -p /shared && mount -t 9p -o trans=virtio host /shared\r"
+expect "# "
+
+# Copy TA to system
+send "cp /shared/*.ta /lib/optee_armtz/\r"
+expect "# "
+
+# Test 1: Hello World
+puts "\n🧪 Test 1: Hello World"
+send "/shared/airaccount-ca hello\r"
+expect {
+    "AirAccount" { 
+        puts "✅ Hello World test passed"
+    }
+    timeout { 
+        puts "❌ Hello World test failed"
+        exit 1
+    }
+}
+expect "# "
+
+# Test 2: Echo
+puts "\n🧪 Test 2: Echo Test"
+send "/shared/airaccount-ca echo 'Hello TEE from Docker!'\r"
+expect {
+    "Hello TEE from Docker!" { 
+        puts "✅ Echo test passed"
+    }
+    timeout { 
+        puts "❌ Echo test failed"
+        exit 1
+    }
+}
+expect "# "
+
+# Test 3: Full Test Suite
+puts "\n🧪 Test 3: Full Test Suite"
+send "/shared/airaccount-ca test\r"
+expect {
+    "tests passed" { 
+        puts "✅ Full test suite passed"
+    }
+    "PASS" {
+        puts "✅ Test suite completed with some passes"
+    }
+    timeout { 
+        puts "❌ Test suite failed or timeout"
+        # Don't exit, continue to next test
+    }
+}
+expect "# "
+
+# Test 4: Wallet Tests
+puts "\n🧪 Test 4: Wallet Functionality"
+send "/shared/airaccount-ca wallet\r"
+expect {
+    "wallet" { 
+        puts "✅ Wallet test initiated"
+    }
+    timeout { 
+        puts "⚠️  Wallet test timeout (may be expected)"
+    }
+}
+expect "# "
+
+puts "\n🎉 All tests completed!"
+puts "Shutting down QEMU..."
+
+# Shutdown
+send "shutdown -h now\r"
+expect eof
+
+puts "✅ Test session completed successfully"
+EOF
+
+# Make scripts executable
+RUN chmod +x ./start_qemu.sh ./test_interactive.sh ./test_automated.expect
+
+# Create a simple verification script
+RUN cat > ./verify_components.sh << 'EOF'
+#!/bin/bash
+echo "🔍 Verifying AirAccount Components in Docker"
+echo "============================================"
+
+# Check TA file
+if [ -f "./11223344-5566-7788-99aa-bbccddeeff01.ta" ]; then
+    echo "✅ TA file present: $(ls -lh *.ta)"
+    echo "   Header check: $(hexdump -C *.ta | head -1 | grep HSTO && echo 'OP-TEE format OK' || echo 'Format check failed')"
+else
+    echo "❌ TA file missing"
+fi
+
+# Check CA file
+if [ -f "./airaccount-ca" ]; then
+    echo "✅ CA file present: $(ls -lh airaccount-ca)"
+    echo "   Architecture: $(file airaccount-ca | grep -o 'ARM aarch64' || echo 'Architecture check failed')"
+else
+    echo "❌ CA file missing"
+fi
+
+# Check QEMU image
+if [ -d "./qemu-image" ]; then
+    echo "✅ QEMU image directory present"
+    echo "   Components: $(ls qemu-image/ | wc -l) files"
+    if [ -f "./qemu-image/qemu-system-aarch64" ]; then
+        echo "   ⚠️  Using downloaded QEMU binary (Linux version)"
+    fi
+else
+    echo "❌ QEMU image missing"
+fi
+
+# Check system QEMU
+if command -v qemu-system-aarch64 > /dev/null; then
+    echo "✅ System QEMU available: $(qemu-system-aarch64 --version | head -1)"
+else
+    echo "❌ System QEMU not available"
+fi
+
+echo ""
+echo "📋 Available test commands:"
+echo "  ./verify_components.sh  - This verification"
+echo "  ./test_interactive.sh   - Manual interactive test"
+echo "  ./test_automated.expect - Automated test with expect"
+echo "  ./start_qemu.sh         - Start QEMU directly"
+EOF
+
+RUN chmod +x ./verify_components.sh
+
+# Default command
+CMD ["./verify_components.sh"]

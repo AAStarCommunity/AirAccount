@@ -1,0 +1,19 @@
+[package]
+name = "airaccount-proto"
+version = "0.1.0"
+edition = "2021"
+authors = ["AirAccount Team"]
+description = "Protocol definitions for AirAccount TA-CA communication"
+license = "MIT"
+
+[dependencies]
+# Serialization - no_std compatible
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+# UUID support
+uuid = { version = "1.8", default-features = false, features = ["v4", "serde"] }
+
+[features]
+default = ["std"]
+std = ["serde/std", "serde_json/std", "uuid/std"]

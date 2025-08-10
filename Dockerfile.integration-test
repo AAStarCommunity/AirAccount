@@ -1,0 +1,127 @@
+FROM ubuntu:24.04
+
+# 设置环境
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+
+# 安装必要依赖
+RUN apt-get update && apt-get install -y \
+    qemu-system-aarch64 \
+    screen \
+    expect \
+    file \
+    bsdmainutils \
+    util-linux \
+    socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建工作目录
+WORKDIR /airaccount-test
+
+# 复制构建产物
+COPY packages/airaccount-ta-simple/target/aarch64-unknown-linux-gnu/release/11223344-5566-7788-99aa-bbccddeeff01.ta ./
+COPY packages/airaccount-ca/target/aarch64-unknown-linux-gnu/debug/airaccount-ca ./
+
+# 复制QEMU镜像
+COPY third_party/incubator-teaclave-trustzone-sdk/tests/aarch64-optee-4.7.0-qemuv8-ubuntu-24.04 ./qemu-env
+
+# 设置权限
+RUN chmod +x ./airaccount-ca
+
+# 创建验证脚本
+RUN echo '#!/bin/bash' > ./verify_components.sh && \
+    echo 'echo "🔍 AirAccount集成测试验证"' >> ./verify_components.sh && \
+    echo 'echo "========================="' >> ./verify_components.sh && \
+    echo 'echo ""' >> ./verify_components.sh && \
+    echo '# 检查TA文件' >> ./verify_components.sh && \
+    echo 'ta_file=$(ls *.ta)' >> ./verify_components.sh && \
+    echo 'if [ -f "$ta_file" ]; then' >> ./verify_components.sh && \
+    echo '  echo "✅ TA文件存在: $ta_file"' >> ./verify_components.sh && \
+    echo '  echo "   大小: $(stat -c%s "$ta_file") bytes"' >> ./verify_components.sh && \
+    echo '  if hexdump -C "$ta_file" | head -1 | grep -q "48 53 54 4f"; then' >> ./verify_components.sh && \
+    echo '    echo "   ✅ OP-TEE HSTO格式正确"' >> ./verify_components.sh && \
+    echo '  else' >> ./verify_components.sh && \
+    echo '    echo "   ❌ OP-TEE格式验证失败"' >> ./verify_components.sh && \
+    echo '  fi' >> ./verify_components.sh && \
+    echo 'else' >> ./verify_components.sh && \
+    echo '  echo "❌ TA文件缺失"' >> ./verify_components.sh && \
+    echo 'fi' >> ./verify_components.sh && \
+    echo 'echo ""' >> ./verify_components.sh && \
+    echo '# 检查CA文件' >> ./verify_components.sh && \
+    echo 'if [ -f "./airaccount-ca" ]; then' >> ./verify_components.sh && \
+    echo '  echo "✅ CA文件存在: airaccount-ca"' >> ./verify_components.sh && \
+    echo '  echo "   大小: $(stat -c%s ./airaccount-ca) bytes"' >> ./verify_components.sh && \
+    echo '  echo "   类型: $(file ./airaccount-ca)"' >> ./verify_components.sh && \
+    echo 'else' >> ./verify_components.sh && \
+    echo '  echo "❌ CA文件缺失"' >> ./verify_components.sh && \
+    echo 'fi' >> ./verify_components.sh && \
+    echo 'echo ""' >> ./verify_components.sh && \
+    echo '# 检查QEMU环境' >> ./verify_components.sh && \
+    echo 'if [ -d "./qemu-env" ]; then' >> ./verify_components.sh && \
+    echo '  echo "✅ QEMU环境目录存在"' >> ./verify_components.sh && \
+    echo '  echo "   文件数: $(ls qemu-env/ | wc -l)"' >> ./verify_components.sh && \
+    echo '  if [ -f "./qemu-env/Image" ] && [ -f "./qemu-env/bl1.bin" ]; then' >> ./verify_components.sh && \
+    echo '    echo "   ✅ 核心QEMU文件存在（Image, bl1.bin）"' >> ./verify_components.sh && \
+    echo '  else' >> ./verify_components.sh && \
+    echo '    echo "   ❌ 缺少QEMU核心文件"' >> ./verify_components.sh && \
+    echo '  fi' >> ./verify_components.sh && \
+    echo 'else' >> ./verify_components.sh && \
+    echo '  echo "❌ QEMU环境目录缺失"' >> ./verify_components.sh && \
+    echo 'fi' >> ./verify_components.sh && \
+    echo 'echo ""' >> ./verify_components.sh && \
+    echo 'echo "🖥️  系统QEMU检查"' >> ./verify_components.sh && \
+    echo 'if command -v qemu-system-aarch64 >/dev/null 2>&1; then' >> ./verify_components.sh && \
+    echo '  echo "✅ 系统QEMU可用: $(qemu-system-aarch64 --version | head -1)"' >> ./verify_components.sh && \
+    echo 'else' >> ./verify_components.sh && \
+    echo '  echo "❌ 系统QEMU不可用"' >> ./verify_components.sh && \
+    echo 'fi' >> ./verify_components.sh
+
+# 创建QEMU启动脚本
+RUN echo '#!/bin/bash' > ./start_optee.sh && \
+    echo 'echo "🚀 启动OP-TEE QEMU环境"' >> ./start_optee.sh && \
+    echo 'echo "======================"' >> ./start_optee.sh && \
+    echo '' >> ./start_optee.sh && \
+    echo '# 检查QEMU环境' >> ./start_optee.sh && \
+    echo 'if [ ! -d "./qemu-env" ]; then' >> ./start_optee.sh && \
+    echo '  echo "❌ QEMU环境目录不存在，无法启动"' >> ./start_optee.sh && \
+    echo '  exit 1' >> ./start_optee.sh && \
+    echo 'fi' >> ./start_optee.sh && \
+    echo '' >> ./start_optee.sh && \
+    echo 'cd qemu-env' >> ./start_optee.sh && \
+    echo '' >> ./start_optee.sh && \
+    echo '# 创建共享目录' >> ./start_optee.sh && \
+    echo 'mkdir -p ../shared' >> ./start_optee.sh && \
+    echo 'cp ../*.ta ../shared/ 2>/dev/null || true' >> ./start_optee.sh && \
+    echo 'cp ../airaccount-ca ../shared/ 2>/dev/null || true' >> ./start_optee.sh && \
+    echo 'chmod +x ../shared/airaccount-ca 2>/dev/null || true' >> ./start_optee.sh && \
+    echo '' >> ./start_optee.sh && \
+    echo 'echo "📁 共享目录已准备完成"' >> ./start_optee.sh && \
+    echo 'echo "   共享文件: $(ls -la ../shared/)"' >> ./start_optee.sh && \
+    echo 'echo ""' >> ./start_optee.sh && \
+    echo 'echo "🎮 启动QEMU（按 Ctrl+A 然后 X 退出）"' >> ./start_optee.sh && \
+    echo 'echo ""' >> ./start_optee.sh && \
+    echo 'sleep 2' >> ./start_optee.sh && \
+    echo '' >> ./start_optee.sh && \
+    echo '# 启动QEMU' >> ./start_optee.sh && \
+    echo 'exec qemu-system-aarch64 \\' >> ./start_optee.sh && \
+    echo '    -nographic \\' >> ./start_optee.sh && \
+    echo '    -serial mon:stdio \\' >> ./start_optee.sh && \
+    echo '    -smp 2 \\' >> ./start_optee.sh && \
+    echo '    -machine virt,secure=on,acpi=off,gic-version=3 \\' >> ./start_optee.sh && \
+    echo '    -cpu cortex-a57 \\' >> ./start_optee.sh && \
+    echo '    -d unimp -semihosting-config enable=on,target=native \\' >> ./start_optee.sh && \
+    echo '    -m 1057 \\' >> ./start_optee.sh && \
+    echo '    -bios bl1.bin \\' >> ./start_optee.sh && \
+    echo '    -initrd rootfs.cpio.gz \\' >> ./start_optee.sh && \
+    echo '    -kernel Image \\' >> ./start_optee.sh && \
+    echo '    -append "console=ttyAMA0,115200 keep_bootcon root=/dev/vda2" \\' >> ./start_optee.sh && \
+    echo '    -fsdev local,id=fsdev0,path=../shared,security_model=none \\' >> ./start_optee.sh && \
+    echo '    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \\' >> ./start_optee.sh && \
+    echo '    -netdev user,id=vmnic \\' >> ./start_optee.sh && \
+    echo '    -device virtio-net-device,netdev=vmnic' >> ./start_optee.sh
+
+# 设置执行权限
+RUN chmod +x ./verify_components.sh ./start_optee.sh
+
+# 默认命令
+CMD ["./verify_components.sh"]

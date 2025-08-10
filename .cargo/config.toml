@@ -1,0 +1,37 @@
+[build]
+target-dir = "/Volumes/UltraDisk/Dev2/aastar/AirAccount/target"
+# 增加并行编译单元数，提升编译速度
+jobs = 8
+
+# [target.x86_64-apple-darwin]
+# macOS默认链接器已经足够快，暂时禁用lld
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# [target.aarch64-apple-darwin] 
+# Apple Silicon默认链接器已经足够快，暂时禁用lld
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+# 为ARM64 Linux也启用快速链接
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[env]
+# TEE环境变量
+OPTEE_CLIENT_EXPORT = "/tmp/mock_tee"
+PKG_CONFIG_ALLOW_CROSS = "1"
+# 如果sccache可用，启用编译缓存
+# RUSTC_WRAPPER = "sccache"  # 取消注释来启用sccache
+
+[alias]
+# 便捷命令别名
+c = "check"              # cargo c = cargo check 
+b = "build"              # cargo b = cargo build
+t = "test"               # cargo t = cargo test
+r = "run"                # cargo r = cargo run
+cl = "clean"             # cargo cl = cargo clean
+w = "watch -x check"     # cargo w = cargo watch -x check
+wt = "watch -x test"     # cargo wt = cargo watch -x test
+wr = "watch -x run"      # cargo wr = cargo watch -x run
+lint = "clippy --all-targets --all-features -- -D warnings"
+audit-deps = "machete"   # 检查未使用依赖

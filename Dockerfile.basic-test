@@ -1,0 +1,108 @@
+FROM ubuntu:24.04
+
+# Set up environment
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install minimal dependencies for file analysis
+RUN apt-get update && apt-get install -y \
+    file \
+    bsdmainutils \
+    binutils \
+    qemu-user-static \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /test
+
+# Copy our built files
+COPY packages/airaccount-ta-simple/target/aarch64-unknown-linux-gnu/release/11223344-5566-7788-99aa-bbccddeeff01.ta ./
+COPY packages/airaccount-ca/target/aarch64-unknown-linux-gnu/debug/airaccount-ca ./
+
+# Create analysis script
+RUN echo '#!/bin/bash' > analyze.sh && \
+    echo 'echo "🔍 AirAccount Docker Analysis Report"' >> analyze.sh && \
+    echo 'echo "====================================="' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "📁 Files in container:"' >> analyze.sh && \
+    echo 'ls -la *.ta airaccount-ca' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "🔍 TA File Analysis:"' >> analyze.sh && \
+    echo 'ta_file=$(ls *.ta)' >> analyze.sh && \
+    echo 'echo "  Name: $ta_file"' >> analyze.sh && \
+    echo 'echo "  Size: $(stat -c%s "$ta_file") bytes"' >> analyze.sh && \
+    echo 'echo "  Type: $(file "$ta_file")"' >> analyze.sh && \
+    echo 'echo "  Header: $(hexdump -C "$ta_file" | head -1)"' >> analyze.sh && \
+    echo 'if hexdump -C "$ta_file" | head -1 | grep -q "HSTO"; then' >> analyze.sh && \
+    echo '    echo "  ✅ OP-TEE format verified"' >> analyze.sh && \
+    echo 'else' >> analyze.sh && \
+    echo '    echo "  ❌ OP-TEE format check failed"' >> analyze.sh && \
+    echo 'fi' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "🔍 CA File Analysis:"' >> analyze.sh && \
+    echo 'echo "  Name: airaccount-ca"' >> analyze.sh && \
+    echo 'echo "  Size: $(stat -c%s airaccount-ca) bytes"' >> analyze.sh && \
+    echo 'echo "  Type: $(file airaccount-ca)"' >> analyze.sh && \
+    echo 'if file airaccount-ca | grep -q "aarch64"; then' >> analyze.sh && \
+    echo '    echo "  ✅ ARM64 architecture verified"' >> analyze.sh && \
+    echo 'else' >> analyze.sh && \
+    echo '    echo "  ❌ Architecture verification failed"' >> analyze.sh && \
+    echo 'fi' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "🔍 Binary Analysis:"' >> analyze.sh && \
+    echo 'echo "  TA UUID check: $(echo "$ta_file" | grep -o "11223344-5566-7788-99aa-bbccddeeff01" || echo "UUID not found")"' >> analyze.sh && \
+    echo 'echo "  CA dependencies: $(ldd airaccount-ca 2>/dev/null | grep -c "lib" || echo "Static analysis not available")"' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "📊 Summary:"' >> analyze.sh && \
+    echo 'tests_passed=0' >> analyze.sh && \
+    echo 'if hexdump -C "$ta_file" | head -1 | grep -q "HSTO"; then ((tests_passed++)); fi' >> analyze.sh && \
+    echo 'if file airaccount-ca | grep -q "aarch64"; then ((tests_passed++)); fi' >> analyze.sh && \
+    echo 'if echo "$ta_file" | grep -q "11223344-5566-7788-99aa-bbccddeeff01"; then ((tests_passed++)); fi' >> analyze.sh && \
+    echo 'echo "  Tests passed: $tests_passed/3"' >> analyze.sh && \
+    echo 'if [ "$tests_passed" -eq 3 ]; then' >> analyze.sh && \
+    echo '    echo "  ✅ All verification tests passed!"' >> analyze.sh && \
+    echo '    echo "  🚀 Files are ready for OP-TEE deployment"' >> analyze.sh && \
+    echo 'else' >> analyze.sh && \
+    echo '    echo "  ❌ Some verification tests failed"' >> analyze.sh && \
+    echo 'fi' >> analyze.sh && \
+    echo 'echo ""' >> analyze.sh && \
+    echo 'echo "💡 Next steps:"' >> analyze.sh && \
+    echo 'echo "1. Deploy TA file to /lib/optee_armtz/ in OP-TEE environment"' >> analyze.sh && \
+    echo 'echo "2. Run CA application in ARM64 Linux environment"' >> analyze.sh && \
+    echo 'echo "3. Test TA-CA communication with commands like:"' >> analyze.sh && \
+    echo 'echo "   ./airaccount-ca hello"' >> analyze.sh && \
+    echo 'echo "   ./airaccount-ca echo \"Hello TEE!\""' >> analyze.sh && \
+    echo 'echo "   ./airaccount-ca test"' >> analyze.sh
+
+# Create a simple TA format validator
+RUN echo '#!/bin/bash' > validate_ta.sh && \
+    echo 'ta_file=$(ls *.ta)' >> validate_ta.sh && \
+    echo 'echo "🔍 Detailed TA Validation: $ta_file"' >> validate_ta.sh && \
+    echo 'echo "======================================="' >> validate_ta.sh && \
+    echo 'echo ""' >> validate_ta.sh && \
+    echo 'echo "📋 File Information:"' >> validate_ta.sh && \
+    echo 'echo "  Size: $(stat -c%s "$ta_file") bytes (Expected: ~268KB)"' >> validate_ta.sh && \
+    echo 'echo "  Permissions: $(stat -c%a "$ta_file")"' >> validate_ta.sh && \
+    echo 'echo ""' >> validate_ta.sh && \
+    echo 'echo "🔍 Header Analysis (First 64 bytes):"' >> validate_ta.sh && \
+    echo 'hexdump -C "$ta_file" | head -4' >> validate_ta.sh && \
+    echo 'echo ""' >> validate_ta.sh && \
+    echo 'echo "🔍 OP-TEE Signature Check:"' >> validate_ta.sh && \
+    echo 'if hexdump -C "$ta_file" | head -1 | grep -q "48 53 54 4f"; then' >> validate_ta.sh && \
+    echo '    echo "  ✅ HSTO magic found - Valid OP-TEE TA format"' >> validate_ta.sh && \
+    echo 'else' >> validate_ta.sh && \
+    echo '    echo "  ❌ HSTO magic not found - Invalid format"' >> validate_ta.sh && \
+    echo 'fi' >> validate_ta.sh && \
+    echo 'echo ""' >> validate_ta.sh && \
+    echo 'echo "🔍 UUID Verification:"' >> validate_ta.sh && \
+    echo 'expected_uuid="11223344-5566-7788-99aa-bbccddeeff01"' >> validate_ta.sh && \
+    echo 'if echo "$ta_file" | grep -q "$expected_uuid"; then' >> validate_ta.sh && \
+    echo '    echo "  ✅ UUID matches expected: $expected_uuid"' >> validate_ta.sh && \
+    echo 'else' >> validate_ta.sh && \
+    echo '    echo "  ❌ UUID mismatch"' >> validate_ta.sh && \
+    echo 'fi' >> validate_ta.sh
+
+# Make scripts executable
+RUN chmod +x analyze.sh validate_ta.sh
+
+# Default command runs the analysis
+CMD ["./analyze.sh"]

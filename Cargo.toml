@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/core-logic",
+    "packages/proto",
+]
+exclude = [
+    "third_party",
+    "packages/ta-arm-trustzone",
+    "packages/client-ca",
+]
+
+[workspace.dependencies]
+# Common dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+anyhow = "1.0"
+zeroize = { version = "1.7", features = ["derive"] }
+
+# 🚀 开发构建优化配置 - 最大化编译速度
+[profile.dev]
+opt-level = 0              # 最快编译速度
+debug = true               # 保持调试信息
+split-debuginfo = "unpacked"  # macOS/Windows 链接加速
+codegen-units = 256        # 最大并行编译单元
+lto = false               # 关闭链接时优化
+panic = 'unwind'          # 保持默认panic处理
+incremental = true        # 启用增量编译
+overflow-checks = true    # 保持溢出检查
+
+# 📦 发布构建优化配置 - 最小体积和最佳性能
+[profile.release]
+opt-level = "s"           # 体积优化
+lto = true               # 链接时优化
+codegen-units = 1        # 单个编译单元，更好优化
+panic = "abort"          # 更小的二进制体积
+strip = true             # 剥离符号表
+overflow-checks = false  # 发布版本关闭溢出检查
+
+# 🧪 测试构建优化配置
+[profile.test]
+opt-level = 1            # 轻微优化，平衡速度和编译时间
+debug = true             # 保持调试信息用于测试
+incremental = true       # 增量编译
+codegen-units = 256      # 并行编译
