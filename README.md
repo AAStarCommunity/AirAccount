@@ -9,7 +9,6 @@
 AAStar uses the Apache Teaclave open-source project to build TEE-Account, a hardware-based wallet using TEE for the community. We run TEE-Account on OP-TEE on a Raspberry Pi 5. This account saves your private key in secure storage on OP-TEE and signs transactions with a verified fingerprint signature. All signatures will be verified by DVT and the on-chain account contract.
 
 TEE-Account is a part of our [AirAccount](https://aastar.io/airaccount) project.
-[![AirAccount](https://raw.githubusercontent.com/jhfnetboy/MarkDownImg/main/img/202505101719766.png)](https://raw.githubusercontent.com/jhfnetboy/MarkDownImg/main/img/202505101719766.png)
 
 This repository is a monorepo containing all the core components for the AirAccount TEE-based Web3 account system. For a detailed technical plan and development roadmap, please see the [Planning Document](./docs/Plan.md).
 
