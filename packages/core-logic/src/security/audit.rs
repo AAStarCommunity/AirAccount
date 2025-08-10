@@ -16,11 +16,23 @@ pub enum AuditLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditEvent {
-    KeyGeneration { algorithm: String, key_size: u32 },
+    KeyGeneration { 
+        algorithm: String, 
+        key_size: u32,
+        operation: String,
+        key_type: String,
+        duration_ms: u64,
+        entropy_bits: u32,
+    },
     SignOperation { message_hash: String, success: bool },
     MemoryAllocation { size: usize, secure: bool },
     SecurityViolation { violation_type: String, details: String },
-    SecurityOperation { operation: String, details: String, success: bool },
+    SecurityOperation { 
+        operation: String, 
+        details: String, 
+        success: bool,
+        risk_level: String,
+    },
     Authentication { user_id: String, success: bool, method: String },
     ConfigChange { parameter: String, old_value: String, new_value: String },
     TEEOperation { operation: String, duration_ms: u64, success: bool },
@@ -354,6 +366,10 @@ mod tests {
         let event = AuditEvent::KeyGeneration {
             algorithm: "RSA".to_string(),
             key_size: 2048,
+            operation: "test_operation".to_string(),
+            key_type: "test_key".to_string(),
+            duration_ms: 100,
+            entropy_bits: 256,
         };
         
         let entry = AuditLogEntry::new(AuditLevel::Security, event, "crypto")

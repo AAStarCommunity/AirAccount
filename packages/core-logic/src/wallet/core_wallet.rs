@@ -3,7 +3,7 @@
 
 use crate::security::{SecurityManager, SecureBytes, SecureMemory, AuditEvent};
 use crate::proto::EthTransaction;
-use super::WalletResult;
+use super::{WalletResult, WalletError};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -45,12 +45,12 @@ impl WalletCore {
         
         // 使用我们的安全随机数生成器
         let mut entropy_bytes = vec![0u8; 32];
-        security_manager.secure_rng().fill_bytes(&mut entropy_bytes);
+        security_manager.create_secure_rng()?.fill_bytes(&mut entropy_bytes)?;
         let entropy = SecureBytes::from(entropy_bytes);
         
         // 生成UUID
         let mut uuid_bytes = vec![0u8; 16];
-        security_manager.secure_rng().fill_bytes(&mut uuid_bytes);
+        security_manager.create_secure_rng()?.fill_bytes(&mut uuid_bytes)?;
         let uuid_array: [u8; 16] = uuid_bytes.try_into()
             .map_err(|_| WalletError::CryptographicError("Failed to generate UUID".to_string()))?;
         let id = Uuid::from_bytes(uuid_array);
@@ -70,6 +70,8 @@ impl WalletCore {
         let duration_ms = start_time.elapsed().as_millis() as u64;
         security_manager.audit_info(
             AuditEvent::KeyGeneration {
+                algorithm: "ECDSA_secp256k1".to_string(),
+                key_size: 256,
                 operation: "wallet_creation".to_string(),
                 key_type: "hd_wallet_seed".to_string(),
                 duration_ms,
@@ -98,7 +100,7 @@ impl WalletCore {
         let entropy_array: [u8; 32] = entropy_slice.try_into()
             .map_err(|_| WalletError::CryptographicError("Entropy conversion failed".to_string()))?;
             
-        let mnemonic = Mnemonic::from_entropy(&entropy_array, bip32::Language::English);
+        let mnemonic = Mnemonic::from_entropy(entropy_array, bip32::Language::English);
         Ok(mnemonic.phrase().to_string())
     }
     
@@ -109,12 +111,12 @@ impl WalletCore {
         let entropy_array: [u8; 32] = entropy_slice.try_into()
             .map_err(|_| WalletError::CryptographicError("Entropy conversion failed".to_string()))?;
             
-        let mnemonic = Mnemonic::from_entropy(&entropy_array, bip32::Language::English);
+        let mnemonic = Mnemonic::from_entropy(entropy_array, bip32::Language::English);
         let seed = mnemonic.to_seed(""); // 空密码
         
         // 使用SecureMemory保护种子
         let seed_bytes = seed.as_bytes().to_vec();
-        Ok(SecureMemory::new(seed_bytes))
+        Ok(SecureMemory::from_vec(seed_bytes)?)
     }
     
     /// 派生私钥 - 使用常时算法
@@ -129,7 +131,7 @@ impl WalletCore {
             .map_err(|e| WalletError::CryptographicError(format!("Key derivation failed: {}", e)))?;
             
         let child_xprv_bytes = child_xprv.to_bytes();
-        Ok(SecureMemory::new(child_xprv_bytes.to_vec()))
+        Ok(SecureMemory::from_vec(child_xprv_bytes.to_vec())?)
     }
     
     /// 派生公钥
@@ -255,6 +257,7 @@ impl AirAccountWallet {
                 operation: "mnemonic_export".to_string(),
                 risk_level: "HIGH".to_string(),
                 details: "Mnemonic exported to normal world".to_string(),
+                success: true,
             },
             "wallet_core",
         );
@@ -288,6 +291,7 @@ impl AirAccountWallet {
                 operation: "transaction_signing".to_string(),
                 risk_level: "HIGH".to_string(),
                 details: format!("Signing transaction to {:?}, value: {}", transaction.to, transaction.value),
+                success: true,
             },
             "wallet_core",
         );
@@ -326,7 +330,7 @@ pub struct WalletCrypto;
 impl WalletCrypto {
     /// 验证助记词
     pub fn validate_mnemonic(mnemonic: &str) -> bool {
-        Mnemonic::parse(mnemonic, bip32::Language::English).is_ok()
+        Mnemonic::new(mnemonic, bip32::Language::English).is_ok()
     }
     
     /// 验证HD路径

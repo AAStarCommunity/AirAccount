@@ -102,10 +102,10 @@ pub struct TEEAdapter {
 
 #[derive(Debug, Clone)]
 struct SessionInfo {
-    session_id: u32,
-    created_at: std::time::Instant,
+    _session_id: u32,
+    _created_at: std::time::Instant,
     last_activity: std::time::Instant,
-    user_context: Option<String>,
+    _user_context: Option<String>,
 }
 
 impl TEEAdapter {
@@ -148,10 +148,10 @@ impl TEEAdapter {
         let session_id = self.interface.create_session().await?;
         
         let session_info = SessionInfo {
-            session_id,
-            created_at: std::time::Instant::now(),
+            _session_id: session_id,
+            _created_at: std::time::Instant::now(),
             last_activity: std::time::Instant::now(),
-            user_context,
+            _user_context: user_context,
         };
         
         self.active_sessions.insert(session_id, session_info);
@@ -274,10 +274,10 @@ impl TEEInterface for MockTEEAdapter {
         self.next_session_id += 1;
         
         let session_info = SessionInfo {
-            session_id,
-            created_at: std::time::Instant::now(),
+            _session_id: session_id,
+            _created_at: std::time::Instant::now(),
             last_activity: std::time::Instant::now(),
-            user_context: None,
+            _user_context: None,
         };
         
         self.sessions.insert(session_id, session_info);

@@ -1,8 +1,19 @@
+pub mod error;     // 新增：结构化错误处理系统
+pub mod config;    // 新增：增强配置系统
 pub mod security;
 pub mod wallet;  // 新增：集成eth_wallet功能
 pub mod proto;   // 新增：协议定义层
 pub mod tee;     // 新增：TEE适配层
 
+pub use error::{
+    SecurityError, SecurityResult, ErrorContext, ErrorHandler, ErrorRecovery,
+    KeyErrorKind, TEEErrorKind, NetworkErrorKind, AuditErrorKind, ConfigErrorKind,
+    ErrorSeverity
+};
+pub use config::{
+    EnhancedSecurityConfig, ConfigManager, EnvironmentManager, HotReloadHandler,
+    Environment, ConfigValidator, ValidationRule
+};
 pub use security::{
     SecurityManager, SecurityConfig,
     SecureBytes, ConstantTimeOps, SecureRng,

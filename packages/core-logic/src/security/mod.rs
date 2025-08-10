@@ -1,10 +1,24 @@
 pub mod constant_time;
 pub mod memory_protection;
 pub mod audit;
+pub mod key_derivation;
+pub mod entropy;
+pub mod tamper_proof_audit;
+pub mod batch_audit;
+pub mod memory_pool;
+pub mod simd_ops;
+pub mod secure_boot;
 
 pub use constant_time::{SecureBytes, ConstantTimeOps, SecureRng};
 pub use memory_protection::{SecureMemory, StackCanary, MemoryGuard, SecureString};
 pub use audit::{AuditLogger, AuditEvent, AuditLevel, AuditLogEntry, audit_log, init_global_audit_logger};
+pub use key_derivation::{KeyDerivationManager, KdfAlgorithm, KdfParams, DerivedKey};
+pub use entropy::{TEEEntropySource, EntropySource, EntropyQuality, EntropyRating, EntropyError};
+pub use tamper_proof_audit::{TamperProofAuditLog, TamperProofLogEntry, AuditStatistics, SanitizationRule, SanitizationStrategy};
+pub use batch_audit::{BatchAuditProcessor, BatchAuditConfig, BatchAuditStats, HighPerformanceAuditLogger};
+pub use memory_pool::{SecureMemoryPool, SecureMemoryBlock, FixedSizePool, MemoryPoolStats};
+pub use simd_ops::{SimdMemoryOps, SimdCapabilities};
+pub use secure_boot::{SecureBootValidator, SecureBootManager, SecureBootConfig, BootIntegrityStatus};
 
 use std::sync::Arc;
 

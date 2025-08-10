@@ -108,6 +108,10 @@ fn test_audit_logging() -> Result<()> {
         AuditEvent::KeyGeneration {
             algorithm: "RSA".to_string(),
             key_size: 2048,
+            operation: "test_key_generation".to_string(),
+            key_type: "RSA_test".to_string(),
+            duration_ms: 50,
+            entropy_bits: 256,
         },
         "crypto_module"
     );
@@ -198,6 +202,10 @@ fn test_security_manager_integration() -> Result<()> {
         AuditEvent::KeyGeneration {
             algorithm: "ECDSA".to_string(),
             key_size: 256,
+            operation: "test_signing_key".to_string(),
+            key_type: "ECDSA_secp256k1".to_string(),
+            duration_ms: 25,
+            entropy_bits: 256,
         },
         "integration_test"
     );

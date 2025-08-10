@@ -1,7 +1,7 @@
 // Licensed to AirAccount under the Apache License, Version 2.0
 // Multi-chain wallet support
 
-use super::{WalletError, WalletResult};
+use super::WalletResult;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]

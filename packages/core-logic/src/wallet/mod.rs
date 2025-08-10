@@ -5,11 +5,13 @@ mod core_wallet;
 mod wallet_manager;
 mod biometric_integration;
 mod multi_chain_support;
+mod enhanced_wallet_manager;
 
 pub use core_wallet::{AirAccountWallet, WalletCore, WalletCrypto};
 pub use wallet_manager::{WalletManager, UserWalletBinding, WalletPermissions};
 pub use biometric_integration::{BiometricVerifier, BiometricTemplate, BiometricAuth};
 pub use multi_chain_support::{ChainAdapter, ChainConfig, MultiChainWallet};
+pub use enhanced_wallet_manager::{EnhancedWalletManager, EnhancedWalletConfig, WalletSession, WalletStats};
 
 use crate::security::{SecurityManager, AuditEvent};
 use crate::proto::{WalletCommand, ProtoError};
@@ -45,6 +47,12 @@ impl std::fmt::Display for WalletError {
 }
 
 impl std::error::Error for WalletError {}
+
+impl From<&str> for WalletError {
+    fn from(err: &str) -> Self {
+        WalletError::SecurityError(err.to_string())
+    }
+}
 
 impl From<ProtoError> for WalletError {
     fn from(err: ProtoError) -> Self {
@@ -103,7 +111,7 @@ pub struct AirAccountWalletSystem {
     security_manager: SecurityManager,
     wallet_manager: WalletManager,
     biometric_verifier: BiometricVerifier,
-    chain_adapter: ChainAdapter,
+    _chain_adapter: ChainAdapter,
     config: WalletConfig,
 }
 
@@ -127,7 +135,7 @@ impl AirAccountWalletSystem {
             security_manager,
             wallet_manager,
             biometric_verifier,
-            chain_adapter,
+            _chain_adapter: chain_adapter,
             config,
         })
     }

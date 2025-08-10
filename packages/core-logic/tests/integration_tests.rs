@@ -137,6 +137,10 @@ fn test_audit_logging_integration() {
         audit::AuditEvent::KeyGeneration {
             algorithm: "ECDSA".to_string(),
             key_size: 256,
+            operation: "integration_test_key".to_string(),
+            key_type: "ECDSA_integration".to_string(),
+            duration_ms: 30,
+            entropy_bits: 256,
         },
         "integration_test"
     );

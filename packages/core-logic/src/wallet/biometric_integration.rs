@@ -3,7 +3,7 @@
 
 use crate::security::SecurityManager;
 use crate::proto::BiometricProof;
-use super::{WalletError, WalletResult};
+use super::WalletResult;
 
 pub struct BiometricVerifier {
     _security_manager: SecurityManager,
