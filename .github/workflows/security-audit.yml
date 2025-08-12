@@ -1,0 +1,192 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # 每天UTC时间0点运行
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: false  # 不检查submodules以加快速度
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.cargo/advisory-db
+        key: ${{ runner.os }}-cargo-security-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-security-
+    
+    - name: Install security tools
+      run: |
+        cargo install --locked cargo-audit || true
+        cargo install --locked cargo-deny || true
+        cargo install --locked cargo-geiger || true
+        cargo install --locked cargo-outdated || true
+    
+    - name: Run cargo audit
+      run: |
+        echo "## Running cargo audit..."
+        cargo audit 2>&1 | tee cargo-audit.txt
+      continue-on-error: true
+    
+    - name: Run cargo deny
+      run: |
+        echo "## Running cargo deny..."
+        cargo deny check 2>&1 | tee cargo-deny.txt
+      continue-on-error: true
+    
+    - name: Check for unsafe code
+      run: |
+        echo "## Checking for unsafe code..."
+        cargo geiger --all-features 2>&1 | tee cargo-geiger.txt
+      continue-on-error: true
+    
+    - name: Check outdated dependencies
+      run: |
+        echo "## Checking outdated dependencies..."
+        cargo outdated 2>&1 | tee cargo-outdated.txt
+      continue-on-error: true
+    
+    - name: Run custom security check
+      run: |
+        echo "## Running custom security check..."
+        chmod +x ./scripts/security-check.sh
+        ./scripts/security-check.sh 2>&1 | tee security-check.txt
+      continue-on-error: true
+    
+    - name: Check for secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+        extra_args: --debug --only-verified
+    
+    - name: Generate security report
+      if: always()
+      run: |
+        echo "# Security Audit Report" > security-report.md
+        echo "Date: $(date)" >> security-report.md
+        echo "Commit: ${{ github.sha }}" >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Cargo Audit Results" >> security-report.md
+        echo '```' >> security-report.md
+        cat cargo-audit.txt >> security-report.md || echo "No audit results" >> security-report.md
+        echo '```' >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Cargo Deny Results" >> security-report.md
+        echo '```' >> security-report.md
+        cat cargo-deny.txt >> security-report.md || echo "No deny results" >> security-report.md
+        echo '```' >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Unsafe Code Analysis" >> security-report.md
+        echo '```' >> security-report.md
+        cat cargo-geiger.txt >> security-report.md || echo "No geiger results" >> security-report.md
+        echo '```' >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Outdated Dependencies" >> security-report.md
+        echo '```' >> security-report.md
+        cat cargo-outdated.txt >> security-report.md || echo "No outdated results" >> security-report.md
+        echo '```' >> security-report.md
+    
+    - name: Upload security report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report-${{ github.sha }}
+        path: |
+          security-report.md
+          cargo-audit.txt
+          cargo-deny.txt
+          cargo-geiger.txt
+          cargo-outdated.txt
+          security-check.txt
+    
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('security-report.md', 'utf8');
+          
+          // 截取报告的前1000个字符以避免评论过长
+          const summary = report.substring(0, 1000) + 
+            (report.length > 1000 ? '\n\n... [查看完整报告](artifacts)' : '');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });
+    
+    - name: Fail if critical issues found
+      run: |
+        # 检查是否有严重问题
+        if grep -q "error\|Error\|ERROR\|vulnerability\|Vulnerability" cargo-audit.txt 2>/dev/null; then
+          echo "❌ Critical security issues found in cargo audit"
+          exit 1
+        fi
+        
+        if grep -q "error\|Error\|ERROR" cargo-deny.txt 2>/dev/null; then
+          echo "❌ Critical issues found in cargo deny"
+          exit 1
+        fi
+        
+        echo "✅ No critical security issues found"
+
+  sbom-generation:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Generate SBOM
+      run: |
+        echo "## Generating Software Bill of Materials..."
+        cargo tree --format json > sbom.json
+        cargo tree > sbom.txt
+    
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom-${{ github.sha }}
+        path: |
+          sbom.json
+          sbom.txt

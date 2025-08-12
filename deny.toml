@@ -1,0 +1,70 @@
+# deny.toml - Cargo Deny配置文件
+# 用于检测和防止供应链攻击
+
+# 漏洞检测配置
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+vulnerability = "deny"    # 拒绝有已知漏洞的包
+unmaintained = "warn"     # 警告不再维护的包
+yanked = "deny"          # 拒绝已被撤回的包
+notice = "warn"          # 警告有通知的包
+ignore = []              # 忽略特定的advisory IDs
+
+# 许可证配置
+[licenses]
+unlicensed = "deny"      # 拒绝无许可证的包
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+]
+deny = []
+copyleft = "warn"        # 警告copyleft许可证
+allow-osi-fsf-free = "neither"
+default = "deny"
+confidence-threshold = 0.8
+
+# 依赖禁止配置
+[bans]
+multiple-versions = "warn"    # 警告同一包的多个版本
+wildcards = "deny"            # 拒绝通配符依赖
+highlight = "all"             # 高亮所有问题
+allow = []
+deny = [
+    # 已知的恶意包
+    { name = "rands", reason = "Known malicious crate used in Fuzzland attack" },
+    { name = "rustdecimal", reason = "Typosquatting attack on rust_decimal" },
+    { name = "lazystatic", reason = "Potential typosquatting of lazy_static" },
+    { name = "oncecell", reason = "Potential typosquatting of once_cell" },
+    { name = "serd", reason = "Known malicious crate" },
+    { name = "envlogger", reason = "Known malicious crate" },
+    { name = "postgress", reason = "Typosquatting of postgres" },
+    { name = "if-cfg", reason = "Known malicious crate" },
+    { name = "xrvrv", reason = "Known malicious crate" },
+]
+
+# 特定包的跳过规则
+skip = [
+    # 允许某些包有多个版本（如果确实需要）
+    # { name = "some-crate", version = "*" }
+]
+
+# 依赖树中的特定包配置
+skip-tree = []
+
+# 来源配置
+[sources]
+unknown-registry = "deny"    # 拒绝未知registry的包
+unknown-git = "warn"         # 警告未知git源的包
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+# 允许来自特定组织的git仓库
+github = []
+gitlab = []
+bitbucket = []

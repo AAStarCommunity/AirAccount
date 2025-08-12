@@ -35,3 +35,7 @@ wt = "watch -x test"     # cargo wt = cargo watch -x test
 wr = "watch -x run"      # cargo wr = cargo watch -x run
 lint = "clippy --all-targets --all-features -- -D warnings"
 audit-deps = "machete"   # 检查未使用依赖
+# 安全相关别名
+secure-build = "build --release"
+secure-check = "check --all-features"
+# audit和deny作为外部命令，不需要别名
