@@ -124,3 +124,17 @@ venv/
 # Flamegraph
 flamegraph.svg
 perf.data*
+
+# Security audit artifacts (temporary files)
+cargo-audit.txt
+cargo-deny.txt
+cargo-geiger.txt
+cargo-outdated.txt
+security-check.txt
+sbom.json
+sbom.txt
+# Keep final security reports in docs/security/
+# security-report.md - if in docs/security/, it should be committed
+
+# Cargo advisory database
+~/.cargo/advisory-db/
