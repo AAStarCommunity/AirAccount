@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # OP-TEE QEMU开发环境
+  tee-environment:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.optee
+    container_name: airaccount-tee-dev
+    ports:
+      - "5000:5000"  # TEE通信端口
+      - "2222:22"    # SSH端口
+      - "8080:8080"  # Web控制台端口
+    volumes:
+      - ./packages:/workspace/packages
+      - ./third_party:/workspace/third_party
+      - ./scripts:/workspace/scripts
+      - tee-data:/tee/data
+      - tee-logs:/tee/logs
+    environment:
+      - TEE_MODE=simulation
+      - TEE_LOG_LEVEL=debug
+      - RUST_BACKTRACE=1
+      - RUST_LOG=debug
+    networks:
+      - tee-network
+    healthcheck:
+      test: ["CMD", "/workspace/scripts/tee-health-check.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # TEE管理服务
+  tee-manager:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tee-manager
+    container_name: airaccount-tee-manager
+    ports:
+      - "9000:9000"  # 管理API端口
+    depends_on:
+      - tee-environment
+    volumes:
+      - tee-data:/data
+      - tee-logs:/logs
+    environment:
+      - TEE_ENDPOINT=http://tee-environment:5000
+      - MANAGER_PORT=9000
+    networks:
+      - tee-network
+
+  # Redis缓存（用于TEE会话管理）
+  redis:
+    image: redis:7-alpine
+    container_name: airaccount-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - tee-network
+
+  # 监控和日志收集
+  monitoring:
+    image: grafana/grafana:latest
+    container_name: airaccount-monitoring
+    ports:
+      - "3000:3000"  # Grafana端口
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - tee-network
+
+volumes:
+  tee-data:
+    driver: local
+  tee-logs:
+    driver: local
+  redis-data:
+    driver: local  
+  grafana-data:
+    driver: local
+
+networks:
+  tee-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
