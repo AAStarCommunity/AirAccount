@@ -3,11 +3,14 @@ resolver = "2"
 members = [
     "packages/core-logic",
     "packages/proto",
+    "packages/airaccount-ca",
+    "packages/airaccount-ca-extended",
 ]
 exclude = [
     "third_party",
     "packages/ta-arm-trustzone",
     "packages/client-ca",
+    "packages/airaccount-ta-simple",
 ]
 
 [workspace.dependencies]

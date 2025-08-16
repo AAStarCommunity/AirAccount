@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libc = { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/libc" }
 optee-utee-sys = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee/optee-utee-sys" }
 optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
 

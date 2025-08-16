@@ -8,6 +8,7 @@ pub mod batch_audit;
 pub mod memory_pool;
 pub mod simd_ops;
 pub mod secure_boot;
+pub mod secure_interface;
 
 pub use constant_time::{SecureBytes, ConstantTimeOps, SecureRng};
 pub use memory_protection::{SecureMemory, StackCanary, MemoryGuard, SecureString};
@@ -19,6 +20,9 @@ pub use batch_audit::{BatchAuditProcessor, BatchAuditConfig, BatchAuditStats, Hi
 pub use memory_pool::{SecureMemoryPool, SecureMemoryBlock, FixedSizePool, MemoryPoolStats};
 pub use simd_ops::{SimdMemoryOps, SimdCapabilities};
 pub use secure_boot::{SecureBootValidator, SecureBootManager, SecureBootConfig, BootIntegrityStatus};
+pub use secure_interface::{
+    SecureHybridEntropyInterface, PublicAccountInfo, PublicPasskeyCredential
+};
 
 use std::sync::Arc;
 

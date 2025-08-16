@@ -230,17 +230,8 @@ router.post('/authenticate/finish', async (req: Request, res: Response): Promise
 
     console.log(`🔍 Finishing WebAuthn authentication for: ${email}`);
 
-    // 验证challenge
-    const challengeValid = await appState.database.verifyAndUseChallenge(challenge, userId);
-    if (!challengeValid) {
-      res.status(400).json({
-        success: false,
-        error: 'Invalid or expired challenge',
-      });
-      return;
-    }
-
     // 验证认证响应 - 添加clientExtensionResults字段
+    // 注意：challenge验证将在WebAuthn服务中进行
     const authResponseWithExtensions = {
       ...authenticationResponse,
       clientExtensionResults: authenticationResponse.clientExtensionResults || {},
@@ -248,7 +239,8 @@ router.post('/authenticate/finish', async (req: Request, res: Response): Promise
     
     const verification = await appState.webauthnService.verifyAuthenticationResponse(
       authResponseWithExtensions as any, // 类型断言避免复杂的类型问题
-      challenge
+      challenge,
+      userId
     );
 
     if (!verification.verified || !verification.userAccount) {

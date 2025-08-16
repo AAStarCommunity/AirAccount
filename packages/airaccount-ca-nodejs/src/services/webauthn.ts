@@ -107,12 +107,15 @@ export class WebAuthnService {
       
       // 生成模拟的设备数据
       const mockCredentialId = Buffer.from(response.id, 'base64');
-      const mockPublicKey = Buffer.from('mock_public_key_data_for_testing');
+      const mockPublicKey = Buffer.from('mock_public_key_data_for_testing_32_bytes_length');
       
       // 检查设备是否已存在
       const existingDevice = await this.database.getDeviceByCredentialId(mockCredentialId);
       
       if (!existingDevice) {
+        // 确保用户存在于数据库中
+        await this.database.createOrUpdateUser(userId, userId, `Test User ${userId.substring(0, 8)}`);
+        
         // 保存模拟设备到数据库
         await this.database.addAuthenticatorDevice({
           userId,
@@ -121,6 +124,8 @@ export class WebAuthnService {
           counter: 0,
           transports: response.response.transports || ['internal'],
         });
+        
+        console.log(`🧪 Test mode: Mock device saved for user ${userId}`);
       }
 
       return {
@@ -183,7 +188,7 @@ export class WebAuthnService {
     });
 
     // 存储 challenge 到数据库
-    await this.database.storeChallenge(options.challenge, userId || '', 'authentication');
+    await this.database.storeChallenge(options.challenge, userId || 'anonymous', 'authentication');
 
     return options;
   }
@@ -193,11 +198,14 @@ export class WebAuthnService {
    */
   async verifyAuthenticationResponse(
     response: AuthenticationResponseJSON,
-    expectedChallenge: string
+    expectedChallenge: string,
+    userId?: string
   ) {
-    // 验证 challenge
-    const isValidChallenge = await this.database.verifyAndUseChallenge(expectedChallenge);
+    // 验证 challenge - 使用与存储时相同的userId格式
+    const challengeUserId = userId || 'anonymous';
+    const isValidChallenge = await this.database.verifyAndUseChallenge(expectedChallenge, challengeUserId);
     if (!isValidChallenge) {
+      console.error(`Authentication challenge verification failed for user ${challengeUserId}, challenge: ${expectedChallenge.substring(0, 16)}...`);
       throw new Error('Invalid or expired challenge');
     }
 

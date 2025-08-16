@@ -1,0 +1,7 @@
+[dependencies.std]
+path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/rust/library/std"
+
+[patch.crates-io]
+libc =  { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/libc" }
+rustc-std-workspace-core = { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/rust/library/rustc-std-workspace-core" }
+rustc-std-workspace-alloc = { path = "../../third_party/incubator-teaclave-trustzone-sdk/rust/rust/library/rustc-std-workspace-alloc" }

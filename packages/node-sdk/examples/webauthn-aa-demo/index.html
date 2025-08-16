@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirAccount WebAuthn + Account Abstraction Demo</title>
+    <script src="https://unpkg.com/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
+    <script src="https://unpkg.com/ethers@6/dist/ethers.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            color: white;
+        }
+
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .demo-section {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            color: #5a67d8;
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #5a67d8;
+            box-shadow: 0 0 0 3px rgba(90, 103, 216, 0.1);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #5a67d8, #667eea);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #718096, #a0aec0);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #e53e3e, #fc8181);
+        }
+
+        .status {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .status.success {
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
+        }
+
+        .status.error {
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #feb2b2;
+        }
+
+        .status.info {
+            background: #bee3f8;
+            color: #2a4365;
+            border: 1px solid #90cdf4;
+        }
+
+        .wallet-info {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .wallet-info h3 {
+            color: #2d3748;
+            margin-bottom: 15px;
+        }
+
+        .wallet-property {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .wallet-property:last-child {
+            border-bottom: none;
+        }
+
+        .property-label {
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .property-value {
+            font-family: 'Monaco', 'Menlo', monospace;
+            color: #2d3748;
+            word-break: break-all;
+        }
+
+        .demo-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+        }
+
+        .transaction-form {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .feature-list li {
+            padding: 10px 0;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+        }
+
+        .feature-list li:before {
+            content: "✅";
+            margin-right: 10px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .log-area {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+            height: 300px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 4px;
+        }
+
+        .log-entry.info { background: rgba(59, 130, 246, 0.1); }
+        .log-entry.success { background: rgba(16, 185, 129, 0.1); }
+        .log-entry.error { background: rgba(239, 68, 68, 0.1); }
+        .log-entry.warning { background: rgba(245, 158, 11, 0.1); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 AirAccount Demo</h1>
+            <p>WebAuthn Passkey + Account Abstraction + TEE Integration</p>
+        </div>
+
+        <!-- Support Check -->
+        <div class="demo-section">
+            <div class="section-title">🔍 Browser Support Check</div>
+            <div id="supportStatus" class="status info">Checking browser support...</div>
+            <ul class="feature-list">
+                <li id="webauthnSupport">WebAuthn API Support</li>
+                <li id="platformAuthSupport">Platform Authenticator (Touch/Face ID)</li>
+                <li id="credentialCreateSupport">Credential Creation Support</li>
+                <li id="userVerificationSupport">User Verification Support</li>
+            </ul>
+        </div>
+
+        <div class="demo-grid">
+            <!-- Registration Section -->
+            <div class="demo-section">
+                <div class="section-title">👤 User Registration</div>
+                <div id="registrationStatus"></div>
+                
+                <div class="form-group">
+                    <label for="regEmail">Email Address</label>
+                    <input type="email" id="regEmail" placeholder="your.email@example.com" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="regDisplayName">Display Name</label>
+                    <input type="text" id="regDisplayName" placeholder="Your Name" required>
+                </div>
+                
+                <button class="btn" id="registerBtn" onclick="registerUser()">
+                    <span class="btn-text">🔐 Create Account with Passkey</span>
+                </button>
+                
+                <div id="registrationResult" class="wallet-info hidden">
+                    <h3>✅ Registration Successful</h3>
+                    <div class="wallet-property">
+                        <span class="property-label">User ID:</span>
+                        <span class="property-value" id="regUserId"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Credential ID:</span>
+                        <span class="property-value" id="regCredentialId"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Wallet Address:</span>
+                        <span class="property-value" id="regWalletAddress"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Session Token:</span>
+                        <span class="property-value" id="regSessionToken"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Authentication Section -->
+            <div class="demo-section">
+                <div class="section-title">🔓 User Authentication</div>
+                <div id="authStatus"></div>
+                
+                <div class="form-group">
+                    <label for="authEmail">Email Address (optional for passwordless)</label>
+                    <input type="email" id="authEmail" placeholder="your.email@example.com">
+                </div>
+                
+                <button class="btn" id="authBtn" onclick="authenticateUser()">
+                    <span class="btn-text">🔓 Sign In with Passkey</span>
+                </button>
+                
+                <button class="btn btn-secondary" id="passwordlessBtn" onclick="passwordlessAuth()">
+                    <span class="btn-text">🚀 Passwordless Sign In</span>
+                </button>
+                
+                <div id="authResult" class="wallet-info hidden">
+                    <h3>✅ Authentication Successful</h3>
+                    <div class="wallet-property">
+                        <span class="property-label">User Email:</span>
+                        <span class="property-value" id="authUserEmail"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Session Token:</span>
+                        <span class="property-value" id="authSessionToken"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Wallet ID:</span>
+                        <span class="property-value" id="authWalletId"></span>
+                    </div>
+                    <div class="wallet-property">
+                        <span class="property-label">Ethereum Address:</span>
+                        <span class="property-value" id="authEthAddress"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Account Abstraction Section -->
+        <div class="demo-section">
+            <div class="section-title">⚡ Account Abstraction Features</div>
+            <div id="aaStatus"></div>
+            
+            <div class="demo-grid">
+                <div>
+                    <h4>🏦 Account Operations</h4>
+                    <button class="btn" onclick="checkAccountBalance()">Check Balance</button>
+                    <button class="btn" onclick="getAccountInfo()">Get Account Info</button>
+                    <button class="btn" onclick="deployAccount()">Deploy Account</button>
+                    
+                    <div id="accountInfo" class="wallet-info hidden">
+                        <h3>Account Information</h3>
+                        <div class="wallet-property">
+                            <span class="property-label">Address:</span>
+                            <span class="property-value" id="aaAddress"></span>
+                        </div>
+                        <div class="wallet-property">
+                            <span class="property-label">Nonce:</span>
+                            <span class="property-value" id="aaNonce"></span>
+                        </div>
+                        <div class="wallet-property">
+                            <span class="property-label">Is Deployed:</span>
+                            <span class="property-value" id="aaDeployed"></span>
+                        </div>
+                        <div class="wallet-property">
+                            <span class="property-label">Balance:</span>
+                            <span class="property-value" id="aaBalance"></span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="transaction-form">
+                    <h4>💸 Send Transaction</h4>
+                    <div class="form-group">
+                        <label for="txTo">To Address</label>
+                        <input type="text" id="txTo" placeholder="0x...">
+                    </div>
+                    <div class="form-group">
+                        <label for="txValue">Value (ETH)</label>
+                        <input type="number" id="txValue" placeholder="0.001" step="0.001">
+                    </div>
+                    <div class="form-group">
+                        <label for="txData">Data (optional)</label>
+                        <input type="text" id="txData" placeholder="0x...">
+                    </div>
+                    <button class="btn" onclick="sendTransaction()">Send Transaction</button>
+                    <button class="btn btn-secondary" onclick="sendWithPaymaster()">Send with Paymaster</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Security Section -->
+        <div class="demo-section">
+            <div class="section-title">🔒 TEE Security Verification</div>
+            <div id="securityStatus"></div>
+            
+            <button class="btn" onclick="verifyTEESecurity()">🔍 Verify TEE Security State</button>
+            <button class="btn btn-secondary" onclick="testHybridEntropy()">🎲 Test Hybrid Entropy</button>
+            
+            <div id="securityInfo" class="wallet-info hidden">
+                <h3>Security Verification Results</h3>
+                <div class="wallet-property">
+                    <span class="property-label">TEE Verified:</span>
+                    <span class="property-value" id="teeVerified"></span>
+                </div>
+                <div class="wallet-property">
+                    <span class="property-label">TEE Entropy:</span>
+                    <span class="property-value" id="teeEntropy"></span>
+                </div>
+                <div class="wallet-property">
+                    <span class="property-label">Memory Protection:</span>
+                    <span class="property-value" id="memoryProtection"></span>
+                </div>
+                <div class="wallet-property">
+                    <span class="property-label">Hybrid Entropy:</span>
+                    <span class="property-value" id="hybridEntropy"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Session Management -->
+        <div class="demo-section">
+            <div class="section-title">🎮 Session Management</div>
+            <button class="btn btn-danger" onclick="logout()">🚪 Logout</button>
+            <button class="btn btn-secondary" onclick="clearDemo()">🧹 Clear Demo Data</button>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="demo-section">
+            <div class="section-title">📋 Activity Log</div>
+            <button class="btn btn-secondary" onclick="clearLog()">Clear Log</button>
+            <div id="logArea" class="log-area"></div>
+        </div>
+    </div>
+
+    <script src="demo.js"></script>
+</body>
+</html>

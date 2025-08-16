@@ -6,11 +6,54 @@
 
 ## Overview
 
-AAStar uses the Apache Teaclave open-source project to build TEE-Account, a hardware-based wallet using TEE for the community. We run TEE-Account on OP-TEE on a Raspberry Pi 5. This account saves your private key in secure storage on OP-TEE and signs transactions with a verified fingerprint signature. All signatures will be verified by DVT and the on-chain account contract.
+**🔐 下一代Web3钱包 - 无助记词 + Passkey生物识别 + TEE硬件安全**
 
-TEE-Account is a part of our [AirAccount](https://aastar.io/airaccount) project.
+AirAccount通过创新的**"意图-安全分离"**架构，让Web3钱包既安全又易用：
+- **无助记词**: Web2社交账户 + Passkey生物识别，彻底摆脱助记词
+- **TEE硬件安全**: 基于ARM TrustZone的物理级安全隔离  
+- **意图驱动**: 用户表达简单意图，TEE执行复杂的安全检查
 
-This repository is a monorepo containing all the core components for the AirAccount TEE-based Web3 account system. For a detailed technical plan and development roadmap, please see the [Planning Document](./docs/Plan.md).
+AirAccount是一个完整的TEE硬件钱包解决方案，运行在Raspberry Pi 5的OP-TEE环境上。所有私钥存储在TEE安全存储中，交易签名通过生物识别验证，并由DVT网络和链上智能合约双重验证。
+
+### 🌟 核心价值主张
+
+> **"让Web3像Web2一样简单，让钱包像银行一样安全"**
+
+**🔥 用户体验**: 无需学习助记词，用Google账户+指纹就能拥有Web3钱包  
+**🛡️ 企业安全**: 基于TEE硬件的银行级安全，支持Account Abstraction  
+**🚀 开发友好**: 完整的TypeScript SDK，一行代码集成钱包功能
+
+### 📦 快速体验
+
+**🔥 真实Demo（现已可用）**
+
+```bash
+# 1. 启动真实CA服务（支持WebAuthn）
+cd ca-service-real
+npm install && npm run dev
+
+# 2. 启动真实Demo（真实Passkey）
+cd demo-real  
+npm install && npm run dev
+
+# 3. 访问 http://localhost:5174 体验真实功能
+```
+
+**🔑 真实功能**
+- ✅ 真实WebAuthn/Passkey注册
+- ✅ 浏览器原生生物识别验证
+- ✅ SQLite数据库存储
+- ✅ 挑战-响应安全验证
+- ✅ 设备兼容性检查
+
+**🔗 开发资源**
+
+- **🚀 启动指南**: [REAL-DEMO-GUIDE.md](./REAL-DEMO-GUIDE.md)
+- **📖 SDK文档**: [airaccount-sdk-real/README.md](./airaccount-sdk-real/README.md)
+- **🎯 使用教程**: [airaccount-sdk-real/TUTORIAL.md](./airaccount-sdk-real/TUTORIAL.md)
+- **📚 API参考**: [airaccount-sdk-real/API.md](./airaccount-sdk-real/API.md)
+
+本仓库是包含所有AirAccount核心组件的monorepo。详细技术规划和开发路线图请参考 [Planning Document](./docs/Plan.md)。
 
 Our work is heavily based on the official Teaclave and OP-TEE projects. We use the official `incubator-teaclave-trustzone-sdk` as a submodule to ensure we can stay up-to-date with the latest developments. The `eth_wallet` example within the SDK serves as a foundational reference for our Trusted Application development.
 
