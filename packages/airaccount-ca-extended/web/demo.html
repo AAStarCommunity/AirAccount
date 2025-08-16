@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirAccount - 安全的TEE驱动Web3钱包</title>
+    <meta name="description" content="使用TEE技术和Passkey认证的安全Web3钱包">
+</head>
+<body>
+    <!-- 自动初始化标记 -->
+    <div id="airaccount-auto-init"></div>
+    
+    <!-- 加载认证组件 -->
+    <script src="auth.js"></script>
+    
+    <script>
+        // 自定义配置和回调
+        document.addEventListener('DOMContentLoaded', () => {
+            const auth = new AirAccountAuth({
+                apiBaseUrl: 'http://localhost:3001' // Rust CA服务器
+            });
+            
+            // 设置完成回调
+            auth.onComplete = (userInfo) => {
+                console.log('🎉 用户注册完成:', userInfo);
+                
+                // 可以在这里跳转到钱包主界面
+                setTimeout(() => {
+                    if (confirm('注册完成！是否查看钱包详情？')) {
+                        showWalletDashboard(userInfo);
+                    }
+                }, 1000);
+            };
+        });
+        
+        function showWalletDashboard(userInfo) {
+            // 创建简单的钱包仪表板
+            document.body.innerHTML = `
+                <div style="padding: 2rem; max-width: 800px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                    <h1>🎉 欢迎使用 AirAccount</h1>
+                    
+                    <div style="background: #f8f9fa; padding: 1.5rem; border-radius: 8px; margin: 1rem 0;">
+                        <h2>钱包信息</h2>
+                        <p><strong>用户邮箱:</strong> ${userInfo.email}</p>
+                        <p><strong>登录方式:</strong> ${userInfo.source}</p>
+                        <p><strong>钱包ID:</strong> ${userInfo.walletId}</p>
+                        <p><strong>以太坊地址:</strong> <code>${userInfo.ethereumAddress}</code></p>
+                        <p><strong>TEE设备ID:</strong> <code>${userInfo.teeDeviceId}</code></p>
+                    </div>
+                    
+                    <div style="background: #d1ecf1; padding: 1.5rem; border-radius: 8px; margin: 1rem 0;">
+                        <h3>🔒 安全特性</h3>
+                        <ul>
+                            <li>✅ Passkey认证 - 使用设备生物识别</li>
+                            <li>✅ TEE保护 - 私钥存储在可信执行环境</li>
+                            <li>✅ 硬件级安全 - 防止私钥泄露</li>
+                            <li>✅ 抗钓鱼攻击 - 基于域名绑定</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="background: #fff3cd; padding: 1.5rem; border-radius: 8px; margin: 1rem 0;">
+                        <h3>📱 下一步</h3>
+                        <p>您的钱包已安全创建在TEE环境中。您可以：</p>
+                        <ul>
+                            <li>查看余额和交易历史</li>
+                            <li>发送和接收加密货币</li>
+                            <li>与DApp交互</li>
+                            <li>管理NFT资产</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin-top: 2rem;">
+                        <button onclick="location.reload()" style="
+                            background: #667eea; 
+                            color: white; 
+                            border: none; 
+                            padding: 0.75rem 2rem; 
+                            border-radius: 6px; 
+                            font-size: 1rem; 
+                            cursor: pointer;
+                            margin-right: 1rem;
+                        ">重新注册</button>
+                        
+                        <button onclick="testWalletFunctions()" style="
+                            background: #28a745; 
+                            color: white; 
+                            border: none; 
+                            padding: 0.75rem 2rem; 
+                            border-radius: 6px; 
+                            font-size: 1rem; 
+                            cursor: pointer;
+                        ">测试钱包功能</button>
+                    </div>
+                    
+                    <div style="text-align: center; margin-top: 1rem; color: #666; font-size: 0.9rem;">
+                        <p>AirAccount - 由 <a href="https://github.com/AAStarCommunity/AirAccount" target="_blank">开源社区</a> 驱动</p>
+                    </div>
+                </div>
+            `;
+            
+            // 保存用户信息到sessionStorage
+            sessionStorage.setItem('airaccount_user', JSON.stringify(userInfo));
+        }
+        
+        async function testWalletFunctions() {
+            const userInfo = JSON.parse(sessionStorage.getItem('airaccount_user') || '{}');
+            
+            if (!userInfo.walletId) {
+                alert('未找到钱包信息');
+                return;
+            }
+            
+            try {
+                // 测试查询余额
+                const balanceResponse = await fetch('http://localhost:3001/api/account/balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        wallet_id: userInfo.walletId
+                    })
+                });
+                
+                const balanceResult = await balanceResponse.json();
+                
+                // 测试列出钱包
+                const listResponse = await fetch('http://localhost:3001/api/wallet/list');
+                const listResult = await listResponse.json();
+                
+                alert(`钱包功能测试成功！\\n\\n余额查询: ${JSON.stringify(balanceResult, null, 2)}\\n\\n钱包列表: ${listResult.wallets?.length || 0} 个钱包`);
+                
+            } catch (error) {
+                alert(`钱包功能测试失败: ${error.message}`);
+            }
+        }
+        
+        // 检查浏览器WebAuthn支持
+        if (!window.PublicKeyCredential) {
+            document.addEventListener('DOMContentLoaded', () => {
+                document.body.innerHTML = `
+                    <div style="
+                        display: flex; 
+                        justify-content: center; 
+                        align-items: center; 
+                        min-height: 100vh; 
+                        background: #f8f9fa; 
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    ">
+                        <div style="
+                            background: white; 
+                            padding: 2rem; 
+                            border-radius: 12px; 
+                            box-shadow: 0 4px 16px rgba(0,0,0,0.1); 
+                            text-align: center;
+                            max-width: 400px;
+                        ">
+                            <h1 style="color: #dc3545; margin-bottom: 1rem;">⚠️ 浏览器不支持</h1>
+                            <p>您的浏览器不支持WebAuthn/Passkey功能。</p>
+                            <p>请使用以下浏览器：</p>
+                            <ul style="text-align: left; margin: 1rem 0;">
+                                <li>Chrome 67+</li>
+                                <li>Firefox 60+</li>
+                                <li>Safari 14+</li>
+                                <li>Edge 18+</li>
+                            </ul>
+                            <p style="color: #666; font-size: 0.9rem;">
+                                或确保您的浏览器启用了WebAuthn功能。
+                            </p>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+    </script>
+</body>
+</html>

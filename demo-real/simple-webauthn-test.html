@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirAccount 真实 WebAuthn 测试</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #4a5568;
+            margin-bottom: 10px;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            font-weight: 500;
+        }
+        .status.info { background: #e6fffa; border-left: 4px solid #38b2ac; }
+        .status.success { background: #f0fff4; border-left: 4px solid #48bb78; }
+        .status.error { background: #fed7d7; border-left: 4px solid #f56565; }
+        .status.warning { background: #fffaf0; border-left: 4px solid #ed8936; }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 10px 5px;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .form-group {
+            margin: 20px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .result {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 AirAccount 真实 WebAuthn 测试</h1>
+            <p>测试真实的浏览器Passkey注册和认证功能</p>
+        </div>
+
+        <!-- WebAuthn支持检查 -->
+        <div id="webauthn-support" class="status info">
+            正在检查 WebAuthn 支持...
+        </div>
+
+        <!-- 用户输入 -->
+        <div class="form-group">
+            <label for="email">邮箱地址:</label>
+            <input type="email" id="email" value="test@example.com" placeholder="输入您的邮箱">
+        </div>
+        
+        <div class="form-group">
+            <label for="displayName">显示名称:</label>
+            <input type="text" id="displayName" value="Test User" placeholder="输入显示名称">
+        </div>
+
+        <!-- 操作按钮 -->
+        <div style="text-align: center; margin: 30px 0;">
+            <button id="register-btn" onclick="registerPasskey()">🆔 注册 Passkey</button>
+            <button id="authenticate-btn" onclick="authenticatePasskey()">🔑 认证 Passkey</button>
+            <button onclick="clearResults()">🗑️ 清空结果</button>
+        </div>
+
+        <!-- 结果显示 -->
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3002';
+        
+        // 检查WebAuthn支持
+        function checkWebAuthnSupport() {
+            const supportDiv = document.getElementById('webauthn-support');
+            
+            if (window.PublicKeyCredential) {
+                supportDiv.className = 'status success';
+                supportDiv.innerHTML = '✅ 浏览器支持 WebAuthn/Passkey 功能';
+                
+                // 检查平台认证器支持
+                PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+                    .then(available => {
+                        if (available) {
+                            supportDiv.innerHTML += '<br>✅ 支持平台认证器 (Touch ID/Face ID/Windows Hello)';
+                        } else {
+                            supportDiv.innerHTML += '<br>⚠️ 不支持平台认证器，将使用其他认证方式';
+                        }
+                    });
+            } else {
+                supportDiv.className = 'status error';
+                supportDiv.innerHTML = '❌ 浏览器不支持 WebAuthn。请使用 Chrome 67+、Firefox 60+ 或 Safari 14+';
+                document.getElementById('register-btn').disabled = true;
+                document.getElementById('authenticate-btn').disabled = true;
+            }
+        }
+
+        // Base64URL 编码解码函数
+        function base64URLToBuffer(base64url) {
+            const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+            const padded = base64.padEnd(base64.length + (4 - base64.length % 4) % 4, '=');
+            const binary = atob(padded);
+            const buffer = new ArrayBuffer(binary.length);
+            const view = new Uint8Array(buffer);
+            for (let i = 0; i < binary.length; i++) {
+                view[i] = binary.charCodeAt(i);
+            }
+            return buffer;
+        }
+
+        function bufferToBase64URL(buffer) {
+            const binary = String.fromCharCode(...new Uint8Array(buffer));
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        }
+
+        // 显示结果
+        function addResult(title, content, type = 'info') {
+            const resultsDiv = document.getElementById('results');
+            const resultDiv = document.createElement('div');
+            resultDiv.innerHTML = `
+                <div class="status ${type}">
+                    <strong>${title}</strong>
+                </div>
+                <div class="result">${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}</div>
+            `;
+            resultsDiv.appendChild(resultDiv);
+            resultDiv.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // 清空结果
+        function clearResults() {
+            document.getElementById('results').innerHTML = '';
+        }
+
+        // 注册Passkey
+        async function registerPasskey() {
+            const email = document.getElementById('email').value;
+            const displayName = document.getElementById('displayName').value;
+            
+            if (!email || !displayName) {
+                addResult('❌ 输入错误', '请填写邮箱和显示名称', 'error');
+                return;
+            }
+
+            try {
+                addResult('🚀 开始注册', `正在为 ${email} 注册 Passkey...`);
+                
+                // 1. 获取注册选项
+                const registerBeginResponse = await fetch(`${API_BASE}/api/webauthn/register/begin`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, displayName })
+                });
+                
+                if (!registerBeginResponse.ok) {
+                    throw new Error(`HTTP ${registerBeginResponse.status}: ${await registerBeginResponse.text()}`);
+                }
+                
+                const { options, sessionId } = await registerBeginResponse.json();
+                addResult('✅ 注册选项获取成功', {
+                    challenge: options.challenge.substring(0, 32) + '...',
+                    rpId: options.rp.id,
+                    rpName: options.rp.name,
+                    sessionId: sessionId
+                }, 'success');
+
+                // 2. 转换选项格式
+                const credentialCreationOptions = {
+                    ...options,
+                    challenge: base64URLToBuffer(options.challenge),
+                    user: {
+                        ...options.user,
+                        id: base64URLToBuffer(options.user.id)
+                    },
+                    excludeCredentials: options.excludeCredentials?.map(cred => ({
+                        ...cred,
+                        id: base64URLToBuffer(cred.id)
+                    })) || []
+                };
+
+                addResult('📱 调用浏览器 WebAuthn API', '正在调用 navigator.credentials.create()...');
+                
+                // 3. 调用浏览器WebAuthn API
+                const credential = await navigator.credentials.create({
+                    publicKey: credentialCreationOptions
+                });
+
+                if (!credential) {
+                    throw new Error('用户取消了注册或注册失败');
+                }
+
+                addResult('✅ Passkey 创建成功', {
+                    credentialId: credential.id,
+                    authenticatorType: credential.authenticatorAttachment || '未知',
+                    clientExtensions: credential.getClientExtensionResults()
+                }, 'success');
+
+                // 4. 提交注册结果
+                const registrationResponse = {
+                    id: credential.id,
+                    rawId: bufferToBase64URL(credential.rawId),
+                    response: {
+                        clientDataJSON: bufferToBase64URL(credential.response.clientDataJSON),
+                        attestationObject: bufferToBase64URL(credential.response.attestationObject),
+                        transports: credential.response.getTransports ? credential.response.getTransports() : []
+                    },
+                    type: credential.type
+                };
+
+                const registerFinishResponse = await fetch(`${API_BASE}/api/webauthn/register/finish`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email,
+                        registrationResponse,
+                        challenge: options.challenge
+                    })
+                });
+
+                if (!registerFinishResponse.ok) {
+                    throw new Error(`注册验证失败: ${await registerFinishResponse.text()}`);
+                }
+
+                const result = await registerFinishResponse.json();
+                addResult('🎉 注册完成', {
+                    walletId: result.walletResult?.walletId,
+                    ethereumAddress: result.walletResult?.ethereumAddress,
+                    credentialId: result.userInstructions?.credentialId,
+                    message: result.userInstructions?.message
+                }, 'success');
+
+            } catch (error) {
+                console.error('注册失败:', error);
+                addResult('❌ 注册失败', error.message, 'error');
+            }
+        }
+
+        // 认证Passkey
+        async function authenticatePasskey() {
+            const email = document.getElementById('email').value;
+            
+            if (!email) {
+                addResult('❌ 输入错误', '请填写邮箱地址', 'error');
+                return;
+            }
+
+            try {
+                addResult('🔑 开始认证', `正在为 ${email} 进行 Passkey 认证...`);
+                
+                // 1. 获取认证选项
+                const authBeginResponse = await fetch(`${API_BASE}/api/webauthn/authenticate/begin`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                
+                if (!authBeginResponse.ok) {
+                    throw new Error(`HTTP ${authBeginResponse.status}: ${await authBeginResponse.text()}`);
+                }
+                
+                const { options } = await authBeginResponse.json();
+                addResult('✅ 认证选项获取成功', {
+                    challenge: options.challenge.substring(0, 32) + '...',
+                    rpId: options.rpId,
+                    allowCredentials: options.allowCredentials?.length || 0
+                }, 'success');
+
+                // 2. 转换选项格式
+                const credentialRequestOptions = {
+                    ...options,
+                    challenge: base64URLToBuffer(options.challenge),
+                    allowCredentials: options.allowCredentials?.map(cred => ({
+                        ...cred,
+                        id: base64URLToBuffer(cred.id)
+                    })) || []
+                };
+
+                addResult('📱 调用浏览器 WebAuthn API', '正在调用 navigator.credentials.get()...');
+                
+                // 3. 调用浏览器WebAuthn API
+                const assertion = await navigator.credentials.get({
+                    publicKey: credentialRequestOptions
+                });
+
+                if (!assertion) {
+                    throw new Error('用户取消了认证或认证失败');
+                }
+
+                addResult('✅ Passkey 认证成功', {
+                    credentialId: assertion.id,
+                    authenticatorType: assertion.authenticatorAttachment || '未知',
+                    clientExtensions: assertion.getClientExtensionResults()
+                }, 'success');
+
+                // 4. 提交认证结果
+                const authenticationResponse = {
+                    id: assertion.id,
+                    rawId: bufferToBase64URL(assertion.rawId),
+                    response: {
+                        clientDataJSON: bufferToBase64URL(assertion.response.clientDataJSON),
+                        authenticatorData: bufferToBase64URL(assertion.response.authenticatorData),
+                        signature: bufferToBase64URL(assertion.response.signature)
+                    },
+                    type: assertion.type
+                };
+
+                const authFinishResponse = await fetch(`${API_BASE}/api/webauthn/authenticate/finish`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email,
+                        authenticationResponse,
+                        challenge: options.challenge
+                    })
+                });
+
+                if (!authFinishResponse.ok) {
+                    throw new Error(`认证验证失败: ${await authFinishResponse.text()}`);
+                }
+
+                const result = await authFinishResponse.json();
+                addResult('🎉 认证完成', {
+                    sessionId: result.sessionId,
+                    userAccount: result.userAccount,
+                    sessionInfo: result.sessionInfo
+                }, 'success');
+
+            } catch (error) {
+                console.error('认证失败:', error);
+                addResult('❌ 认证失败', error.message, 'error');
+            }
+        }
+
+        // 页面加载时检查WebAuthn支持
+        window.addEventListener('load', checkWebAuthnSupport);
+    </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "name": "airaccount-sdk-test",
+  "version": "0.1.0",
+  "description": "AirAccount SDK 测试工具 - 用于测试CA和TA集成",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test-ca-integration.js",
+    "test-rust": "node test-ca-integration.js --ca=rust",
+    "test-nodejs": "node test-ca-integration.js --ca=nodejs",
+    "test-both": "node test-ca-integration.js --ca=both",
+    "demo": "node demo-full-flow.js",
+    "demo-blockchain": "node demo-blockchain-integration.js",
+    "test-anvil": "node anvil-lifecycle-test.js",
+    "anvil-lifecycle": "node anvil-lifecycle-test.js",
+    "lifecycle": "node anvil-lifecycle-test.js",
+    "blockchain": "node demo-blockchain-integration.js"
+  },
+  "dependencies": {
+    "ethers": "^6.15.0",
+    "node-fetch": "^3.3.2"
+  },
+  "keywords": [
+    "airaccount",
+    "sdk",
+    "simulator",
+    "tee",
+    "webauthn"
+  ],
+  "author": "AirAccount Team",
+  "license": "MIT"
+}

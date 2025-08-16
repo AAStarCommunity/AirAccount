@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirAccount Basic Wallet</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 32px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #2d3748;
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        
+        .section {
+            margin-bottom: 24px;
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: #f7fafc;
+        }
+        
+        .section h3 {
+            margin-top: 0;
+            color: #4a5568;
+        }
+        
+        button {
+            background: #4299e1;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            transition: background 0.2s;
+        }
+        
+        button:hover {
+            background: #3182ce;
+        }
+        
+        button:disabled {
+            background: #a0aec0;
+            cursor: not-allowed;
+        }
+        
+        input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+        
+        .status {
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 16px;
+        }
+        
+        .status.success {
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
+        }
+        
+        .status.error {
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #fc8181;
+        }
+        
+        .status.info {
+            background: #bee3f8;
+            color: #2c5282;
+            border: 1px solid #63b3ed;
+        }
+        
+        .wallet-info {
+            background: #edf2f7;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 16px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🛡️ AirAccount Wallet</h1>
+        <div id="status"></div>
+        
+        <!-- Authentication Section -->
+        <div class="section" id="auth-section">
+            <h3>🔐 Authentication</h3>
+            <div id="register-form">
+                <input type="email" id="email" placeholder="Enter your email" value="user@example.com">
+                <input type="text" id="displayName" placeholder="Your display name" value="Demo User">
+                <button onclick="registerUser()">Register with Passkey</button>
+            </div>
+            <div id="login-form" class="hidden">
+                <input type="email" id="login-email" placeholder="Enter your email">
+                <button onclick="loginUser()">Login with Passkey</button>
+            </div>
+            <button onclick="toggleForm()">Switch to Login</button>
+            <button onclick="logout()" class="hidden" id="logout-btn">Logout</button>
+        </div>
+        
+        <!-- Wallet Section -->
+        <div class="section hidden" id="wallet-section">
+            <h3>💰 Wallet Management</h3>
+            <button onclick="createAccount()">Create New Wallet</button>
+            <button onclick="getBalance()">Refresh Balance</button>
+            <button onclick="listWallets()">List All Wallets</button>
+            
+            <div class="wallet-info" id="wallet-info"></div>
+        </div>
+        
+        <!-- Transfer Section -->
+        <div class="section hidden" id="transfer-section">
+            <h3>💸 Transfer Funds</h3>
+            <input type="text" id="recipient" placeholder="Recipient address (0x...)">
+            <input type="number" id="amount" placeholder="Amount (ETH)" step="0.001">
+            <button onclick="sendTransfer()">Send Transfer</button>
+            
+            <div id="transfer-result"></div>
+        </div>
+        
+        <!-- Settings Section -->
+        <div class="section">
+            <h3>⚙️ Settings</h3>
+            <input type="url" id="ca-url" placeholder="CA Service URL" value="http://localhost:3001">
+            <button onclick="updateConfig()">Update Configuration</button>
+            <button onclick="testConnection()">Test Connection</button>
+        </div>
+    </div>
+
+    <script type="module">
+        // Import AirAccount SDK (in production, use: import { AirAccountSDK } from '@airaccount/sdk')
+        // For demo, we'll simulate the SDK
+        
+        let sdk = null;
+        let isRegistering = true;
+        
+        // Initialize on page load
+        window.addEventListener('load', async () => {
+            updateConfig();
+        });
+        
+        // Simulate AirAccount SDK for demo
+        class AirAccountSDKDemo {
+            constructor(config) {
+                this.config = config;
+                this.isAuthenticated = false;
+                this.currentUser = null;
+            }
+            
+            async initialize() {
+                // Test connection to CA service
+                const response = await fetch(`${this.config.caBaseUrl}/health`);
+                if (!response.ok) {
+                    throw new Error('CA service not available');
+                }
+                return await response.json();
+            }
+            
+            async registerWithWebAuthn(data) {
+                showStatus('Creating Passkey credential...', 'info');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                // Simulate WebAuthn registration
+                this.isAuthenticated = true;
+                this.currentUser = data.email;
+                return {
+                    success: true,
+                    credentialId: 'demo_' + Date.now(),
+                    message: 'Registration successful'
+                };
+            }
+            
+            async authenticateWithWebAuthn(data) {
+                showStatus('Verifying Passkey...', 'info');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                // Simulate WebAuthn authentication
+                this.isAuthenticated = true;
+                this.currentUser = data.email;
+                return {
+                    success: true,
+                    message: 'Authentication successful'
+                };
+            }
+            
+            async createAccount() {
+                if (!this.isAuthenticated) throw new Error('Not authenticated');
+                
+                // Call real CA API
+                const response = await fetch(`${this.config.caBaseUrl}/api/account/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: this.currentUser })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to create account');
+                }
+                
+                const result = await response.json();
+                return {
+                    id: result.walletId || 1,
+                    address: result.address || '0x742d35Cc6609FD3eE86c7638F0AF8e08a2b6C44A'
+                };
+            }
+            
+            async getBalance(walletId) {
+                if (!this.isAuthenticated) throw new Error('Not authenticated');
+                
+                try {
+                    const response = await fetch(`${this.config.caBaseUrl}/api/account/balance`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: this.currentUser, walletId })
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('Failed to get balance');
+                    }
+                    
+                    const result = await response.json();
+                    return {
+                        id: result.walletId || 1,
+                        address: result.address || '0x742d35Cc6609FD3eE86c7638F0AF8e08a2b6C44A',
+                        balance: {
+                            eth: result.balance?.eth || result.balance || '1.0'
+                        }
+                    };
+                } catch (error) {
+                    // Fallback for demo
+                    return {
+                        id: 1,
+                        address: '0x742d35Cc6609FD3eE86c7638F0AF8e08a2b6C44A',
+                        balance: { eth: '1.0' }
+                    };
+                }
+            }
+            
+            async transfer(params) {
+                if (!this.isAuthenticated) throw new Error('Not authenticated');
+                
+                try {
+                    const response = await fetch(`${this.config.caBaseUrl}/api/transaction/transfer`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            email: this.currentUser,
+                            to: params.to,
+                            amount: params.amount
+                        })
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('Transfer failed');
+                    }
+                    
+                    const result = await response.json();
+                    return {
+                        txHash: result.txHash || '0x1234567890abcdef1234567890abcdef12345678',
+                        status: 'pending'
+                    };
+                } catch (error) {
+                    // Fallback for demo
+                    return {
+                        txHash: '0x' + Math.random().toString(16).substr(2, 40),
+                        status: 'pending'
+                    };
+                }
+            }
+            
+            async listWallets() {
+                if (!this.isAuthenticated) throw new Error('Not authenticated');
+                
+                const balance = await this.getBalance();
+                return [balance];
+            }
+            
+            getCurrentUser() {
+                return this.currentUser;
+            }
+            
+            logout() {
+                this.isAuthenticated = false;
+                this.currentUser = null;
+            }
+        }
+        
+        // Global functions for buttons
+        window.updateConfig = async function() {
+            const caUrl = document.getElementById('ca-url').value || 'http://localhost:3001';
+            
+            try {
+                sdk = new AirAccountSDKDemo({ caBaseUrl: caUrl });
+                await sdk.initialize();
+                showStatus('✅ Connected to CA service successfully', 'success');
+            } catch (error) {
+                showStatus(`❌ Failed to connect: ${error.message}`, 'error');
+                sdk = new AirAccountSDKDemo({ caBaseUrl: caUrl }); // Allow offline demo
+            }
+        };
+        
+        window.testConnection = async function() {
+            if (!sdk) {
+                showStatus('❌ SDK not initialized', 'error');
+                return;
+            }
+            
+            try {
+                await sdk.initialize();
+                showStatus('✅ Connection test successful', 'success');
+            } catch (error) {
+                showStatus(`❌ Connection test failed: ${error.message}`, 'error');
+            }
+        };
+        
+        window.registerUser = async function() {
+            const email = document.getElementById('email').value;
+            const displayName = document.getElementById('displayName').value;
+            
+            if (!email || !displayName) {
+                showStatus('❌ Please fill in all fields', 'error');
+                return;
+            }
+            
+            try {
+                setLoading(true);
+                const result = await sdk.registerWithWebAuthn({ email, displayName });
+                
+                if (result.success) {
+                    showStatus(`✅ Registration successful for ${email}`, 'success');
+                    showWalletSections();
+                } else {
+                    showStatus(`❌ Registration failed: ${result.message}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`❌ Registration error: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        window.loginUser = async function() {
+            const email = document.getElementById('login-email').value;
+            
+            if (!email) {
+                showStatus('❌ Please enter your email', 'error');
+                return;
+            }
+            
+            try {
+                setLoading(true);
+                const result = await sdk.authenticateWithWebAuthn({ email });
+                
+                if (result.success) {
+                    showStatus(`✅ Login successful for ${email}`, 'success');
+                    showWalletSections();
+                } else {
+                    showStatus(`❌ Login failed: ${result.message}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`❌ Login error: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        window.logout = function() {
+            sdk.logout();
+            hideWalletSections();
+            showStatus('👋 Logged out successfully', 'info');
+        };
+        
+        window.toggleForm = function() {
+            const registerForm = document.getElementById('register-form');
+            const loginForm = document.getElementById('login-form');
+            const button = event.target;
+            
+            if (isRegistering) {
+                registerForm.classList.add('hidden');
+                loginForm.classList.remove('hidden');
+                button.textContent = 'Switch to Register';
+                isRegistering = false;
+            } else {
+                registerForm.classList.remove('hidden');
+                loginForm.classList.add('hidden');
+                button.textContent = 'Switch to Login';
+                isRegistering = true;
+            }
+        };
+        
+        window.createAccount = async function() {
+            try {
+                setLoading(true);
+                showStatus('🔐 Creating wallet in TEE hardware...', 'info');
+                
+                const wallet = await sdk.createAccount();
+                showStatus(`✅ Wallet created successfully!`, 'success');
+                
+                document.getElementById('wallet-info').innerHTML = `
+                    <strong>New Wallet Created:</strong><br>
+                    Address: ${wallet.address}<br>
+                    Wallet ID: ${wallet.id}
+                `;
+                
+                // Auto-refresh balance
+                setTimeout(getBalance, 1000);
+            } catch (error) {
+                showStatus(`❌ Failed to create wallet: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        window.getBalance = async function() {
+            try {
+                setLoading(true);
+                const wallet = await sdk.getBalance();
+                
+                document.getElementById('wallet-info').innerHTML = `
+                    <strong>Wallet Information:</strong><br>
+                    Address: ${wallet.address}<br>
+                    Balance: ${wallet.balance?.eth || '0'} ETH<br>
+                    Wallet ID: ${wallet.id}
+                `;
+                
+                showStatus('✅ Balance updated', 'success');
+            } catch (error) {
+                showStatus(`❌ Failed to get balance: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        window.listWallets = async function() {
+            try {
+                setLoading(true);
+                const wallets = await sdk.listWallets();
+                
+                const walletsHtml = wallets.map(wallet => `
+                    <div style="margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px;">
+                        ID: ${wallet.id} | Address: ${wallet.address} | Balance: ${wallet.balance?.eth || '0'} ETH
+                    </div>
+                `).join('');
+                
+                document.getElementById('wallet-info').innerHTML = `
+                    <strong>All Wallets (${wallets.length}):</strong><br>
+                    ${walletsHtml}
+                `;
+                
+                showStatus(`✅ Found ${wallets.length} wallet(s)`, 'success');
+            } catch (error) {
+                showStatus(`❌ Failed to list wallets: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        window.sendTransfer = async function() {
+            const recipient = document.getElementById('recipient').value;
+            const amount = document.getElementById('amount').value;
+            
+            if (!recipient || !amount) {
+                showStatus('❌ Please enter recipient and amount', 'error');
+                return;
+            }
+            
+            if (!recipient.startsWith('0x') || recipient.length !== 42) {
+                showStatus('❌ Invalid recipient address format', 'error');
+                return;
+            }
+            
+            try {
+                setLoading(true);
+                showStatus('🔐 Signing transaction in TEE...', 'info');
+                
+                const result = await sdk.transfer({ to: recipient, amount });
+                
+                document.getElementById('transfer-result').innerHTML = `
+                    <div class="status success">
+                        <strong>✅ Transfer Sent!</strong><br>
+                        Transaction Hash: ${result.txHash}<br>
+                        Status: ${result.status}<br>
+                        Amount: ${amount} ETH<br>
+                        To: ${recipient}
+                    </div>
+                `;
+                
+                showStatus('✅ Transfer completed successfully', 'success');
+                
+                // Clear form
+                document.getElementById('recipient').value = '';
+                document.getElementById('amount').value = '';
+                
+                // Auto-refresh balance
+                setTimeout(getBalance, 2000);
+            } catch (error) {
+                showStatus(`❌ Transfer failed: ${error.message}`, 'error');
+                document.getElementById('transfer-result').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Transfer Failed</strong><br>
+                        Error: ${error.message}
+                    </div>
+                `;
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        // Utility functions
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+            
+            // Auto-clear success/info messages
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    statusDiv.innerHTML = '';
+                }, 5000);
+            }
+        }
+        
+        function setLoading(loading) {
+            const container = document.querySelector('.container');
+            if (loading) {
+                container.classList.add('loading');
+            } else {
+                container.classList.remove('loading');
+            }
+        }
+        
+        function showWalletSections() {
+            document.getElementById('wallet-section').classList.remove('hidden');
+            document.getElementById('transfer-section').classList.remove('hidden');
+            document.getElementById('logout-btn').classList.remove('hidden');
+        }
+        
+        function hideWalletSections() {
+            document.getElementById('wallet-section').classList.add('hidden');
+            document.getElementById('transfer-section').classList.add('hidden');
+            document.getElementById('logout-btn').classList.add('hidden');
+            document.getElementById('wallet-info').innerHTML = '';
+            document.getElementById('transfer-result').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+[package]
+name = "airaccount-core-logic"
+version = "0.1.0"
+edition = "2021"
+authors = ["AirAccount Team"]
+description = "Hardware-agnostic core logic for AirAccount TEE-based Web3 wallet"
+license = "MIT"
+repository = "https://github.com/aastar/AirAccount"
+
+[dependencies]
+# Cryptographic dependencies - 使用精确版本锁定
+aes-gcm = "=0.10.3"
+subtle = "=2.5.0"
+rand = "=0.8.5"
+rand_chacha = "=0.3.1"
+
+# eth_wallet integration dependencies - 精确版本
+bip32 = { version = "=0.3.0", features = ["bip39"] }
+secp256k1 = "=0.27.0"
+ethereum-tx-sign = "=6.1.3"
+sha3 = "=0.10.6"
+uuid = { version = "=1.8.0", default-features = false, features = ["v4", "serde"] }
+bincode = "=1.3.3"
+hex = { version = "=0.4.3", features = ["serde"] }
+anyhow = "=1.0.75"
+
+# Enum utilities
+num_enum = "=0.7.1"
+
+# Async support
+async-trait = "=0.1.77"
+
+# Serialization - 精确版本锁定
+serde = { version = "=1.0.195", features = ["derive"] }
+serde_json = "=1.0.111"
+
+# Memory safety
+zeroize = { version = "=1.7.0", features = ["derive"] }
+
+# Error handling
+thiserror = "=1.0.56"
+
+# Async runtime (optional, for future use)
+tokio = { version = "=1.35.1", features = ["rt", "sync"], optional = true }
+
+# Logging
+log = "=0.4.20"
+
+[dev-dependencies]
+tokio-test = "=0.4.3"
+tokio = { version = "=1.35.1", features = ["rt", "sync", "macros"] }
+tempfile = "=3.9.0"
+
+[features]
+default = ["std"]
+std = ["serde/std", "serde_json/std", "uuid/std", "anyhow/std"]
+async = ["tokio"]
+no-std = ["serde/alloc", "uuid/v4"]
+std_backtrace = []
+
+[lib]
+name = "airaccount_core_logic"
+path = "src/lib.rs"
+
+[[bin]]
+name = "security-test"
+path = "src/bin/security_test.rs"
+
+# 安全审计配置
+[package.metadata.cargo-deny]
+version = 2

@@ -314,7 +314,7 @@ chmod +x airaccount-ca
 
 ### 选项3: Docker容器测试
 ```bash
-docker build -t airaccount-test -f Dockerfile.simple-integration .
+docker build -t airaccount-test -f docker/integration/Dockerfile.simple-integration .
 docker run --rm airaccount-test
 ```
 

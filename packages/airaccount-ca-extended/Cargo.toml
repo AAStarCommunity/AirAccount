@@ -1,0 +1,67 @@
+[package]
+name = "airaccount-ca-extended"
+version = "0.1.0"
+edition = "2021"
+description = "Extended AirAccount CA with WebAuthn and HTTP API support"
+
+[dependencies]
+# 基础TEE通信
+optee-teec = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+
+# Web框架
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# WebAuthn
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+base64 = "0.21"
+
+# 数据库
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# 基础工具
+uuid = { version = "1.8", features = ["v4", "serde"] }
+anyhow = "1.0"
+thiserror = "1.0"
+hex = "0.4"
+ring = "0.17"
+rand = "0.8"
+
+# OAuth2 and Email
+oauth2 = "4.4"
+reqwest = { version = "0.11", features = ["json"] }
+lettre = "0.11"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 配置
+config = "0.13"
+dotenv = "0.15"
+
+# CLI (可选)
+clap = { version = "4.0", features = ["derive"], optional = true }
+
+[features]
+default = ["cli"]
+cli = ["clap"]
+
+[build-dependencies]
+anyhow = "1.0"
+
+[[bin]]
+name = "ca-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "ca-cli"
+path = "src/cli.rs"
+required-features = ["cli"]
