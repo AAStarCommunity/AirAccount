@@ -6,8 +6,12 @@ use std::io::{self, Write};
 
 mod wallet_test;
 mod webauthn_service;
+mod database;
 
 use webauthn_service::WebAuthnService;
+use database::Database;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // AirAccount Simple TA UUID - matches the one in simple TA's build.rs
 const AIRACCOUNT_TA_UUID: &str = "11223344-5566-7788-99aa-bbccddeeff01";
@@ -191,7 +195,9 @@ async fn run_webauthn_mode() -> Result<()> {
     println!("Commands: register <user_id> <display_name>, auth <user_id>, list, info <user_id>, quit");
     println!("=======================================");
     
-    let webauthn = WebAuthnService::new()?;
+    // 初始化数据库（与Node.js CA共享）
+    let database = Arc::new(Mutex::new(Database::new(Some("airaccount.db"))?));
+    let webauthn = WebAuthnService::new(database)?;
     
     loop {
         print!("WebAuthn> ");
