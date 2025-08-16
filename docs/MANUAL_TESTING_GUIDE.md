@@ -190,6 +190,51 @@ npm run dev
 4. 完成生物识别验证
 5. 查看账户创建结果
 
+### 阶段5: Rust CA测试
+
+**⚠️ 重要说明**: Rust CA是纯TEE客户端，**不支持WebAuthn功能**
+
+#### 步骤5.1: Rust CA基础TEE通信测试
+
+```bash
+# 终端5: 测试Rust CA基础功能
+cd packages/airaccount-ca
+
+# 构建Rust CA (如果尚未构建)
+cargo build --target aarch64-unknown-linux-gnu --release
+
+# 运行基础测试套件
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca test
+
+# 测试交互模式
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca interactive
+```
+
+#### 步骤5.2: Rust CA钱包功能测试
+
+```bash
+# 测试钱包功能 (直接TEE调用)
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca wallet
+
+# 测试安全状态验证
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca security
+```
+
+#### 步骤5.3: CA架构对比
+
+| 功能 | Node.js CA | Rust CA | 说明 |
+|------|------------|---------|------|
+| WebAuthn注册 | ✅ 完整支持 | ❌ 不支持 | 不同的应用层级 |
+| Passkey认证 | ✅ 完整支持 | ❌ 不支持 | 不同的应用层级 |
+| TEE通信 | ✅ 间接调用 | ✅ 直接调用 | 都支持TA通信 |
+| 钱包功能 | ✅ 高级接口 | ✅ 底层接口 | 不同抽象层级 |
+| HTTP API | ✅ REST服务 | ❌ 无API | 用途不同 |
+
+**架构说明**: 
+- **Node.js CA**: 高级WebAuthn钱包服务，提供完整的Web3账户体验
+- **Rust CA**: 底层TEE客户端，用于直接测试TA功能和开发调试
+- **用途区别**: Node.js CA面向最终用户，Rust CA面向开发者和系统集成
+
 ## 🔧 问题修复方案
 
 ### 修复Challenge过期问题
