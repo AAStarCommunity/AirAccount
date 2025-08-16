@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
+use webauthn_rs::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionData {
@@ -56,6 +57,52 @@ pub struct AuthenticatorDevice {
     pub updated_at: i64,
 }
 
+// 新增：完整Passkey存储结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StoredPasskey {
+    pub user_id: String,
+    pub passkey_data: String, // 序列化的Passkey对象
+    pub credential_id: Vec<u8>, // 快速查找用
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+}
+
+// 新增：WebAuthn状态结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RegistrationState {
+    pub user_id: String,
+    pub challenge: String,
+    pub state_data: String, // 序列化的PasskeyRegistration
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub step: RegistrationStep,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuthenticationState {
+    pub user_id: String,
+    pub challenge: String,
+    pub state_data: String, // 序列化的PasskeyAuthentication
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub step: AuthenticationStep,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum RegistrationStep {
+    ChallengeGenerated,
+    CredentialReceived,
+    Completed,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum AuthenticationStep {
+    ChallengeGenerated,
+    SignatureReceived,
+    Verified,
+}
+
 pub struct Database {
     // 内存存储，遵循相同的表结构
     sessions: HashMap<String, SessionData>,
@@ -63,11 +110,18 @@ pub struct Database {
     user_accounts: HashMap<String, DbUserAccount>,
     authenticator_devices: HashMap<i64, AuthenticatorDevice>,
     device_counter: i64,
+    
+    // 新增：完整Passkey存储
+    passkeys: HashMap<String, StoredPasskey>, // user_id -> passkeys
+    
+    // 新增：WebAuthn状态存储
+    registration_states: HashMap<String, RegistrationState>, // challenge -> state
+    authentication_states: HashMap<String, AuthenticationState>, // challenge -> state
 }
 
 impl Database {
     pub fn new(_db_path: Option<&str>) -> Result<Self> {
-        println!("📦 初始化内存数据库（与Node.js CA相同的数据结构）");
+        println!("📦 初始化内存数据库（与Node.js CA相同的数据结构 + 完整WebAuthn支持）");
         
         Ok(Database {
             sessions: HashMap::new(),
@@ -75,6 +129,9 @@ impl Database {
             user_accounts: HashMap::new(),
             authenticator_devices: HashMap::new(),
             device_counter: 0,
+            passkeys: HashMap::new(),
+            registration_states: HashMap::new(),
+            authentication_states: HashMap::new(),
         })
     }
     
@@ -289,10 +346,152 @@ impl Database {
         Ok(())
     }
     
-    fn current_timestamp(&self) -> i64 {
+    pub fn current_timestamp(&self) -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64
+    }
+    
+    // ===== 新增：完整WebAuthn支持方法 =====
+    
+    // Passkey管理
+    pub fn store_passkey(&mut self, user_id: &str, passkey: &Passkey) -> Result<()> {
+        let passkey_data = serde_json::to_string(passkey)
+            .map_err(|e| anyhow!("Failed to serialize passkey: {}", e))?;
+        
+        let stored_passkey = StoredPasskey {
+            user_id: user_id.to_string(),
+            passkey_data,
+            credential_id: passkey.cred_id().clone().into(),
+            created_at: self.current_timestamp(),
+            last_used: None,
+        };
+        
+        let key = format!("{}:{}", user_id, hex::encode(&stored_passkey.credential_id));
+        self.passkeys.insert(key, stored_passkey);
+        
+        println!("🔐 存储完整Passkey: 用户={} 凭证ID={}", 
+                user_id, hex::encode(&passkey.cred_id().as_ref()[..8]));
+        
+        Ok(())
+    }
+    
+    pub fn get_user_passkeys(&self, user_id: &str) -> Result<Vec<Passkey>> {
+        let mut passkeys = Vec::new();
+        
+        for stored_passkey in self.passkeys.values() {
+            if stored_passkey.user_id == user_id {
+                let passkey: Passkey = serde_json::from_str(&stored_passkey.passkey_data)
+                    .map_err(|e| anyhow!("Failed to deserialize passkey: {}", e))?;
+                passkeys.push(passkey);
+            }
+        }
+        
+        Ok(passkeys)
+    }
+    
+    pub fn update_passkey_usage(&mut self, credential_id: &[u8]) -> Result<()> {
+        let key_prefix = hex::encode(credential_id);
+        let now = self.current_timestamp();
+        
+        for (key, stored_passkey) in self.passkeys.iter_mut() {
+            if key.contains(&key_prefix) {
+                stored_passkey.last_used = Some(now);
+                println!("📊 更新Passkey使用时间: {}", key_prefix);
+                return Ok(());
+            }
+        }
+        
+        Err(anyhow!("Passkey not found with credential_id: {}", hex::encode(credential_id)))
+    }
+    
+    // Registration状态管理
+    pub fn store_registration_state(&mut self, challenge: &str, state: RegistrationState) -> Result<()> {
+        self.registration_states.insert(challenge.to_string(), state);
+        println!("📝 存储注册状态: challenge={}", &challenge[..16.min(challenge.len())]);
+        Ok(())
+    }
+    
+    pub fn get_registration_state(&self, challenge: &str) -> Result<Option<RegistrationState>> {
+        Ok(self.registration_states.get(challenge).cloned())
+    }
+    
+    pub fn update_registration_step(&mut self, challenge: &str, step: RegistrationStep) -> Result<()> {
+        if let Some(state) = self.registration_states.get_mut(challenge) {
+            state.step = step;
+            println!("🔄 更新注册步骤: challenge={} step={:?}", 
+                    &challenge[..16.min(challenge.len())], state.step);
+            Ok(())
+        } else {
+            Err(anyhow!("Registration state not found for challenge"))
+        }
+    }
+    
+    // Authentication状态管理
+    pub fn store_authentication_state(&mut self, challenge: &str, state: AuthenticationState) -> Result<()> {
+        self.authentication_states.insert(challenge.to_string(), state);
+        println!("🔓 存储认证状态: challenge={}", &challenge[..16.min(challenge.len())]);
+        Ok(())
+    }
+    
+    pub fn get_authentication_state(&self, challenge: &str) -> Result<Option<AuthenticationState>> {
+        Ok(self.authentication_states.get(challenge).cloned())
+    }
+    
+    pub fn update_authentication_step(&mut self, challenge: &str, step: AuthenticationStep) -> Result<()> {
+        if let Some(state) = self.authentication_states.get_mut(challenge) {
+            state.step = step;
+            println!("🔄 更新认证步骤: challenge={} step={:?}", 
+                    &challenge[..16.min(challenge.len())], state.step);
+            Ok(())
+        } else {
+            Err(anyhow!("Authentication state not found for challenge"))
+        }
+    }
+    
+    // 清理过期状态
+    pub fn cleanup_expired_states(&mut self) -> Result<()> {
+        let now = self.current_timestamp();
+        
+        // 清理过期注册状态
+        let expired_reg: Vec<String> = self.registration_states
+            .iter()
+            .filter(|(_, state)| state.expires_at < now)
+            .map(|(challenge, _)| challenge.clone())
+            .collect();
+        
+        for challenge in expired_reg {
+            self.registration_states.remove(&challenge);
+        }
+        
+        // 清理过期认证状态
+        let expired_auth: Vec<String> = self.authentication_states
+            .iter()
+            .filter(|(_, state)| state.expires_at < now)
+            .map(|(challenge, _)| challenge.clone())
+            .collect();
+        
+        for challenge in expired_auth {
+            self.authentication_states.remove(&challenge);
+        }
+        
+        println!("🧹 清理过期WebAuthn状态完成");
+        Ok(())
+    }
+    
+    // 统计信息
+    pub fn get_webauthn_stats(&self) -> Result<String> {
+        let total_passkeys = self.passkeys.len();
+        let active_registrations = self.registration_states.len();
+        let active_authentications = self.authentication_states.len();
+        
+        Ok(format!(
+            "WebAuthn统计:\n\
+            - 存储的Passkey数量: {}\n\
+            - 活跃注册流程: {}\n\
+            - 活跃认证流程: {}",
+            total_passkeys, active_registrations, active_authentications
+        ))
     }
 }
