@@ -721,3 +721,62 @@ const createAccountResponse = await axios.post(`${baseURL}/api/webauthn/register
    }
    ```
 
+## ✅ 手工测试指南修复完成 (2025-08-16)
+
+### 🛠️ MANUAL_TESTING_GUIDE.md 路径问题修复
+
+#### 问题发现
+用户报告测试指南中存在路径错误：
+```bash
+cd third_party/build && make -f qemu_v8.mk run
+cd: no such file or directory: third_party/build
+```
+
+#### 逐步验证测试流程
+**验证结果**：
+1. ✅ **CA服务启动**：Node.js CA在 http://localhost:3002 正常运行
+2. ✅ **QEMU TEE环境**：OP-TEE 4.7成功初始化，TEE设备 `/dev/teepriv0` 可用
+3. ✅ **WebAuthn API测试**：注册/认证端点响应正常
+4. ✅ **Demo应用运行**：React demo在 http://localhost:5174 正常启动
+5. ❌ **路径错误**：发现测试指南中的路径不正确
+
+#### 修复内容
+**正确的QEMU启动路径**：
+```bash
+# 错误路径（旧）
+cd third_party/build && make -f qemu_v8.mk run
+
+# 正确路径（新）
+cd third_party/incubator-teaclave-trustzone-sdk/tests/
+./optee-qemuv8-fixed.sh aarch64-optee-4.7.0-qemuv8-ubuntu-24.04
+```
+
+**其他路径修复**：
+1. **TA构建验证**：添加了预编译文件路径引用
+2. **QEMU重启命令**：更新为正确的重启流程
+3. **环境信息更新**：添加了验证通过的Node.js版本和OP-TEE版本信息
+4. **系统状态记录**：添加了当前验证通过的服务状态
+
+#### 验证的系统架构
+```
+✅ CA服务器 (localhost:3002) ←→ ✅ QEMU OP-TEE 4.7
+    ↓                              ↓
+✅ WebAuthn API (15端点)     ✅ TEE设备 (/dev/teepriv0)
+    ↓
+✅ Demo应用 (localhost:5174)
+```
+
+#### 关键发现
+1. **Node.js CA + 真实TEE**: 完全工作，所有15个API端点可用
+2. **WebAuthn流程**: 注册和认证challenge生成正常
+3. **QEMU TEE环境**: OP-TEE 4.7 (112396a58cf0d5d7) 稳定运行
+4. **测试脚本**: `test_airaccount_fixed.sh` 可用于完整集成测试
+
+### 📋 测试指南改进
+- ✅ 修复了所有路径错误
+- ✅ 添加了环境验证信息
+- ✅ 更新了故障排除流程
+- ✅ 记录了验证通过的系统状态
+
+现在用户可以按照修复后的 `docs/MANUAL_TESTING_GUIDE.md` 成功进行完整的手工测试流程。
+
