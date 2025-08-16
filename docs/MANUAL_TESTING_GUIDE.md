@@ -17,9 +17,12 @@
 ### 1. 启动QEMU TEE环境
 
 ```bash
-# 终端1: 启动QEMU
-cd third_party/build
-make -f qemu_v8.mk run
+# 终端1: 启动QEMU TEE环境
+cd third_party/incubator-teaclave-trustzone-sdk/tests/
+./optee-qemuv8-fixed.sh aarch64-optee-4.7.0-qemuv8-ubuntu-24.04
+
+# 或者使用已验证的集成测试脚本
+./test_airaccount_fixed.sh
 
 # 等待看到QEMU完全启动的提示
 # 保持此终端运行
@@ -33,7 +36,11 @@ cd packages/airaccount-ta-simple
 ls -la target/aarch64-unknown-optee/debug/*.ta
 
 # 如果没有文件，执行构建
+# 注意：必须在配置了OP-TEE工具链的环境下执行
 make clean && make
+
+# 或者使用现有的预编译文件（用于测试）
+ls -la third_party/incubator-teaclave-trustzone-sdk/tests/shared/
 ```
 
 ### 3. 准备CA服务
@@ -81,7 +88,7 @@ curl http://localhost:3002/health
 #### 步骤1.3: TEE连接验证
 
 ```bash
-# 如果healthcheck显示TEE连接异常，检查QEMU
+# 如果 healthcheck 显示 TEE连接异常，检查QEMU状态
 curl http://localhost:3002/api/webauthn/security/verify
 
 # 期望输出:
@@ -91,6 +98,9 @@ curl http://localhost:3002/api/webauthn/security/verify
 #     "details": {...}
 #   }
 # }
+
+# 如果TEE连接失败，检查QEMU进程
+ps aux | grep qemu
 ```
 
 ### 阶段2: WebAuthn API测试
@@ -213,10 +223,13 @@ tail -f logs/webauthn-service.log
 # 检查QEMU进程
 ps aux | grep qemu
 
-# 重启QEMU
-cd third_party/build
-make -f qemu_v8.mk clean
-make -f qemu_v8.mk run
+# 重启QEMU TEE环境
+cd third_party/incubator-teaclave-trustzone-sdk/tests/
+# 关闭现有QEMU进程
+pkill -f qemu-system-aarch64
+
+# 重新启动
+./optee-qemuv8-fixed.sh aarch64-optee-4.7.0-qemuv8-ubuntu-24.04
 ```
 
 #### 2. CA服务端口冲突
@@ -269,9 +282,11 @@ if (window.PublicKeyCredential) {
 ### 测试环境信息
 
 - **操作系统**: macOS/Linux
-- **Node.js版本**: `node --version`
+- **Node.js版本**: `node --version` (Node.js v23.9.0 验证通过)
 - **浏览器**: Chrome/Safari版本
 - **QEMU状态**: 运行/停止
+- **OP-TEE版本**: OP-TEE 4.7 (112396a58cf0d5d7)
+- **TEE设备**: /dev/teepriv0 可用
 
 ### 性能基准
 
@@ -308,6 +323,13 @@ lsof -i :3001,3002 > port-status.log
 2. **部署准备**: 准备生产环境配置
 3. **性能优化**: 基于测试结果优化响应时间
 
+#### 已验证的系统状态 (更新: 2025-08-16)
+- ✅ CA服务器: http://localhost:3002 运行中
+- ✅ Demo应用: http://localhost:5174 运行中
+- ✅ QEMU OP-TEE 4.7: 正常初始化
+- ✅ WebAuthn API: 15个端点全部可用
+- ✅ TEE设备: /dev/teepriv0 正常
+
 ### 测试失败后
 
 1. **详细诊断**: 使用上述排查步骤
@@ -316,7 +338,7 @@ lsof -i :3001,3002 > port-status.log
 
 ---
 
-🔔 **重要提醒**: 
+🔔 **重要提醒**:
 - 每次修改代码后都要重新运行完整测试
 - 保持QEMU环境运行期间进行所有测试
 - 记录所有测试结果用于后续分析
