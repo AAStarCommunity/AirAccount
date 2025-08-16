@@ -6,6 +6,7 @@ use std::io::{self, Write};
 
 mod wallet_test;
 mod webauthn_service;
+mod webauthn_errors;
 mod database;
 
 use webauthn_service::WebAuthnService;
