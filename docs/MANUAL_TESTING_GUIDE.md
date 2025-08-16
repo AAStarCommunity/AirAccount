@@ -190,9 +190,9 @@ npm run dev
 4. 完成生物识别验证
 5. 查看账户创建结果
 
-### 阶段5: Rust CA测试
+### 阶段5: Rust CA WebAuthn测试
 
-**⚠️ 重要说明**: Rust CA是纯TEE客户端，**不支持WebAuthn功能**
+**🎉 更新**: Rust CA现在**完全支持WebAuthn功能**！
 
 #### 步骤5.1: Rust CA基础TEE通信测试
 
@@ -206,34 +206,78 @@ cargo build --target aarch64-unknown-linux-gnu --release
 # 运行基础测试套件
 ./target/aarch64-unknown-linux-gnu/release/airaccount-ca test
 
-# 测试交互模式
+# 测试传统交互模式 (TEE通信)
 ./target/aarch64-unknown-linux-gnu/release/airaccount-ca interactive
 ```
 
-#### 步骤5.2: Rust CA钱包功能测试
+#### 步骤5.2: Rust CA WebAuthn功能测试
 
 ```bash
-# 测试钱包功能 (直接TEE调用)
-./target/aarch64-unknown-linux-gnu/release/airaccount-ca wallet
+# 🔑 启动WebAuthn模式
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca webauthn
 
-# 测试安全状态验证
-./target/aarch64-unknown-linux-gnu/release/airaccount-ca security
+# 在WebAuthn模式下测试以下命令:
+
+# 1. 注册新用户 (生成Passkey)
+WebAuthn> register test@example.com "Test User"
+
+# 2. 列出已注册用户
+WebAuthn> list
+
+# 3. 查看用户信息
+WebAuthn> info test@example.com
+
+# 4. 启动认证流程
+WebAuthn> auth test@example.com
+
+# 5. 退出WebAuthn模式
+WebAuthn> quit
 ```
 
-#### 步骤5.3: CA架构对比
+#### 步骤5.3: Rust CA完整WebAuthn流程测试
 
-| 功能 | Node.js CA | Rust CA | 说明 |
+**真实WebAuthn注册→认证流程**:
+
+```bash
+# 第1步: 启动Rust CA WebAuthn服务
+./target/aarch64-unknown-linux-gnu/release/airaccount-ca webauthn
+
+# 第2步: 注册新用户passkey
+WebAuthn> register user@airaccount.com "AirAccount User"
+# 输出: Registration challenge created
+# 包含完整的WebAuthn challenge JSON
+
+# 第3步: 验证用户已注册
+WebAuthn> list
+# 输出: Registered users: user@airaccount.com
+
+# 第4步: 查看用户详细信息
+WebAuthn> info user@airaccount.com
+# 输出: User info包含credential数量
+
+# 第5步: 启动认证流程
+WebAuthn> auth user@airaccount.com
+# 输出: Authentication challenge created
+# 包含完整的WebAuthn authentication JSON
+```
+
+#### 步骤5.4: CA架构对比 (更新)
+
+| 功能 | Node.js CA | Rust CA | 状态 |
 |------|------------|---------|------|
-| WebAuthn注册 | ✅ 完整支持 | ❌ 不支持 | 不同的应用层级 |
-| Passkey认证 | ✅ 完整支持 | ❌ 不支持 | 不同的应用层级 |
+| WebAuthn注册 | ✅ 完整支持 | ✅ 完整支持 | 两者都支持 |
+| Passkey认证 | ✅ 完整支持 | ✅ 完整支持 | 两者都支持 |
+| Challenge生成 | ✅ SimpleWebAuthn | ✅ webauthn-rs | 不同库实现 |
 | TEE通信 | ✅ 间接调用 | ✅ 直接调用 | 都支持TA通信 |
 | 钱包功能 | ✅ 高级接口 | ✅ 底层接口 | 不同抽象层级 |
-| HTTP API | ✅ REST服务 | ❌ 无API | 用途不同 |
+| HTTP API | ✅ REST服务 | ❌ CLI工具 | 不同交互方式 |
+| 数据存储 | ✅ SQLite | ✅ 内存存储 | 不同持久化方案 |
 
-**架构说明**: 
-- **Node.js CA**: 高级WebAuthn钱包服务，提供完整的Web3账户体验
-- **Rust CA**: 底层TEE客户端，用于直接测试TA功能和开发调试
-- **用途区别**: Node.js CA面向最终用户，Rust CA面向开发者和系统集成
+**新架构说明**: 
+- **Node.js CA**: Web服务形式的WebAuthn API，提供HTTP端点
+- **Rust CA**: 命令行形式的WebAuthn工具，提供CLI交互
+- **WebAuthn兼容**: 两者都生成标准的WebAuthn challenge和response格式
+- **用途互补**: Node.js CA用于Web集成，Rust CA用于开发测试和CLI场景
 
 ## 🔧 问题修复方案
 

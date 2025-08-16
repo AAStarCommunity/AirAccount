@@ -5,6 +5,9 @@ use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
 use std::io::{self, Write};
 
 mod wallet_test;
+mod webauthn_service;
+
+use webauthn_service::WebAuthnService;
 
 // AirAccount Simple TA UUID - matches the one in simple TA's build.rs
 const AIRACCOUNT_TA_UUID: &str = "11223344-5566-7788-99aa-bbccddeeff01";
@@ -183,6 +186,84 @@ impl AirAccountClient {
     }
 }
 
+async fn run_webauthn_mode() -> Result<()> {
+    println!("🚀 Starting AirAccount WebAuthn Mode");
+    println!("Commands: register <user_id> <display_name>, auth <user_id>, list, info <user_id>, quit");
+    println!("=======================================");
+    
+    let webauthn = WebAuthnService::new()?;
+    
+    loop {
+        print!("WebAuthn> ");
+        io::stdout().flush()?;
+        
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        
+        match input {
+            "quit" | "exit" => {
+                println!("👋 Goodbye!");
+                break;
+            }
+            input if input.starts_with("register ") => {
+                let parts: Vec<&str> = input[9..].split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let user_id = parts[0];
+                    let display_name = parts[1..].join(" ");
+                    match webauthn.start_registration(user_id, &display_name).await {
+                        Ok(ccr) => {
+                            println!("✅ Registration challenge created:");
+                            println!("📋 Challenge: {}", serde_json::to_string_pretty(&ccr)?);
+                            println!("💡 Use browser to complete registration");
+                        }
+                        Err(e) => println!("❌ Error: {}", e),
+                    }
+                } else {
+                    println!("❓ Usage: register <user_id> <display_name>");
+                }
+            }
+            input if input.starts_with("auth ") => {
+                let user_id = &input[5..];
+                match webauthn.start_authentication(user_id).await {
+                    Ok(rcr) => {
+                        println!("✅ Authentication challenge created:");
+                        println!("📋 Challenge: {}", serde_json::to_string_pretty(&rcr)?);
+                        println!("💡 Use browser to complete authentication");
+                    }
+                    Err(e) => println!("❌ Error: {}", e),
+                }
+            }
+            "list" => {
+                match webauthn.list_users().await {
+                    Ok(users) => {
+                        if users.is_empty() {
+                            println!("📭 No users registered");
+                        } else {
+                            println!("👥 Registered users:");
+                            for user in users {
+                                println!("  - {}", user);
+                            }
+                        }
+                    }
+                    Err(e) => println!("❌ Error: {}", e),
+                }
+            }
+            input if input.starts_with("info ") => {
+                let user_id = &input[5..];
+                match webauthn.get_user_info(user_id).await {
+                    Ok(info) => println!("📊 User info:\n{}", info),
+                    Err(e) => println!("❌ Error: {}", e),
+                }
+            }
+            "" => continue,
+            _ => println!("❓ Unknown command. Try: register <user_id> <display_name>, auth <user_id>, list, info <user_id>, quit"),
+        }
+    }
+    
+    Ok(())
+}
+
 fn run_interactive_mode() -> Result<()> {
     println!("🚀 Starting AirAccount Interactive Mode");
     println!("Commands: hello, echo <message>, hybrid <email>, sign <account_id> <hash>, security, quit");
@@ -357,14 +438,15 @@ fn run_test_suite() -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let app = Command::new("AirAccount Client Application")
         .version("0.1.0") 
         .about("Client application for communicating with AirAccount Trusted Application")
         .arg(
             Arg::new("command")
                 .help("Command to execute")
-                .value_parser(["hello", "echo", "test", "interactive", "wallet", "hybrid", "security"])
+                .value_parser(["hello", "echo", "test", "interactive", "wallet", "hybrid", "security", "webauthn"])
                 .index(1),
         )
         .arg(
@@ -407,11 +489,15 @@ fn main() -> Result<()> {
             let mut client = AirAccountClient::new()?;
             client.verify_security_state()?;
         }
+        Some("webauthn") => {
+            println!("🔑 Starting WebAuthn mode...");
+            run_webauthn_mode().await?;
+        }
         Some("interactive") | None => {
             run_interactive_mode()?;
         }
         _ => {
-            println!("❌ Unknown command. Use: hello, echo <message>, test, wallet, hybrid <email>, security, or interactive");
+            println!("❌ Unknown command. Use: hello, echo <message>, test, wallet, hybrid <email>, security, webauthn, or interactive");
         }
     }
     
