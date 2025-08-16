@@ -425,9 +425,37 @@ lsof -i :3001,3002 > port-status.log
 2. **修复代码**: 针对具体问题修复
 3. **回归测试**: 确保修复不影响其他功能
 
+## 🔧 测试模式配置说明
+
+### Node.js CA 测试模式切换
+
+```typescript
+// 在 index.ts 中
+const isTestMode = process.env.NODE_ENV !== 'production';
+const webauthnService = new WebAuthnService(webauthnConfig, database, isTestMode);
+```
+
+**真实环境使用：**
+- 设置 `NODE_ENV=production` 或 `isTestMode=false`
+- 会执行真实的WebAuthn验证流程
+- 支持浏览器真实Passkey注册/认证
+- 与Touch ID、Face ID、USB Key等真实设备交互
+
+**测试环境使用：**
+- 设置 `isTestMode=true`
+- 跳过WebAuthn验证，使用模拟数据
+- 用于开发调试和自动化测试
+
+### 测试模式说明
+
+- **并行模式**: 测试模式和真实模式可以并行运行，通过 `isTestMode` 参数控制
+- **统一数据库**: 两种模式使用相同的数据库结构，无需兼容性转换
+- **灵活切换**: 可以在运行时通过环境变量切换测试/生产模式
+
 ---
 
 🔔 **重要提醒**:
 - 每次修改代码后都要重新运行完整测试
 - 保持QEMU环境运行期间进行所有测试
 - 记录所有测试结果用于后续分析
+- 在生产环境中确保设置正确的环境变量以启用真实WebAuthn验证
