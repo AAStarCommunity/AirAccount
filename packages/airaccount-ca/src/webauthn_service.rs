@@ -26,7 +26,7 @@ pub struct AuthenticationState {
 }
 
 pub struct WebAuthnService {
-    webauthn: WebauthnBuilder,
+    webauthn: Webauthn,
     users: Arc<Mutex<HashMap<String, UserAccount>>>,
     registration_states: Arc<Mutex<HashMap<String, RegistrationState>>>,
     auth_states: Arc<Mutex<HashMap<String, AuthenticationState>>>,

@@ -29,14 +29,15 @@ AirAccount是一个完整的TEE硬件钱包解决方案，运行在Raspberry Pi 
 
 ```bash
 # 1. 启动真实CA服务（支持WebAuthn）
-cd ca-service-real
+cd packages/airaccount-ca-nodejs
 npm install && npm run dev
 
-# 2. 启动真实Demo（真实Passkey）
-cd demo-real  
+# 2. 启动真实Demo（真实Passkey）  
+cd demo-real
 npm install && npm run dev
 
 # 3. 访问 http://localhost:5174 体验真实功能
+# CA API: http://localhost:3002
 ```
 
 **🔑 真实功能**
@@ -60,6 +61,60 @@ Our work is heavily based on the official Teaclave and OP-TEE projects. We use t
 Reference: [https://github.com/AAStarCommunity/TEE-Account/tree/aastar-dev/projects/web3/eth_wallet](https://github.com/AAStarCommunity/TEE-Account/tree/aastar-dev/projects/web3/eth_wallet)
 
 ## 🏗️ Architecture
+
+### 🔥 当前系统状态 (2025-08-16)
+
+**完全工作的真实系统架构**：
+
+```mermaid
+graph TB
+    subgraph "用户界面层"
+        Demo["🌐 Demo应用<br/>localhost:5174<br/>✅ WebAuthn/Passkey"]
+        Browser["🔐 浏览器<br/>Touch/Face ID"]
+    end
+    
+    subgraph "API服务层"
+        CA_Node["📡 Node.js CA<br/>localhost:3002<br/>✅ 15个API端点"]
+        WebAuthn["🔑 WebAuthn服务<br/>SQLite数据库<br/>✅ 注册/认证"]
+    end
+    
+    subgraph "TEE安全层"
+        QEMU["🖥️ QEMU OP-TEE 4.7<br/>✅ 正常运行"]
+        TEE_Device["🔒 TEE设备<br/>/dev/teepriv0<br/>✅ 可用"]
+        TA["⚙️ AirAccount TA<br/>11223344-5566-7788<br/>✅ 已安装"]
+    end
+    
+    subgraph "数据存储层"
+        SQLite["💾 SQLite数据库<br/>用户账户/设备/挑战"]
+        TEE_Storage["🛡️ TEE安全存储<br/>私钥/敏感数据"]
+    end
+    
+    %% 连接关系
+    Demo <--> Browser
+    Demo <--> CA_Node
+    CA_Node <--> WebAuthn
+    CA_Node <--> QEMU
+    QEMU <--> TEE_Device
+    TEE_Device <--> TA
+    WebAuthn <--> SQLite
+    TA <--> TEE_Storage
+    
+    %% 状态标识
+    classDef running fill:#90EE90,stroke:#333,stroke-width:2px
+    classDef available fill:#87CEEB,stroke:#333,stroke-width:2px
+    
+    class Demo,CA_Node,QEMU,TEE_Device,TA running
+    class Browser,WebAuthn,SQLite,TEE_Storage available
+```
+
+**✅ 验证的功能**：
+- 🔐 **WebAuthn注册**: 真实生物识别验证
+- 🔑 **Passkey登录**: 传统passkey认证流程  
+- 📡 **CA-TA通信**: Node.js ↔ QEMU OP-TEE ↔ AirAccount TA
+- 💾 **数据持久化**: SQLite + TEE安全存储
+- 🛡️ **安全检查**: 挑战-响应防重放机制
+
+### 🎯 完整技术架构
 
 AirAccount implements a three-layer cross-platform TEE architecture:
 
