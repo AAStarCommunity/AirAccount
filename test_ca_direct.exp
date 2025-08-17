@@ -1,0 +1,74 @@
+#!/usr/bin/expect -f
+# 直接测试CA-TA通信
+
+set timeout 30
+
+# 连接到运行的QEMU
+spawn screen -r
+expect "# " {
+    puts "✅ 连接到QEMU成功"
+}
+
+# 检查共享目录
+send "ls /shared/ | grep airaccount\r"
+expect {
+    "airaccount-ca" {
+        puts "✅ 找到CA文件"
+    }
+    timeout {
+        puts "❌ 未找到CA文件"
+        exit 1
+    }
+}
+
+# 测试Hello World命令
+puts "🧪 测试1: Hello World"
+send "/shared/airaccount-ca hello\r"
+expect {
+    "AirAccount" {
+        puts "✅ Hello World测试通过"
+    }
+    "error" {
+        puts "❌ Hello World测试失败"
+    }
+    timeout {
+        puts "❌ Hello World测试超时"
+    }
+}
+
+# 测试Echo命令
+puts "🧪 测试2: Echo"
+send "/shared/airaccount-ca echo 'Test Message'\r"
+expect {
+    "Test Message" {
+        puts "✅ Echo测试通过"
+    }
+    "error" {
+        puts "❌ Echo测试失败"
+    }
+    timeout {
+        puts "❌ Echo测试超时"
+    }
+}
+
+# 测试完整测试套件
+puts "🧪 测试3: 完整测试套件"
+send "/shared/airaccount-ca test\r"
+expect {
+    "All tests PASSED" {
+        puts "✅ 完整测试套件通过"
+    }
+    "tests passed" {
+        puts "✅ 部分测试通过"
+    }
+    "error" {
+        puts "❌ 测试套件失败"
+    }
+    timeout {
+        puts "❌ 测试套件超时"
+    }
+}
+
+puts "🎉 CA测试完成"
+send "exit\r"
+expect eof

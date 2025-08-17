@@ -1,0 +1,46 @@
+#!/usr/bin/expect -f
+# 快速CA-TA测试脚本
+
+set timeout 60
+
+# 启动QEMU
+spawn screen -d -m -S ca_test_session
+send "cd /Volumes/UltraDisk/Dev2/aastar/AirAccount/third_party/incubator-teaclave-trustzone-sdk/tests\r"
+send "./optee-qemuv8-fixed.sh aarch64-optee-4.7.0-qemuv8-ubuntu-24.04\r"
+
+# 等待QEMU启动
+sleep 15
+send "root\r"
+
+# 挂载共享目录
+send "mkdir -p /shared && mount -t 9p host /shared\r"
+sleep 2
+
+# 检查文件
+send "ls /shared/ | grep -E '(ta|ca)'\r"
+expect "airaccount-ca"
+
+# 安装TA
+send "cp /shared/11223344-5566-7788-99aa-bbccddeeff01.ta /lib/optee_armtz/\r"
+sleep 1
+
+puts "🧪 测试修复后的Simple CA-TA"
+
+# 测试1: Hello World
+puts "测试1: Hello World"
+send "/shared/airaccount-ca hello\r"
+sleep 3
+
+# 测试2: Echo
+puts "测试2: Echo"
+send "/shared/airaccount-ca echo 'Test Message'\r"
+sleep 3
+
+# 测试3: 完整测试套件
+puts "测试3: 完整测试套件"
+send "/shared/airaccount-ca test\r"
+sleep 5
+
+puts "✅ CA-TA测试完成"
+send "exit\r"
+expect eof

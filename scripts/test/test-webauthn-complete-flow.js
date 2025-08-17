@@ -22,8 +22,8 @@ const MOCK_REGISTRATION_RESPONSE = {
       challenge: 'challenge_placeholder',
       origin: 'http://localhost:3002',
     })).toString('base64'),
-    // 最小有效的CBOR格式attestationObject
-    attestationObject: 'o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVhYSUxNVExWUU1CUE1NRUh0dHRCZGVlQUdqemJCcDBRZENNTUJQUVZ4QWhZbGVMSE1MMFFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBUQAAAABkdGVzdF9jcmVkZW50aWFsX2lkpQECAyYgASFYIDi9bVe4TjHGNw3cOlHOFLZR3zNT6LHZ_ZCJLGSbp2chIlgg6Fg6_w-HJVk_VvVP7pFZ3aUXFKKINOhUIbMO_lC7Qw',
+    // 简化的标准attestationObject格式
+    attestationObject: 'o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVjEKUcyozGnJyP0v5x3SWZNJd0dPMFzFsU5QslLQkmlx9s0NgAAAAA0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAF5dGVzdF9jcmVkZW50aWFsX2lkpQECAyYgASFYIP1o3DkcYVCO_gX-4s5eEP6j8qyJrLgJlXm5fDGKpBOEIlgg2aFqStdpUdU03cGk4jOy1YxzVcmC5M7kFJQgYRfODog',
     transports: ['internal'],
   },
   type: 'public-key',

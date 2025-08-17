@@ -90,7 +90,6 @@ export function RealAccountCreation({ baseURL = 'http://localhost:3002', onAccou
 
       const { options, sessionId } = challengeResponse.data
       console.log('📋 获取到注册挑战:', { challenge: options.challenge, sessionId })
-      console.log('📋 获取到注册挑战:', { challenge, userId })
 
       // 2. 使用真实WebAuthn API注册Passkey
       const registrationResult = await registerPasskey({
