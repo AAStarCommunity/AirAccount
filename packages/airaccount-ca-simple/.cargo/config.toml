@@ -1,0 +1,9 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = [
+    "-C", "link-arg=-fuse-ld=bfd",
+    "-L", "/Volumes/UltraDisk/Dev2/aastar/AirAccount/third_party/incubator-teaclave-trustzone-sdk/optee/optee_client/export_arm64/usr/lib"
+]
+
+[env]
+PATH = "/opt/homebrew/Cellar/aarch64-unknown-linux-gnu/13.3.0/toolchain/aarch64-unknown-linux-gnu/bin:/opt/homebrew/bin:/usr/bin:/bin"
