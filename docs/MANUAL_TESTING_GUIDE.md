@@ -1,5 +1,7 @@
 # AirAccount 手工测试完整指南
 
+**最后更新**: 2025-08-17 09:42:35 +07
+
 ## 🎯 测试目标
 
 验证 **QEMU → TA → CA(Node.js CA, Rust CA) → WebAuthn → Demo** 完整调用链，确保WebAuthn/Passkey正常工作。
@@ -138,118 +140,269 @@ npm install
 npm list @simplewebauthn/server
 ```
 
-## 🚀 分层测试方案
+## 🚀 优化的五步测试方案
 
-按照 **QEMU → TA → CA → WebAuthn → Demo** 流程进行逐层验证：
+基于用户反馈优化，按照清晰的五步法进行系统性测试：
 
-### 阶段0: QEMU环境与TA功能测试
+### 第一步：QEMU环境基础验证
 
-这是**最关键的基础测试阶段** - 验证QEMU OP-TEE环境正常运行，TA(Trusted Application)正确加载并能响应CA(Client Application)调用。
+**测试目标**: 确保QEMU OP-TEE环境正常启动和运行
+**测试重点**: TEE基础环境稳定性验证
 
-**测试重点**: 确保TEE基础环境和安全世界应用正常工作
-
-#### 步骤0.1: 在QEMU中直接测试TA通信
-
-```bash
-# 确保QEMU已启动且TA文件已复制
-# 在QEMU console中执行以下命令:
-
-# 1. 检查TA文件是否存在
-ls -la /lib/optee_armtz/*.ta
-
-# 2. 检查CA二进制文件
-ls -la shared/airaccount-ca
-
-# 3. 测试Hello World命令
-./shared/airaccount-ca hello
-
-# 期望输出:
-# 🔧 Initializing AirAccount Client...
-# ✅ TEE Context created successfully  
-# ✅ Session opened with AirAccount TA (UUID: 11223344-5566-7788-99aa-bbccddeeff01)
-# 📞 Calling Hello World command...
-# ✅ Hello World response: Hello from AirAccount TA!
-
-# 4. 测试Echo命令
-./shared/airaccount-ca echo "Hello TEE Test"
-
-# 期望输出:
-# 📞 Calling Echo command with: 'Hello TEE Test'
-# ✅ Echo response: Hello TEE Test
-
-# 5. 测试完整测试套件
-./shared/airaccount-ca test
-
-# 期望输出:
-# 🧪 === AirAccount TA-CA Communication Tests ===
-# Test 1 - Hello World: ✅ PASS
-# Test 2 - Echo Simple: ✅ PASS  
-# Test 3 - Echo UTF-8: ✅ PASS
-# Test 4 - Echo Empty: ✅ PASS
-# Test 5 - Multiple Operations: ✅ PASS (5/5 operations)
-# 📊 Results: 5/5 tests passed (100.0%)
-# 🎉 All tests PASSED! TA-CA communication is working perfectly!
-
-# 6. 测试安全状态验证
-./shared/airaccount-ca security
-
-# 期望输出:
-# 📞 Verifying TEE security state...
-# ✅ Security state verified: TEE_SECURE_READY
-
-# 7. 测试混合熵源账户创建
-./shared/airaccount-ca hybrid test@example.com
-
-# 期望输出:
-# 📞 Creating hybrid account for user: test@example.com
-# ✅ Hybrid account created: ACCOUNT_ID_12345
-```
-
-#### 步骤0.2: 使用集成测试脚本验证
+#### 步骤1.1: 启动QEMU OP-TEE环境
 
 ```bash
-# 在主机上运行集成测试脚本(自动化版本)
+# 终端1: 启动QEMU TEE环境
 cd third_party/incubator-teaclave-trustzone-sdk/tests/
-./test_airaccount_fixed.sh
+./optee-qemuv8-fixed.sh aarch64-optee-4.7.0-qemuv8-ubuntu-24.04
 
-# 期望看到完整的测试输出包括:
-# ✅ AirAccount TA-CA Integration Test PASSED!
-# ✅ Core functionality verified in OP-TEE environment
-# 📊 Test Results Summary: Successful checks: 5/5
+# 等待看到QEMU完全启动的提示
+# 保持此终端运行
 ```
 
-#### 步骤0.3: TA测试验收标准
+#### 步骤1.2: 验证QEMU环境基础功能
 
-**必须通过的检查点:**
-- [ ] TA文件正确安装到 `/lib/optee_armtz/`
-- [ ] CA成功连接到TA (UUID: 11223344-5566-7788-99aa-bbccddeeff01)
-- [ ] Hello World命令返回正确响应
-- [ ] Echo命令能正确回显各种输入
-- [ ] 完整测试套件5/5通过
-- [ ] TEE安全状态验证通过
-- [ ] 混合熵源账户创建功能正常
-
-**如果TA测试失败，请检查:**
 ```bash
-# 1. 检查TA文件权限
-ls -la /lib/optee_armtz/11223344-5566-7788-99aa-bbccddeeff01.ta
+# 检查QEMU进程是否运行
+ps aux | grep qemu-system-aarch64
 
-# 2. 检查OP-TEE日志
-dmesg | grep -i optee
+# 期望看到QEMU进程正在运行
+```
 
-# 3. 检查TEE设备
+#### 步骤1.3: 验证TEE设备可用性
+
+在QEMU控制台中执行：
+```bash
+# 检查TEE设备
 ls -la /dev/tee*
 
-# 4. 重新安装TA
-cp shared/*.ta /lib/optee_armtz/
-chmod 444 /lib/optee_armtz/*.ta
+# 期望输出:
+# crw------- 1 root root 254, 0 Aug 17 02:42 /dev/tee0
+# crw------- 1 root root 254, 1 Aug 17 02:42 /dev/teepriv0
+
+# 检查OP-TEE内核模块
+dmesg | grep -i optee
+
+# 期望看到OP-TEE初始化成功的日志
 ```
 
-⚠️ **重要**: 只有TA测试全部通过后，才能进行后续的CA服务和WebAuthn测试！
+#### 步骤1.4: 验证共享目录挂载
+
+```bash
+# 在QEMU中检查共享目录
+ls -la /shared/
+
+# 期望看到:
+# 11223344-5566-7788-99aa-bbccddeeff01.ta
+# airaccount-ca (可执行文件)
+```
+
+**第一步验收标准**:
+- [ ] QEMU进程正常运行
+- [ ] TEE设备(/dev/teepriv0)可访问
+- [ ] OP-TEE内核模块已加载
+- [ ] 共享目录正确挂载
 
 ---
 
-### 阶段1: Node.js CA服务测试
+### 第二步：TA构建部署与基础测试
+
+**测试目标**: 确保最新版本TA正确构建、部署和基础功能验证
+**测试重点**: TA版本管理和基础通信测试
+
+#### 步骤2.1: 备份和清理旧TA
+
+```bash
+# 在QEMU中备份现有TA
+cp /lib/optee_armtz/11223344-5566-7788-99aa-bbccddeeff01.ta /tmp/backup_ta_$(date +%Y%m%d_%H%M%S).ta
+
+# 或删除旧TA确保使用最新版本
+rm /lib/optee_armtz/11223344-5566-7788-99aa-bbccddeeff01.ta
+```
+
+#### 步骤2.2: 构建最新版本TA
+
+```bash
+# 在主机上构建最新TA
+cd packages/airaccount-ta-simple
+make clean && make
+
+# 检查构建结果
+ls -la target/aarch64-unknown-optee/debug/*.ta
+
+# 期望看到最新的TA文件
+```
+
+#### 步骤2.3: 部署并测试TA基础功能
+
+```bash
+# 在QEMU中安装新TA
+cp /shared/11223344-5566-7788-99aa-bbccddeeff01.ta /lib/optee_armtz/
+chmod 444 /lib/optee_armtz/11223344-5566-7788-99aa-bbccddeeff01.ta
+
+# 测试基础TA功能
+./shared/airaccount-ca hello
+./shared/airaccount-ca echo "TA Test"
+./shared/airaccount-ca test
+
+# 期望所有基础测试通过
+```
+
+**第二步验收标准**:
+- [ ] 新TA文件成功构建
+- [ ] TA正确安装到/lib/optee_armtz/
+- [ ] Hello World命令响应正确
+- [ ] Echo测试通过
+- [ ] 完整测试套件通过(5/5)
+
+---
+
+### 第三步：CA构建与CA-TA通信测试
+
+**测试目标**: 确保Rust CA和Node.js CA正确构建，并能与TA正常通信
+**测试重点**: 双CA架构验证和基础通信功能
+
+#### 步骤3.1: 构建Rust CA
+
+```bash
+# 构建Rust CA (如果尚未构建)
+cd packages/airaccount-ca
+cargo build --target aarch64-unknown-linux-gnu --release
+
+# 检查构建结果
+ls -la target/aarch64-unknown-linux-gnu/release/airaccount-ca
+```
+
+#### 步骤3.2: 测试Rust CA基础功能
+
+```bash
+# 在QEMU中测试Rust CA
+./shared/airaccount-ca interactive
+
+# 期望看到交互界面启动
+# 测试基础命令: hello, echo, security
+```
+
+#### 步骤3.3: 构建和启动Node.js CA
+
+```bash
+# 构建Node.js CA
+cd packages/airaccount-ca-nodejs
+npm install
+
+# 启动CA服务
+npm run dev
+
+# 期望输出:
+# 🚀 AirAccount CA Service
+# 📡 Server running on http://localhost:3002
+# 🔑 WebAuthn features enabled
+```
+
+#### 步骤3.4: 测试Node.js CA基础功能
+
+```bash
+# 测试健康检查
+curl http://localhost:3002/health
+
+# 期望返回健康状态JSON
+# 测试TEE连接验证
+curl http://localhost:3002/api/webauthn/security/verify
+```
+
+**第三步验收标准**:
+- [ ] Rust CA构建成功
+- [ ] Rust CA与TA通信正常
+- [ ] Node.js CA服务启动无错误
+- [ ] Node.js CA健康检查通过
+- [ ] 两种CA都能正常与TA通信
+
+---
+
+### 第四步：WebAuthn完整用户流程测试
+
+**测试目标**: 验证完整的WebAuthn用户注册和认证流程
+**测试重点**: 支持模拟和真实两种测试路径，完整用户生命周期
+
+#### 步骤4.1: 配置测试模式
+
+**环境变量配置**:
+```bash
+# 测试模式 (跳过实际WebAuthn验证)
+export NODE_ENV=development
+export WEBAUTHN_TEST_MODE=true
+
+# 真实模式 (需要真实设备验证)
+export NODE_ENV=production
+export WEBAUTHN_TEST_MODE=false
+```
+
+#### 步骤4.2: 用户注册流程测试 (模拟模式)
+
+```bash
+# 测试注册选项生成
+curl -X POST http://localhost:3002/api/webauthn/register/begin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@airaccount.dev",
+    "displayName": "Test User"
+  }' | jq
+
+# 期望返回包含challenge和options的JSON
+```
+
+#### 步骤4.3: 用户注册流程测试 (真实模式)
+
+**浏览器测试步骤**:
+1. 访问 http://localhost:5174/
+2. 输入邮箱: test@airaccount.dev
+3. 点击"注册Passkey" 
+4. 完成生物识别验证 (Touch ID/Face ID/USB Key)
+5. 验证注册成功响应
+
+#### 步骤4.4: 用户登录流程测试
+
+**模拟模式**:
+```bash
+# 测试认证选项生成
+curl -X POST http://localhost:3002/api/webauthn/authenticate/begin \
+  -H "Content-Type: application/json" \
+  -d '{"email": "test@airaccount.dev"}' | jq
+```
+
+**真实模式**:
+1. 在浏览器中点击"登录"
+2. 输入已注册邮箱
+3. 使用Passkey完成认证
+4. 验证登录成功
+
+#### 步骤4.5: 数据库操作验证
+
+```bash
+# 检查用户数据
+sqlite3 packages/airaccount-ca-nodejs/airaccount.db "SELECT * FROM users;"
+
+# 检查认证记录
+sqlite3 packages/airaccount-ca-nodejs/airaccount.db "SELECT * FROM user_credentials;"
+
+# 检查挑战记录
+sqlite3 packages/airaccount-ca-nodejs/airaccount.db "SELECT * FROM challenges ORDER BY created_at DESC LIMIT 5;"
+```
+
+**第四步验收标准**:
+- [ ] 模拟模式注册流程完整
+- [ ] 真实模式注册成功创建Passkey
+- [ ] 模拟模式认证流程正常
+- [ ] 真实模式Passkey认证成功
+- [ ] 数据库正确记录用户信息
+- [ ] 第二次登录使用现有Passkey成功
+
+---
+
+### 第五步：端到端加密账户生命周期测试
+
+**测试目标**: 验证完整的加密钱包生命周期管理
+**测试重点**: 从用户交互到TA执行的完整加密货币功能
 
 **测试重点**: 验证Node.js CA与QEMU中的TA正常通信，提供WebAuthn HTTP API服务
 

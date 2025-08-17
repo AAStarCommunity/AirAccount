@@ -1,0 +1,15 @@
+[package]
+name = "airaccount-ca-simple"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "airaccount-ca-simple"
+path = "src/main.rs"
+
+[dependencies]
+optee-teec = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }

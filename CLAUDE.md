@@ -85,3 +85,4 @@ Use `Dockerfile.optee` for containerized development environment.
 - AI assistant context: `GEMINI.md`
 
 The project follows the eth_wallet example from the Teaclave TrustZone SDK as a foundational reference for Trusted Application development.
+- write down the modify or crate time on every md file when crate or modify docs, get time from local mochine, not the AI model
