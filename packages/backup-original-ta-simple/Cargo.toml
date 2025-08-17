@@ -1,0 +1,24 @@
+[package]
+name = "airaccount-ta-simple"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+optee-utee-sys = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee/optee-utee-sys" }
+optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
+
+# 基础依赖
+uuid = { version = "1.8", default-features = false }
+# spin = { version = "0.9", default-features = false, features = ["mutex"] }
+
+[build-dependencies]
+optee-utee-build = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
+
+[[bin]]
+name = "ta"
+path = "src/main.rs"
+
+[profile.release]
+lto = false
+opt-level = 3
+panic = "abort"

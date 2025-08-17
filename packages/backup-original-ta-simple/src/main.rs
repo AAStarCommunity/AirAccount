@@ -889,9 +889,9 @@ use input_validation::validate_command_parameters;
 fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()> {
     trace_println!("[+] AirAccount Simple TA invoke command: {}", cmd_id);
     
-    // 基础验证 - 只检查命令ID范围
-    if cmd_id > 50 {
-        trace_println!("[!] Invalid command ID: {}", cmd_id);
+    // 严格的输入验证 - 安全修复 P0
+    if let Err(_) = validate_command_parameters(cmd_id, params) {
+        trace_println!("[!] Parameter validation failed for command: {}", cmd_id);
         return Err(Error::new(ErrorKind::BadParameters));
     }
     
@@ -903,25 +903,18 @@ fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()
         0 => {
             // Hello World command
             let message = b"Hello from AirAccount Simple TA with Wallet Support!";
-            let len = message.len().min(p1.buffer().len());
-            p1.buffer()[..len].copy_from_slice(&message[..len]);
-            p2.set_a(len as u32);  // 设置输出长度
-            Ok(())
+            copy_to_buffer(message, p1.buffer())
         }
         1 => {
             // Echo command
             let input_size = p0.buffer().len().min(p1.buffer().len());
             p1.buffer()[..input_size].copy_from_slice(&p0.buffer()[..input_size]);
-            p2.set_a(input_size as u32);  // 设置输出长度
-            Ok(())
+            Ok(input_size)
         }
         2 => {
             // Get Version command
             let version = b"AirAccount Simple TA v0.1.0 - Basic Wallet Support";
-            let len = version.len().min(p1.buffer().len());
-            p1.buffer()[..len].copy_from_slice(&version[..len]);
-            p2.set_a(len as u32);  // 设置输出长度
-            Ok(())
+            copy_to_buffer(version, p1.buffer())
         }
         
         // 钱包管理命令 (10-19)

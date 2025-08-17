@@ -1,0 +1,25 @@
+[package]
+name = "airaccount-ca"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+optee-teec = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+anyhow = "1.0"
+hex = "0.4"
+clap = { version = "4.0", features = ["derive"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
+base64 = "0.22"
+thiserror = "1.0"
+
+[[bin]]
+name = "airaccount-ca-test"
+path = "src/main_test.rs"
+
+[build-dependencies]
+anyhow = "1.0"

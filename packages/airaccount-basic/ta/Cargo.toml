@@ -1,0 +1,12 @@
+[package]
+name = "airaccount-basic-ta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+optee-utee = { path = "../../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+
+[profile.release]
+lto = true
+panic = "abort"

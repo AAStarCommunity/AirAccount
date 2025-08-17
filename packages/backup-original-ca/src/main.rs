@@ -71,19 +71,18 @@ impl AirAccountClient {
         
         let mut output_buffer = vec![0u8; 1024];
         
-        // 按照 eth_wallet 标准模式设置参数
-        let p0 = ParamTmpRef::new_input(&[]); // 空输入
+        // 根据TA期望，简化参数：只使用memref，不用value
+        let p0 = ParamTmpRef::new_input(&[1u8]); // 提供非空缓冲区
         let p1 = ParamTmpRef::new_output(output_buffer.as_mut_slice());
-        let p2 = ParamValue::new(0, 0, ParamType::ValueInout); // 关键：必须添加这个参数
         
-        let mut operation = Operation::new(0, p0, p1, p2, ParamNone); 
+        let mut operation = Operation::new(0, p0, p1, ParamNone, ParamNone); 
         
         self.session.invoke_command(CMD_HELLO_WORLD, &mut operation)
             .map_err(|e| anyhow!("Hello World command failed: {:?}", e))?;
         
-        // 获取实际输出长度（从 p2 参数）
-        let output_len = operation.parameters().2.a() as usize;
-        let response = String::from_utf8_lossy(&output_buffer[..output_len]);
+        // Find the actual length of response
+        let response_len = output_buffer.iter().position(|&x| x == 0).unwrap_or(output_buffer.len());
+        let response = String::from_utf8_lossy(&output_buffer[..response_len]);
         
         println!("✅ Hello World response: {}", response);
         Ok(response.to_string())
@@ -92,22 +91,22 @@ impl AirAccountClient {
     fn echo(&mut self, message: &str) -> Result<String> {
         println!("📞 Calling Echo command with: '{}'", message);
         
-        let input_buffer = message.as_bytes();
+        let input_buffer = if message.is_empty() { &[1u8] } else { message.as_bytes() }; // 确保非空
         let mut output_buffer = vec![0u8; 1024];
         
-        // 按照 eth_wallet 标准模式设置参数
+        // Input buffer with message
         let p0 = ParamTmpRef::new_input(input_buffer);
+        // Output buffer for response
         let p1 = ParamTmpRef::new_output(output_buffer.as_mut_slice());
-        let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
         
-        let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
+        let mut operation = Operation::new(0, p0, p1, ParamNone, ParamNone);
         
         self.session.invoke_command(CMD_ECHO, &mut operation)
             .map_err(|e| anyhow!("Echo command failed: {:?}", e))?;
         
-        // 获取实际输出长度（从 p2 参数）
-        let output_len = operation.parameters().2.a() as usize;
-        let response = String::from_utf8_lossy(&output_buffer[..output_len]);
+        // Find the actual length of response
+        let response_len = output_buffer.iter().position(|&x| x == 0).unwrap_or(output_buffer.len());
+        let response = String::from_utf8_lossy(&output_buffer[..response_len]);
         
         println!("✅ Echo response: {}", response);
         Ok(response.to_string())
@@ -129,9 +128,8 @@ impl AirAccountClient {
         
         let p0 = ParamTmpRef::new_input(&input_buffer);
         let p1 = ParamTmpRef::new_output(output_buffer.as_mut_slice());
-        let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
         
-        let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
+        let mut operation = Operation::new(0, p0, p1, ParamNone, ParamNone);
         
         self.session.invoke_command(CMD_CREATE_HYBRID_ACCOUNT, &mut operation)
             .map_err(|e| anyhow!("Create hybrid account command failed: {:?}", e))?;
@@ -158,9 +156,8 @@ impl AirAccountClient {
         
         let p0 = ParamTmpRef::new_input(&input_buffer);
         let p1 = ParamTmpRef::new_output(output_buffer.as_mut_slice());
-        let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
         
-        let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
+        let mut operation = Operation::new(0, p0, p1, ParamNone, ParamNone);
         
         self.session.invoke_command(CMD_SIGN_WITH_HYBRID_KEY, &mut operation)
             .map_err(|e| anyhow!("Sign with hybrid key command failed: {:?}", e))?;
@@ -177,11 +174,10 @@ impl AirAccountClient {
         
         let mut output_buffer = vec![0u8; 1024];
         
-        let p0 = ParamTmpRef::new_input(&[]);
+        let p0 = ParamTmpRef::new_input(&[1u8]);
         let p1 = ParamTmpRef::new_output(output_buffer.as_mut_slice());
-        let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
         
-        let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
+        let mut operation = Operation::new(0, p0, p1, ParamNone, ParamNone);
         
         self.session.invoke_command(CMD_VERIFY_SECURITY_STATE, &mut operation)
             .map_err(|e| anyhow!("Verify security state command failed: {:?}", e))?;

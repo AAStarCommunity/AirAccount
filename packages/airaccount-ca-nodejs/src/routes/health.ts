@@ -11,9 +11,26 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const appState = (req as any).appState as AppState;
     
-    // 测试各服务状态
-    const teeStatus = await appState.teeClient.testConnection();
-    const webauthnStats = appState.webauthnService.getStats();
+    // 测试各服务状态 - 为TEE连接添加超时
+    let teeStatus = 'TEE connection timeout or initializing';
+    let teeConnected = false;
+    
+    try {
+      // 使用Promise.race添加5秒超时
+      const teePromise = appState.teeClient.testConnection();
+      const timeoutPromise = new Promise<string>((_, reject) => 
+        setTimeout(() => reject(new Error('TEE connection timeout')), 5000)
+      );
+      
+      teeStatus = await Promise.race([teePromise, timeoutPromise]);
+      teeConnected = teeStatus.includes('AirAccount');
+    } catch (error) {
+      // TEE连接超时或失败，继续返回其他服务状态
+      teeStatus = `TEE unavailable: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      teeConnected = false;
+    }
+    
+    const webauthnStats = await appState.webauthnService.getStats();
     
     res.json({
       status: 'healthy',
@@ -21,7 +38,7 @@ router.get('/', async (req: Request, res: Response) => {
       version: '0.1.0',
       services: {
         tee: {
-          connected: teeStatus.includes('AirAccount'),
+          connected: teeConnected,
           response: teeStatus
         },
         webauthn: {

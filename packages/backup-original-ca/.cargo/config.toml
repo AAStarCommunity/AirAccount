@@ -1,0 +1,4 @@
+[build]
+rustflags = [
+  "-L", "/Volumes/UltraDisk/Dev2/aastar/AirAccount/third_party/incubator-teaclave-trustzone-sdk/optee/optee_client/export_arm64/usr/lib"
+]

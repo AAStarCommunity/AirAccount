@@ -61,6 +61,42 @@ export interface AuthenticatorDevice {
   updatedAt: number;
 }
 
+// WebAuthn 状态管理接口
+export interface RegistrationState {
+  userId: string;
+  challenge: string;
+  userVerification?: 'required' | 'preferred' | 'discouraged';
+  attestation?: 'none' | 'indirect' | 'direct' | 'enterprise';
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AuthenticationState {
+  challenge: string;
+  userId?: string;
+  userVerification?: 'required' | 'preferred' | 'discouraged';
+  createdAt: number;
+  expiresAt: number;
+}
+
+// 完整的 Passkey 对象存储
+export interface StoredPasskey {
+  credentialId: Buffer;
+  userId: string;
+  credentialPublicKey: Buffer;
+  counter: number;
+  transports: string[];
+  aaguid?: Buffer;
+  userHandle?: Buffer;
+  deviceName?: string;
+  backupEligible: boolean;
+  backupState: boolean;
+  uvInitialized: boolean;
+  credentialDeviceType: 'singleDevice' | 'multiDevice';
+  createdAt: number;
+  updatedAt: number;
+}
+
 export class Database {
   private db: sqlite3.Database | null = null;
   private dbPath: string;
@@ -139,12 +175,61 @@ export class Database {
       )
     `);
 
+    // 创建完整的Passkey存储表
+    await runAsync(`
+      CREATE TABLE IF NOT EXISTS passkeys (
+        credential_id BLOB PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        credential_public_key BLOB NOT NULL,
+        counter INTEGER NOT NULL DEFAULT 0,
+        transports TEXT, -- JSON array
+        aaguid BLOB,
+        user_handle BLOB,
+        device_name TEXT,
+        backup_eligible BOOLEAN DEFAULT FALSE,
+        backup_state BOOLEAN DEFAULT FALSE,
+        uv_initialized BOOLEAN DEFAULT FALSE,
+        credential_device_type TEXT DEFAULT 'singleDevice',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES user_accounts (user_id) ON DELETE CASCADE
+      )
+    `);
+
+    // 创建注册状态表
+    await runAsync(`
+      CREATE TABLE IF NOT EXISTS registration_states (
+        user_id TEXT PRIMARY KEY,
+        challenge TEXT NOT NULL,
+        user_verification TEXT,
+        attestation TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES user_accounts (user_id) ON DELETE CASCADE
+      )
+    `);
+
+    // 创建认证状态表
+    await runAsync(`
+      CREATE TABLE IF NOT EXISTS authentication_states (
+        challenge TEXT PRIMARY KEY,
+        user_id TEXT,
+        user_verification TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `);
+
     // 创建索引
     await runAsync('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)');
     await runAsync('CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)');
     await runAsync('CREATE INDEX IF NOT EXISTS idx_challenges_expires_at ON challenges (expires_at)');
     await runAsync('CREATE INDEX IF NOT EXISTS idx_authenticator_devices_user_id ON authenticator_devices (user_id)');
     await runAsync('CREATE INDEX IF NOT EXISTS idx_authenticator_devices_credential_id ON authenticator_devices (credential_id)');
+    await runAsync('CREATE INDEX IF NOT EXISTS idx_passkeys_user_id ON passkeys (user_id)');
+    await runAsync('CREATE INDEX IF NOT EXISTS idx_passkeys_credential_id ON passkeys (credential_id)');
+    await runAsync('CREATE INDEX IF NOT EXISTS idx_registration_states_expires_at ON registration_states (expires_at)');
+    await runAsync('CREATE INDEX IF NOT EXISTS idx_authentication_states_expires_at ON authentication_states (expires_at)');
 
     // 启动清理定时器
     this.startCleanupTimer();
@@ -317,6 +402,10 @@ export class Database {
     
     // 清理过期挑战
     await runAsync('DELETE FROM challenges WHERE expires_at < ?', [now]);
+    
+    // 清理过期状态
+    await runAsync('DELETE FROM registration_states WHERE expires_at < ?', [now]);
+    await runAsync('DELETE FROM authentication_states WHERE expires_at < ?', [now]);
   }
 
   /**
@@ -495,6 +584,207 @@ export class Database {
     return {
       totalUsers: userCount.count,
       totalDevices: deviceCount.count,
+    };
+  }
+
+  // ========== 完整Passkey管理 ==========
+
+  /**
+   * 存储完整的Passkey对象
+   */
+  async storePasskey(passkey: Omit<StoredPasskey, 'createdAt' | 'updatedAt'>): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    const now = Date.now();
+
+    await runAsync(`
+      INSERT OR REPLACE INTO passkeys (
+        credential_id, user_id, credential_public_key, counter, transports,
+        aaguid, user_handle, device_name, backup_eligible, backup_state,
+        uv_initialized, credential_device_type, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+        COALESCE((SELECT created_at FROM passkeys WHERE credential_id = ?), ?), 
+        ?
+      )
+    `, [
+      passkey.credentialId,
+      passkey.userId,
+      passkey.credentialPublicKey,
+      passkey.counter,
+      JSON.stringify(passkey.transports),
+      passkey.aaguid,
+      passkey.userHandle,
+      passkey.deviceName,
+      passkey.backupEligible,
+      passkey.backupState,
+      passkey.uvInitialized,
+      passkey.credentialDeviceType,
+      passkey.credentialId, // for COALESCE
+      now,
+      now
+    ]);
+  }
+
+  /**
+   * 获取用户的所有Passkey
+   */
+  async getUserPasskeys(userId: string): Promise<StoredPasskey[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const getAsync = promisify(this.db.all.bind(this.db)) as (sql: string, params?: any[]) => Promise<any[]>;
+    
+    const rows = await getAsync(`
+      SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at DESC
+    `, [userId]);
+
+    return rows.map(row => ({
+      credentialId: row.credential_id,
+      userId: row.user_id,
+      credentialPublicKey: row.credential_public_key,
+      counter: row.counter,
+      transports: JSON.parse(row.transports || '[]'),
+      aaguid: row.aaguid,
+      userHandle: row.user_handle,
+      deviceName: row.device_name,
+      backupEligible: row.backup_eligible === 1,
+      backupState: row.backup_state === 1,
+      uvInitialized: row.uv_initialized === 1,
+      credentialDeviceType: row.credential_device_type,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  /**
+   * 通过凭证ID获取Passkey
+   */
+  async getPasskeyByCredentialId(credentialId: Buffer): Promise<StoredPasskey | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const getAsync = promisify(this.db.get.bind(this.db)) as DbGetAsync;
+    
+    const row = await getAsync(`
+      SELECT * FROM passkeys WHERE credential_id = ?
+    `, [credentialId]) as any;
+
+    if (!row) return null;
+
+    return {
+      credentialId: row.credential_id,
+      userId: row.user_id,
+      credentialPublicKey: row.credential_public_key,
+      counter: row.counter,
+      transports: JSON.parse(row.transports || '[]'),
+      aaguid: row.aaguid,
+      userHandle: row.user_handle,
+      deviceName: row.device_name,
+      backupEligible: row.backup_eligible === 1,
+      backupState: row.backup_state === 1,
+      uvInitialized: row.uv_initialized === 1,
+      credentialDeviceType: row.credential_device_type,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /**
+   * 更新Passkey计数器
+   */
+  async updatePasskeyCounter(credentialId: Buffer, newCounter: number): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    
+    await runAsync(`
+      UPDATE passkeys SET counter = ?, updated_at = ? WHERE credential_id = ?
+    `, [newCounter, Date.now(), credentialId]);
+  }
+
+  // ========== 状态管理 ==========
+
+  /**
+   * 存储注册状态
+   */
+  async storeRegistrationState(state: RegistrationState): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    
+    await runAsync(`
+      INSERT OR REPLACE INTO registration_states 
+      (user_id, challenge, user_verification, attestation, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [state.userId, state.challenge, state.userVerification, state.attestation, state.createdAt, state.expiresAt]);
+  }
+
+  /**
+   * 获取并删除注册状态
+   */
+  async getAndRemoveRegistrationState(userId: string): Promise<RegistrationState | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const getAsync = promisify(this.db.get.bind(this.db)) as DbGetAsync;
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    
+    const row = await getAsync(`
+      SELECT * FROM registration_states WHERE user_id = ? AND expires_at > ?
+    `, [userId, Date.now()]) as any;
+
+    if (!row) return null;
+
+    // 删除状态
+    await runAsync('DELETE FROM registration_states WHERE user_id = ?', [userId]);
+
+    return {
+      userId: row.user_id,
+      challenge: row.challenge,
+      userVerification: row.user_verification,
+      attestation: row.attestation,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  /**
+   * 存储认证状态
+   */
+  async storeAuthenticationState(state: AuthenticationState): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    
+    await runAsync(`
+      INSERT OR REPLACE INTO authentication_states 
+      (challenge, user_id, user_verification, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `, [state.challenge, state.userId, state.userVerification, state.createdAt, state.expiresAt]);
+  }
+
+  /**
+   * 获取并删除认证状态
+   */
+  async getAndRemoveAuthenticationState(challenge: string): Promise<AuthenticationState | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const getAsync = promisify(this.db.get.bind(this.db)) as DbGetAsync;
+    const runAsync = promisify(this.db.run.bind(this.db)) as DbRunAsync;
+    
+    const row = await getAsync(`
+      SELECT * FROM authentication_states WHERE challenge = ? AND expires_at > ?
+    `, [challenge, Date.now()]) as any;
+
+    if (!row) return null;
+
+    // 删除状态
+    await runAsync('DELETE FROM authentication_states WHERE challenge = ?', [challenge]);
+
+    return {
+      challenge: row.challenge,
+      userId: row.user_id,
+      userVerification: row.user_verification,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
     };
   }
 }
