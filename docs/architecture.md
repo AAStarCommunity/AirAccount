@@ -68,8 +68,8 @@ This section analyzes the architecture of the `eth-wallet` example from the `inc
 ```mermaid
 graph TD
     subgraph "User Space (Normal World)"
-        A[User] --> B{eth_wallet-rs (CA)};
-        B --> C[optee-teec];
+        A[User] --> B{eth_wallet-rs (CA)}
+        B --> C[optee-teec]
     end
 
     subgraph "Secure World (OP-TEE)"
@@ -170,8 +170,8 @@ graph TD
 ```mermaid
 graph TD
     subgraph "用户空间 (普通世界)"
-        A[用户] --> B{eth_wallet-rs (CA)};
-        B --> C[optee-teec];
+        A[用户] --> B{eth_wallet-rs (CA)}
+        B --> C[optee-teec]
     end
 
     subgraph "安全世界 (OP-TEE)"
