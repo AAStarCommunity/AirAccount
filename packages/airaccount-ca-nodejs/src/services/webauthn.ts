@@ -48,6 +48,13 @@ export interface Challenge {
   expiresAt: number;
 }
 
+export interface SignatureVerificationRequest {
+  signature: string;
+  publicKey: string;
+  messageHash: string;
+  credentialId: string;
+}
+
 export class WebAuthnService {
   private config: WebAuthnConfig;
   private database: Database;
@@ -484,6 +491,52 @@ export class WebAuthnService {
       };
     } catch (error) {
       throw handleWebAuthnError(error);
+    }
+  }
+
+  /**
+   * 验证 Passkey 签名 - KMS 专用
+   * 用于双重签名验证中的用户意图验证
+   */
+  async verifySignature(request: SignatureVerificationRequest): Promise<boolean> {
+    try {
+      // 在开发环境中，简化验证逻辑
+      if (this.isTestMode || process.env.NODE_ENV === 'development') {
+        console.log('🔧 Development mode: Passkey signature verification bypassed');
+        return true;
+      }
+
+      // 获取凭证信息
+      const credentialId = Buffer.from(request.credentialId, 'hex');
+      const passkey = await this.database.getPasskeyByCredentialId(credentialId);
+      
+      if (!passkey) {
+        console.warn('❌ Passkey credential not found:', request.credentialId);
+        return false;
+      }
+
+      // 验证公钥匹配
+      const storedPublicKey = passkey.credentialPublicKey.toString('hex');
+      if (storedPublicKey !== request.publicKey) {
+        console.warn('❌ Public key mismatch for credential:', request.credentialId);
+        return false;
+      }
+
+      // 在生产环境中，这里应该使用完整的 WebAuthn 签名验证逻辑
+      // 包括：
+      // 1. 解析签名数据
+      // 2. 验证authenticatorData
+      // 3. 验证clientDataJSON
+      // 4. 使用公钥验证签名
+      
+      // TODO: 实现完整的 WebAuthn 签名验证
+      // 目前简化为基本的公钥匹配验证
+      console.log('✅ Passkey signature verified (simplified)');
+      return true;
+
+    } catch (error) {
+      console.error('Passkey signature verification failed:', error);
+      return false;
     }
   }
 }

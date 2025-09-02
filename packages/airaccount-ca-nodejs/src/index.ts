@@ -16,6 +16,7 @@ import { walletRoutes } from './routes/wallet.js';
 import { webauthnRoutes } from './routes/webauthn.js';
 import { healthRoutes } from './routes/health.js';
 import { accountAbstractionRoutes } from './routes/account-abstraction.js';
+import { kmsRoutes } from './routes/kms.js';
 import { TEEClient } from './services/tee-client.js';
 import { Database } from './services/database.js';
 import { WebAuthnService } from './services/webauthn.js';
@@ -117,6 +118,7 @@ async function createApp(): Promise<express.Application> {
   app.use('/api/auth', authRoutes);
   app.use('/api/wallet', walletRoutes);
   app.use('/api/aa', accountAbstractionRoutes);
+  app.use('/kms', kmsRoutes);  // KMS 双重签名验证端点
 
   // 404处理
   app.use('*', (req, res) => {
@@ -164,6 +166,9 @@ async function startServer() {
       logger.info('  POST /api/aa/execute-transaction - 执行交易');
       logger.info('  POST /api/aa/execute-batch - 批量执行交易');
       logger.info('  GET  /api/aa/paymaster-info - Paymaster信息');
+      logger.info('  POST /kms/sign-user-operation - KMS双重签名验证');
+      logger.info('  GET  /kms/status - KMS服务状态');
+      logger.info('  POST /kms/admin/authorize-paymaster - 授权Paymaster');
     });
 
   } catch (error) {

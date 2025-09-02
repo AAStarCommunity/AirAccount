@@ -587,6 +587,41 @@ export class Database {
     };
   }
 
+  // ========== KMS 专用方法 ==========
+
+  /**
+   * 通过账户ID获取 Passkey 凭证（用于 KMS 双重签名验证）
+   */
+  async getPasskeyCredential(accountId: string): Promise<{
+    credentialId: string;
+    publicKey: string;
+    counter: number;
+  } | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const getAsync = promisify(this.db.get.bind(this.db)) as DbGetAsync;
+    
+    // 通过 accountId 查找对应的用户
+    // 这里假设 accountId 可能与 userId 或 email 相关联
+    // 实际实现可能需要根据具体的账户绑定逻辑调整
+    const row = await getAsync(`
+      SELECT p.credential_id, p.credential_public_key, p.counter 
+      FROM passkeys p
+      JOIN user_accounts u ON p.user_id = u.user_id
+      WHERE u.user_id = ? OR u.username = ? OR u.display_name = ?
+      ORDER BY p.created_at DESC
+      LIMIT 1
+    `, [accountId, accountId, accountId]) as any;
+
+    if (!row) return null;
+
+    return {
+      credentialId: row.credential_id.toString('hex'),
+      publicKey: row.credential_public_key.toString('hex'),
+      counter: row.counter
+    };
+  }
+
   // ========== 完整Passkey管理 ==========
 
   /**
