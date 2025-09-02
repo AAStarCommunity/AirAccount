@@ -247,6 +247,25 @@ export class TEEClient {
   }
 
   /**
+   * 健康检查 - KMS 专用
+   */
+  async healthCheck(): Promise<void> {
+    if (!this.isInitialized) {
+      // Mock 模式下始终健康
+      return;
+    }
+
+    try {
+      const result = await this.testConnection();
+      if (!result || !result.includes('Hello')) {
+        throw new Error('TEE health check failed: unexpected response');
+      }
+    } catch (error) {
+      throw new Error(`TEE health check failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
    * 验证TEE安全状态
    */
   async verifySecurityState(): Promise<{
