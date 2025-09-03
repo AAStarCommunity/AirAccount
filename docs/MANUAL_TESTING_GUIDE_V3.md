@@ -339,10 +339,7 @@ cp /Volumes/UltraDisk/Dev2/aastar/AirAccount/target/aarch64-unknown-linux-gnu/re
 # 📝 AirAccount Interactive Mode - Type 'help' for commands
 
 # 测试基础命令:
-AirAccount> hello
-AirAccount> echo test message
-AirAccount> security
-AirAccount> quit
+refine here for new commands @claude
 ```
 
 **选项3: 使用C语言直接测试工具**
