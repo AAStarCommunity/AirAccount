@@ -17,6 +17,7 @@ import { webauthnRoutes } from './routes/webauthn.js';
 import { healthRoutes } from './routes/health.js';
 import { accountAbstractionRoutes } from './routes/account-abstraction.js';
 import { kmsRoutes } from './routes/kms.js';
+import kmsTagRoutes from './routes/kms-ta.js';
 import { TEEClient } from './services/tee-client.js';
 import { Database } from './services/database.js';
 import { WebAuthnService } from './services/webauthn.js';
@@ -118,7 +119,8 @@ async function createApp(): Promise<express.Application> {
   app.use('/api/auth', authRoutes);
   app.use('/api/wallet', walletRoutes);
   app.use('/api/aa', accountAbstractionRoutes);
-  app.use('/kms', kmsRoutes);  // KMS 双重签名验证端点
+  app.use('/kms', kmsRoutes);  // KMS 双重签名验证端点（传统CA验证）
+  app.use('/kms-ta', kmsTagRoutes);  // KMS-TA 双重签名验证端点（TEE TA验证）
 
   // 404处理
   app.use('*', (req, res) => {
