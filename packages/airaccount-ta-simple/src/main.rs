@@ -11,6 +11,9 @@ use optee_utee::{Error, ErrorKind, Parameters};
 
 use optee_utee::Random;
 
+// 多层验证模块 (Multi-Layer Verification)
+mod multi_layer_verification;
+
 // 安全模块（适配 no_std OP-TEE 环境）
 mod security {
     use super::*;
@@ -805,6 +808,12 @@ mod input_validation {
     pub const CMD_SIGN_WITH_HYBRID_KEY: u32 = 21;
     pub const CMD_VERIFY_SECURITY_STATE: u32 = 22;
     
+    // 双重签名验证命令 (30-33)
+    pub const CMD_VERIFY_DUAL_SIGNATURE: u32 = 30;
+    pub const CMD_REGISTER_PAYMASTER: u32 = 31;
+    pub const CMD_REGISTER_USER_PASSKEY: u32 = 32;
+    pub const CMD_GET_VERIFICATION_STATUS: u32 = 33;
+    
     #[derive(Debug)]
     pub enum ValidationError {
         InvalidCommand,
@@ -826,7 +835,8 @@ mod input_validation {
             | CMD_CREATE_WALLET | CMD_REMOVE_WALLET | CMD_DERIVE_ADDRESS 
             | CMD_SIGN_TRANSACTION | CMD_GET_WALLET_INFO | CMD_LIST_WALLETS 
             | CMD_TEST_SECURITY 
-            | CMD_CREATE_HYBRID_ACCOUNT | CMD_SIGN_WITH_HYBRID_KEY | CMD_VERIFY_SECURITY_STATE => {}, // 已知命令，继续验证
+            | CMD_CREATE_HYBRID_ACCOUNT | CMD_SIGN_WITH_HYBRID_KEY | CMD_VERIFY_SECURITY_STATE
+            | CMD_VERIFY_DUAL_SIGNATURE | CMD_REGISTER_PAYMASTER | CMD_REGISTER_USER_PASSKEY | CMD_GET_VERIFICATION_STATUS => {}, // 已知命令，继续验证
             _ => return Err(ValidationError::InvalidCommand),
         }
         
@@ -988,6 +998,87 @@ fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()
                 }
                 Err(_e) => Err(optee_utee::ErrorKind::Generic.into())
             }
+        }
+        
+        // 双重签名验证命令 (30-33)
+        30 => {
+            // 验证双重签名 - 需要DualSignatureRequest输入参数
+            match multi_layer_verification::handle_multi_layer_verification(params) {
+                Ok(()) => {
+                    trace_println!("[+] Dual signature verification completed");
+                    Ok(())
+                }
+                Err(e) => {
+                    trace_println!("[!] Dual signature verification failed: {:?}", e);
+                    Err(e)
+                }
+            }
+        }
+        
+        31 => {
+            // 注册Paymaster - 需要Paymaster地址和名称
+            match multi_layer_verification::handle_paymaster_registration(params) {
+                Ok(()) => {
+                    trace_println!("[+] Paymaster registration completed");
+                    Ok(())
+                }
+                Err(e) => {
+                    trace_println!("[!] Paymaster registration failed: {:?}", e);
+                    Err(e)
+                }
+            }
+        }
+        
+        32 => {
+            // 注册用户Passkey凭证 - 需要PasskeyCredential参数
+            let p0 = unsafe { params.0.as_memref()? };
+            let mut p1 = unsafe { params.1.as_value()? };
+            
+            // 简化实现：从输入缓冲区解析PasskeyCredential
+            if p0.buffer().len() < 64 {
+                trace_println!("[!] Invalid passkey credential input size");
+                return Err(Error::new(ErrorKind::BadParameters));
+            }
+            
+            let verifier = multi_layer_verification::get_multi_layer_verifier();
+            
+            // 构造PasskeyCredential（简化版本）
+            let account_id_end = p0.buffer().iter().position(|&b| b == 0).unwrap_or(64);
+            let account_id = String::from_utf8_lossy(&p0.buffer()[..account_id_end]).to_string();
+            
+            let credential = multi_layer_verification::PasskeyCredential {
+                account_id: account_id.clone(),
+                credential_id: p0.buffer()[64..128].to_vec(),
+                public_key: p0.buffer()[128..192].to_vec(), 
+                counter: 0,
+                registration_time: 1756866254u64, // 使用固定时间戳
+            };
+            
+            match verifier.register_user_passkey(credential) {
+                Ok(()) => {
+                    trace_println!("[+] User passkey registered: {}", account_id);
+                    p1.set_a(1); // 成功标志
+                    Ok(())
+                }
+                Err(e) => {
+                    trace_println!("[!] User passkey registration failed: {}", e);
+                    p1.set_a(0); // 失败标志
+                    Err(Error::new(ErrorKind::Generic))
+                }
+            }
+        }
+        
+        33 => {
+            // 获取验证状态 - 简单的状态查询
+            let mut p0 = unsafe { params.0.as_memref()? };
+            
+            let _verifier = multi_layer_verification::get_multi_layer_verifier();
+            let status_msg = b"Dual signature verifier active";
+            let len = status_msg.len().min(p0.buffer().len());
+            p0.buffer()[..len].copy_from_slice(&status_msg[..len]);
+            
+            trace_println!("[+] Verification status queried");
+            Ok(())
         }
         
         // 其他命令
