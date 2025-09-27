@@ -1,0 +1,19 @@
+[package]
+name = "kms-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core logic for TEE-based Key Management System"
+
+[dependencies]
+# Workspace dependencies
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand_core = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+std = ["serde/std"]
