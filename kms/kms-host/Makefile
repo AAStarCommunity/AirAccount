@@ -15,33 +15,27 @@
 # specific language governing permissions and limitations
 # under the License.
 
-[package]
-name = "kms-host"
-version = "0.1.0"
-authors = ["KMS Contributors"]
-license = "Apache-2.0"
-description = "KMS Host application based on eth_wallet."
-edition = "2021"
+NAME := eth_wallet-rs
 
-[dependencies]
-kms-core = { path = "../kms-core", features = ["std"] }
-proto = { path = "../proto" }
-optee-teec = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+TARGET ?= aarch64-unknown-linux-gnu
+CROSS_COMPILE ?= aarch64-linux-gnu-
+OBJCOPY := $(CROSS_COMPILE)objcopy
+LINKER_CFG := target.$(TARGET).linker=\"$(CROSS_COMPILE)gcc\"
 
-structopt = "0.3"
-bincode = "1.3.3"
-anyhow = "1.0"
-uuid = { version = "1.8", features = ["serde"] }
-hex = { version = "0.4", features = ["serde"] }
-clap = { version = "4.0", features = ["derive"] }
+OUT_DIR := $(CURDIR)/target/$(TARGET)/release
 
-[[bin]]
-name = "kms-cli"
-path = "src/main.rs"
+ifeq ($(STD),)
+all:
+	@echo "Please \`export STD=y\` then rerun \`source environment\` to build the STD version"
+else
+all: host strip
+endif
 
-[[bin]]
-name = "eth-wallet-cli"
-path = "src/cli.rs"
+host:
+	@cargo build --target $(TARGET_HOST) --release --config $(LINKER_CFG)
 
-[profile.release]
-lto = true
+strip: host
+	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/$(NAME) $(OUT_DIR)/$(NAME)
+
+clean:
+	@cargo clean
