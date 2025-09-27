@@ -1,0 +1,20 @@
+[package]
+name = "kms-ta"
+version = "0.1.0"
+edition = "2021"
+description = "KMS Trusted Application for OP-TEE"
+
+[dependencies]
+kms-core = { path = "../kms-core" }
+
+# OP-TEE TA dependencies (will be added when integrating with eth_wallet code)
+# optee-utee = { path = "../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
+
+# Crypto dependencies
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+
+[lib]
+crate-type = ["staticlib"]

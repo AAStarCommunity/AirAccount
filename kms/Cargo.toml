@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "kms-core",
+    "kms-ta",
+    "kms-host"
+]
+
+[workspace.dependencies]
+# TEE dependencies
+optee-teec = "0.5.0"
+optee-teec-sys = "0.5.0"
+
+# Crypto dependencies
+secp256k1 = { version = "0.29", default-features = false, features = ["alloc", "recovery"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+
+# Serialization
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+bincode = { version = "1.3", default-features = false }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"

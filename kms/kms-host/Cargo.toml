@@ -1,0 +1,20 @@
+[package]
+name = "kms-host"
+version = "0.1.0"
+edition = "2021"
+description = "KMS Host application for communicating with TA"
+
+[dependencies]
+kms-core = { path = "../kms-core", features = ["std"] }
+
+# OP-TEE client dependencies
+optee-teec = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+clap = { version = "4.0", features = ["derive"] }
+hex = "0.4"
+
+[[bin]]
+name = "kms-cli"
+path = "src/main.rs"
