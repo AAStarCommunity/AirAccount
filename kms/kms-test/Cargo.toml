@@ -1,0 +1,11 @@
+[package]
+name = "kms-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_basic"
+path = "../test_basic.rs"
+
+[dependencies]
+kms-core = { path = "../kms-core", features = ["std"] }

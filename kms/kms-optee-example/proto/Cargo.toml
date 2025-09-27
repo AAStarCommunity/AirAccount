@@ -1,0 +1,10 @@
+[package]
+name = "proto"
+version = "0.1.0"
+authors = ["AirAccount Contributors"]
+license = "Apache-2.0"
+description = "KMS OP-TEE protocol definitions."
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

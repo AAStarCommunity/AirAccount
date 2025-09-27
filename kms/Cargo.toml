@@ -2,9 +2,14 @@
 resolver = "2"
 members = [
     "kms-core",
-    "kms-ta",
-    "kms-host"
+    "proto",
+    "kms-test",
+    "kms-ta-test"
 ]
+
+# TEE components (disabled for basic testing)
+# "kms-ta",
+# "kms-host",
 
 [workspace.dependencies]
 # TEE dependencies
