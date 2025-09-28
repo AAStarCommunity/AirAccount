@@ -1,0 +1,25 @@
+[package]
+name = "kms-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_basic"
+path = "../test_basic.rs"
+
+[[bin]]
+name = "verify_credentials"
+path = "../verify_credentials.rs"
+
+[dependencies]
+kms-core = { path = "../kms-core", features = ["std"] }
+anyhow = "1.0"
+secp256k1 = "0.27.0"
+sha3 = "0.10.6"
+hex = "0.4"
+proto = { path = "../proto" }
+uuid = { version = "1.8", default-features = false }
+bip32 = { version = "0.3.0", features = ["bip39"]}
+serde = { version = "1.0", features = ["derive"] }
+ethereum-tx-sign = "6.1.3"
+bincode = "1.3.3"
