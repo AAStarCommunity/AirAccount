@@ -271,33 +271,33 @@ AirAccount/ (现在是纯KMS项目)
 
 #### 核心成就：
 
-##### 1. **一键部署脚本** (`deploy-kms.sh`)
+##### 1. **一键部署脚本** (`scripts/deploy-kms.sh`)
 - **双版本支持**: Mock-TEE (快速) 和 QEMU-TEE (真实TEE)
 - **灵活配置**: 自定义端口、Cloudflare隧道、环境清理
 - **智能管理**: 自动依赖检查、服务状态监控、优雅停止
 
 ```bash
 # 部署Mock版本并启用公网隧道
-./deploy-kms.sh mock-deploy -t
+./scripts/deploy-kms.sh mock-deploy -t
 
 # 部署QEMU-TEE版本到自定义端口
-./deploy-kms.sh qemu-deploy -p 9090
+./scripts/deploy-kms.sh qemu-deploy -p 9090
 
 # 一键测试所有API
-./deploy-kms.sh test-all
+./scripts/deploy-kms.sh test-all
 ```
 
-##### 2. **全面API测试套件** (`test-kms-apis.py`)
+##### 2. **全面API测试套件** (`scripts/test-kms-apis.py`)
 - **7项核心测试**: 健康检查、密钥创建、签名、公钥获取、错误处理、性能测试
 - **多环境支持**: 本地、在线、对比测试
 - **详细报告**: 成功率、耗时分析、错误追踪
 
 ```bash
 # 测试在线版本
-python3 test-kms-apis.py --online
+python3 scripts/test-kms-apis.py --online
 
 # 比较本地和在线版本性能
-python3 test-kms-apis.py --compare
+python3 scripts/test-kms-apis.py --compare
 ```
 
 ##### 3. **版本类型识别与对比**
@@ -337,10 +337,10 @@ python3 test-kms-apis.py --compare
 - **📋 完整文档**: 部署指南涵盖所有使用场景
 
 #### 使用场景支持：
-1. **快速原型验证**: `./deploy-kms.sh mock-deploy`
-2. **安全功能验证**: `./deploy-kms.sh qemu-deploy`
-3. **公网演示**: `./deploy-kms.sh mock-deploy -t`
-4. **性能基准**: `python3 test-kms-apis.py --compare`
+1. **快速原型验证**: `./scripts/deploy-kms.sh mock-deploy`
+2. **安全功能验证**: `./scripts/deploy-kms.sh qemu-deploy`
+3. **公网演示**: `./scripts/deploy-kms.sh mock-deploy -t`
+4. **性能基准**: `python3 scripts/test-kms-apis.py --compare`
 
 **现在我们拥有完整的企业级KMS部署工具链，支持从开发测试到生产部署的全生命周期！**
 
@@ -464,7 +464,7 @@ ERROR: 消息签名失败: {"__type":"ValidationException","message":"Invalid re
 - 批量操作测试同样存在 KeyId 提取逻辑不一致问题
 
 ##### 2. **修复内容**
-**test-kms-apis.py:200-205** - 添加缺失字段：
+**scripts/test-kms-apis.py:200-205** - 添加缺失字段：
 ```python
 payload = {
     "KeyId": key_id,
@@ -474,7 +474,7 @@ payload = {
 }
 ```
 
-**test-kms-apis.py:315-321** - 统一KeyId提取逻辑：
+**scripts/test-kms-apis.py:315-321** - 统一KeyId提取逻辑：
 ```python
 # AWS KMS API返回KeyMetadata结构
 key_metadata = result['data'].get('KeyMetadata', {})

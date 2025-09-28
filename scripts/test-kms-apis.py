@@ -240,7 +240,7 @@ class KMSAPITester:
 
             if response.status_code == 200:
                 data = response.json()
-                key_count = len(data.get('keys', []))
+                key_count = len(data.get('Keys', []))
                 self.log('SUCCESS', f"成功列出密钥，总数: {key_count}")
                 return TestResult(
                     name="list_keys",
