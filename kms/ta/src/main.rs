@@ -1,3 +1,4 @@
+#![feature(restricted_std)]
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -14,7 +15,6 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
 #![no_main]
 
 mod hash;
@@ -121,6 +121,19 @@ fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTr
     Ok(proto::SignTransactionOutput { signature })
 }
 
+fn hello_world(input: &proto::HelloWorldInput) -> Result<proto::HelloWorldOutput> {
+    dbg_println!("[+] Hello world called with name: {}", input.name);
+
+    let message = format!(
+        "Hello, {}! This message is from TEE (Trusted Execution Environment).",
+        input.name
+    );
+
+    dbg_println!("[+] Hello world response: {}", message);
+
+    Ok(proto::HelloWorldOutput { message })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -137,6 +150,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RemoveWallet => process(serialized_input, remove_wallet),
         Command::DeriveAddress => process(serialized_input, derive_address),
         Command::SignTransaction => process(serialized_input, sign_transaction),
+        Command::HelloWorld => process(serialized_input, hello_world),
         _ => bail!("Unsupported command"),
     }
 }
