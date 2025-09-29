@@ -1,5 +1,74 @@
 # Project Changes Log
 
+## 🔒 TA-Only KMS API 重构 (2025-09-29)
+
+### 主要成就
+1. **✅ 移除所有非 TA 基于的 API 实现**
+   - 删除 `src/simple_kms.rs` 及其所有独立加密操作
+   - 移除所有独立加密依赖: secp256k1, bip39, bip32, k256, tiny-keccak, sha3
+   - 确保所有密钥操作必须在 TA 中完成
+
+2. **✅ 深入研究 eth_wallet TA 真实能力**
+   - 识别 4 个核心 TA 命令:
+     - CreateWallet (BIP39 助记词生成)
+     - RemoveWallet (安全删除)
+     - DeriveAddress (BIP32 HD 派生)
+     - SignTransaction (EIP-155 签名)
+
+3. **✅ 设计纯 TA-only API 架构**
+   - 创建 `/docs/TA-Only-KMS-API-Design.md` - 完整 TA-only 架构规范
+   - 将 6 个 KMS API 映射到 4 个 eth_wallet TA 命令
+   - 确保主机应用程序零独立加密操作
+
+4. **✅ 实现仅支持 TA 的 API**
+   - 创建 `src/ta_client.rs` - eth_wallet 集成的 TA 客户端
+   - 更新所有类型以匹配 eth_wallet TA 协议
+   - 修改 main.rs 仅公开 6 个基于 TA 的 API:
+     1. CreateAccount → TA CreateWallet
+     2. DescribeAccount → 本地元数据
+     3. ListAccounts → 本地元数据列表
+     4. DeriveAddress → TA DeriveAddress
+     5. SignTransaction → TA SignTransaction
+     6. RemoveAccount → TA RemoveWallet
+
+### 当前状态
+5. **🔧 正在启动 QEMU OP-TEE 环境进行测试**
+   - 初始化 git 子模块 (third_party/incubator-teaclave-trustzone-sdk)
+   - 修复 Dockerfile.kms-optee 中的 $HOME 变量问题
+   - Docker 构建遇到 build context 路径问题 (正在解决)
+
+6. **⏳ 待完成: 在 QEMU 环境中测试基于 TA 的 API**
+
+### 安全合规性验证 ✅
+- [x] 主机中零独立加密
+- [x] TA 安全存储中的所有私钥
+- [x] TA 中的所有签名操作
+- [x] TA 中的所有助记词操作
+- [x] TA 中的所有 HD 派生
+- [x] 主机中仅存储元数据
+- [x] TA 命令匹配 eth_wallet 规范
+
+### 架构总结
+**最终架构**: 纯基于 TA 的 KMS，主机应用程序零加密操作。所有安全关键功能隔离在 eth_wallet 可信应用程序内。
+
+### 技术细节
+- **语言**: Rust (主机) + OP-TEE TA (安全区)
+- **通信**: OP-TEE Client API via optee-teec
+- **序列化**: bincode for TA 通信
+- **兼容性**: AWS KMS 兼容的 API 端点
+- **测试环境**: QEMU ARM64 + OP-TEE
+
+### 下一步
+1. 解决 Docker 构建路径问题
+2. 成功构建 OP-TEE 环境
+3. 在 QEMU 中测试所有 6 个基于 TA 的 API
+4. 验证与 eth_wallet TA 的通信
+5. 性能测试和优化
+
+**重要**: 所有功能都基于 TA，在 QEMU 和 OP-TEE 环境中开发，并使用 eth_wallet 能力。绝不打破这个原则。
+
+---
+
 ## 2025-09-28 - Phase 8: 真实TEE环境迁移计划启动
 
 ### 🚀 Phase 8 规划完成
