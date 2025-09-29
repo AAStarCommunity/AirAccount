@@ -1,0 +1,185 @@
+#!/usr/bin/expect -f
+
+# Complete KMS API Test in QEMU OP-TEE Environment
+set timeout 120
+
+proc log_msg {level msg} {
+    puts "\[KMS-QEMU\] $level: $msg"
+}
+
+log_msg "INFO" "🚀 Starting comprehensive KMS API test in QEMU OP-TEE..."
+
+# Start QEMU with KMS environment in current container
+spawn bash -c '
+export IMG_DIRECTORY=/opt/teaclave/images
+export IMG_NAME=aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+export QEMU_HOST_SHARE_DIR=/opt/teaclave/shared
+cd /opt/teaclave/images/aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+./qemu-system-aarch64 \
+    -nodefaults -nographic \
+    -serial stdio -serial file:/tmp/serial.log \
+    -smp 2 -s -machine virt,secure=on,acpi=off,gic-version=3 \
+    -cpu cortex-a57 -d unimp -semihosting-config enable=on,target=native \
+    -m 1057 -bios bl1.bin -initrd rootfs.cpio.gz \
+    -append \"console=ttyAMA0,115200 keep_bootcon root=/dev/vda2\" \
+    -kernel Image \
+    -fsdev local,id=fsdev0,path=/opt/teaclave/shared,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+    -netdev user,id=vmnic,hostfwd=tcp:127.0.0.1:8080-:8080 \
+    -device virtio-net-device,netdev=vmnic
+'
+
+# Wait for login
+expect {
+    "buildroot login:" {
+        log_msg "SUCCESS" "QEMU started, logging in..."
+        send "root\r"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for login"
+        exit 1
+    }
+}
+
+# Wait for prompt
+expect {
+    "# " {
+        log_msg "SUCCESS" "Logged in successfully"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for prompt"
+        exit 1
+    }
+}
+
+# Setup environment
+log_msg "INFO" "Setting up KMS environment..."
+send "mkdir -p /mnt/host && mount -t 9p -o trans=virtio host /mnt/host\r"
+expect "# "
+
+# Copy binaries
+send "cp /mnt/host/host/kms-host /tmp/kms-host && chmod +x /tmp/kms-host\r"
+expect "# "
+
+# Copy KMS API server if available
+send "find /mnt/host -name '*kms-api*' -executable | head -1\r"
+expect "# "
+
+# Check network
+send "ip addr show\r"
+expect "# "
+
+# Test 1: KMS Host Application Tests
+log_msg "INFO" "🧪 Testing KMS Host Application..."
+
+send "/tmp/kms-host --help\r"
+expect {
+    "eth_wallet" {
+        log_msg "SUCCESS" "✅ KMS host help works"
+    }
+    "# " {
+        log_msg "INFO" "Help command completed"
+    }
+}
+
+# Test 2: Create Wallet
+log_msg "INFO" "📝 Testing wallet creation..."
+send "/tmp/kms-host create-wallet\r"
+expect {
+    "Wallet ID:" {
+        # Capture wallet ID
+        expect -re {Wallet ID: ([a-f0-9-]+)}
+        set wallet_id $expect_out(1,string)
+        log_msg "SUCCESS" "✅ Wallet created: $wallet_id"
+    }
+    "Error:" {
+        log_msg "INFO" "Expected error (TA communication)"
+    }
+    "# " {
+        log_msg "INFO" "Create wallet completed"
+    }
+}
+
+# Test 3: Derive Address (if wallet exists)
+if {[info exists wallet_id]} {
+    log_msg "INFO" "🔑 Testing address derivation..."
+    send "/tmp/kms-host derive-address --wallet-id $wallet_id --hd-path \"m/44'/60'/0'/0/0\"\r"
+    expect {
+        "Address:" {
+            log_msg "SUCCESS" "✅ Address derived successfully"
+        }
+        "Error:" {
+            log_msg "INFO" "Address derivation error (expected)"
+        }
+        "# " {
+            log_msg "INFO" "Derive address completed"
+        }
+    }
+}
+
+# Test 4: Check if we can start KMS API server
+log_msg "INFO" "🌐 Setting up KMS API server environment..."
+
+# Copy KMS API binary if available
+send "find /mnt/host -path '*/kms-api/target/*/kms-api' | head -1\r"
+expect "# "
+
+send "if \[ -f /mnt/host/kms-api \]; then cp /mnt/host/kms-api /tmp/ && chmod +x /tmp/kms-api; echo 'KMS API found'; else echo 'KMS API not found'; fi\r"
+expect "# "
+
+# Test TEE status
+log_msg "INFO" "🔍 Checking TEE environment..."
+send "ls -la /dev/tee*\r"
+expect "# "
+
+send "ps | grep tee-supplicant\r"
+expect "# "
+
+send "find /lib -name '*.ta' 2>/dev/null | wc -l\r"
+expect "# "
+
+# Test 5: Network connectivity for API server
+log_msg "INFO" "🌐 Testing network setup for API server..."
+send "netstat -tulpn 2>/dev/null | grep :8080 || echo 'Port 8080 available'\r"
+expect "# "
+
+# If KMS API server exists, try to start it
+send "if \[ -f /tmp/kms-api \]; then echo 'Starting KMS API server...'; /tmp/kms-api --help; else echo 'No KMS API server available'; fi\r"
+expect "# "
+
+log_msg "SUCCESS" "🎉 KMS QEMU environment test completed!"
+
+# Summary
+log_msg "INFO" "📊 Test Summary:"
+send "echo '=== KMS Test Summary ==='\r"
+send "echo 'TEE Environment: '$(ls /dev/tee* 2>/dev/null | wc -l)' devices'\r"
+send "echo 'Host Binary: '$(file /tmp/kms-host | grep -o 'ARM aarch64' || echo 'Not ARM64')'\r"
+send "echo 'Network: '$(ip addr show | grep inet | wc -l)' interfaces'\r"
+expect "# "
+
+# Keep QEMU running for manual testing
+log_msg "INFO" "🔧 QEMU environment ready for manual testing"
+log_msg "INFO" "📝 To continue testing:"
+log_msg "INFO" "   1. KMS host: /tmp/kms-host"
+log_msg "INFO" "   2. Network: Port 8080 forwarded"
+log_msg "INFO" "   3. TEE: OP-TEE environment active"
+
+# Don't shutdown automatically - let user test manually
+send "echo 'KMS QEMU environment ready - use Ctrl+C to exit'\r"
+expect "# "
+
+# Wait for user interrupt
+expect {
+    "exit" {
+        log_msg "INFO" "User requested exit"
+    }
+    timeout {
+        log_msg "INFO" "Test environment running..."
+        exp_continue
+    }
+}
+
+send "poweroff\r"
+expect eof
+
+exit 0

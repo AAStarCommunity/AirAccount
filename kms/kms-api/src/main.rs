@@ -128,6 +128,54 @@ async fn handle_aws_kms_action(
                 }
             }
         }
+        "TrentService.ListKeys" => {
+            match kms.list_keys().await {
+                Ok(keys) => {
+                    let response = json!({
+                        "Keys": keys
+                    });
+                    Ok(Json(response))
+                }
+                Err(e) => {
+                    error!("ListKeys failed: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                        error_type: "InternalFailureException".to_string(),
+                        message: e.to_string(),
+                    })))
+                }
+            }
+        }
+        "TrentService.DescribeKey" => {
+            let request: DescribeKeyRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    error!("Failed to parse DescribeKey request: {}", e);
+                    (StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                        error_type: "ValidationException".to_string(),
+                        message: format!("Invalid request: {}", e),
+                    }))
+                })?;
+
+            match kms.describe_key(request).await {
+                Ok(response) => {
+                    let json_response = serde_json::to_value(response)
+                        .map_err(|e| {
+                            error!("Failed to serialize response: {}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                                error_type: "InternalFailureException".to_string(),
+                                message: "Failed to serialize response".to_string(),
+                            }))
+                        })?;
+                    Ok(Json(json_response))
+                }
+                Err(e) => {
+                    error!("DescribeKey failed: {}", e);
+                    Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+                        error_type: "NotFoundException".to_string(),
+                        message: e.to_string(),
+                    })))
+                }
+            }
+        }
         _ => {
             error!("Unknown action: {}", action);
             Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {

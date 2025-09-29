@@ -109,6 +109,18 @@ pub struct GetPublicKeyRequest {
     pub key_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DescribeKeyRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DescribeKeyResponse {
+    #[serde(rename = "KeyMetadata")]
+    pub key_metadata: KeyMetadata,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GetPublicKeyResponse {
     #[serde(rename = "KeyId")]
