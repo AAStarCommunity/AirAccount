@@ -17,7 +17,6 @@
 
 mod cli;
 mod tests;
-mod api;
 
 use optee_teec::{Context, Operation, ParamType, Uuid};
 use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
@@ -113,30 +112,7 @@ pub fn sign_transaction(
     Ok(output.signature)
 }
 
-pub fn hello_world(name: &str) -> Result<String> {
-    let input = proto::HelloWorldInput {
-        name: name.to_string(),
-    };
-    let serialized_output = invoke_command(
-        proto::Command::HelloWorld,
-        &bincode::serialize(&input)?,
-    )?;
-    let output: proto::HelloWorldOutput = bincode::deserialize(&serialized_output)?;
-    Ok(output.message)
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 检查是否启动KMS API服务器
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "--kms-server" {
-        env_logger::init();
-        println!("🚀 启动基于 eth_wallet TA 的 KMS API 服务器");
-        api::start_kms_server().await?;
-        return Ok(());
-    }
-
-    // 原有CLI模式
+fn main() -> Result<()> {
     let args = cli::Opt::from_args();
     match args.command {
         cli::Command::CreateWallet(_opt) => {
@@ -163,10 +139,6 @@ async fn main() -> Result<()> {
                 opt.gas,
             )?;
             println!("Signature: {}", hex::encode(&signature));
-        }
-        cli::Command::HelloWorld(opt) => {
-            let message = hello_world(&opt.name)?;
-            println!("{}", message);
         }
         cli::Command::Test => {
             tests::tests::test_workflow();
