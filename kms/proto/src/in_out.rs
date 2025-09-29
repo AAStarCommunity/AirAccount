@@ -69,13 +69,3 @@ pub struct SignTransactionInput {
 pub struct SignTransactionOutput {
     pub signature: Vec<u8>,
 }
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HelloWorldInput {
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HelloWorldOutput {
-    pub message: String,
-}
