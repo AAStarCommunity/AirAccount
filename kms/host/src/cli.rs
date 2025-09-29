@@ -40,6 +40,12 @@ pub fn decode_str_to_uuid(s: &str) -> Result<uuid::Uuid> {
 pub struct CreateWalletOpt {}
 
 #[derive(Debug, StructOpt)]
+pub struct HelloWorldOpt {
+    #[structopt(short, long, required = true)]
+    pub name: String,
+}
+
+#[derive(Debug, StructOpt)]
 pub struct RemoveWalletOpt {
     #[structopt(short, long, required = true)]
     pub wallet_id: uuid::Uuid,
@@ -87,6 +93,9 @@ pub enum Command {
     /// Sign a transaction.
     #[structopt(name = "sign-transaction")]
     SignTransaction(SignTransactionOpt),
+    /// Say hello from TEE.
+    #[structopt(name = "hello")]
+    HelloWorld(HelloWorldOpt),
     /// Run tests
     #[structopt(name = "test")]
     Test,
