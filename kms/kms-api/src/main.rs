@@ -1,9 +1,9 @@
-// KMS JSON-RPC API Server
+// TA-Only KMS API Server - All key operations MUST be done in TA
 mod types;
-mod simple_kms;
+mod ta_client;
 
 use axum::{
-    extract::{State, Path},
+    extract::State,
     http::{StatusCode, HeaderMap},
     response::Json,
     routing::{post, get},
@@ -17,35 +17,36 @@ use tracing::{info, error};
 use tracing_subscriber;
 
 use types::*;
-use simple_kms::KmsService;
+use ta_client::TAKmsService;
 
-type SharedKmsService = Arc<KmsService>;
+type SharedTAKmsService = Arc<TAKmsService>;
 
 async fn handle_aws_kms_action(
-    State(kms): State<SharedKmsService>,
+    State(kms): State<SharedTAKmsService>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    // Extract the action from X-Amz-Target header
     let action = headers
         .get("X-Amz-Target")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("Unknown");
 
-    info!("Handling action: {}", action);
+    info!("🔒 TA-Only KMS Action: {}", action);
 
     match action {
-        "TrentService.CreateKey" => {
-            let request: CreateKeyRequest = serde_json::from_value(payload)
+        // ===== TA-Only APIs (eth_wallet TA based) =====
+
+        "TrentService.CreateAccount" => {
+            let request: CreateAccountRequest = serde_json::from_value(payload)
                 .map_err(|e| {
-                    error!("Failed to parse CreateKey request: {}", e);
+                    error!("Failed to parse CreateAccount request: {}", e);
                     (StatusCode::BAD_REQUEST, Json(ErrorResponse {
                         error_type: "ValidationException".to_string(),
                         message: format!("Invalid request: {}", e),
                     }))
                 })?;
 
-            match kms.create_key(request).await {
+            match kms.create_account(request).await {
                 Ok(response) => {
                     let json_response = serde_json::to_value(response)
                         .map_err(|e| {
@@ -58,25 +59,26 @@ async fn handle_aws_kms_action(
                     Ok(Json(json_response))
                 }
                 Err(e) => {
-                    error!("CreateKey failed: {}", e);
+                    error!("CreateAccount TA call failed: {}", e);
                     Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                        error_type: "InternalFailureException".to_string(),
-                        message: e.to_string(),
+                        error_type: "TAException".to_string(),
+                        message: format!("TA error: {}", e),
                     })))
                 }
             }
         }
-        "TrentService.Sign" => {
-            let request: SignRequest = serde_json::from_value(payload)
+
+        "TrentService.DescribeAccount" => {
+            let request: DescribeAccountRequest = serde_json::from_value(payload)
                 .map_err(|e| {
-                    error!("Failed to parse Sign request: {}", e);
+                    error!("Failed to parse DescribeAccount request: {}", e);
                     (StatusCode::BAD_REQUEST, Json(ErrorResponse {
                         error_type: "ValidationException".to_string(),
                         message: format!("Invalid request: {}", e),
                     }))
                 })?;
 
-            match kms.sign(request).await {
+            match kms.describe_account(request).await {
                 Ok(response) => {
                     let json_response = serde_json::to_value(response)
                         .map_err(|e| {
@@ -89,38 +91,7 @@ async fn handle_aws_kms_action(
                     Ok(Json(json_response))
                 }
                 Err(e) => {
-                    error!("Sign failed: {}", e);
-                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                        error_type: "KMSInvalidStateException".to_string(),
-                        message: e.to_string(),
-                    })))
-                }
-            }
-        }
-        "TrentService.GetPublicKey" => {
-            let request: GetPublicKeyRequest = serde_json::from_value(payload)
-                .map_err(|e| {
-                    error!("Failed to parse GetPublicKey request: {}", e);
-                    (StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                        error_type: "ValidationException".to_string(),
-                        message: format!("Invalid request: {}", e),
-                    }))
-                })?;
-
-            match kms.get_public_key(request).await {
-                Ok(response) => {
-                    let json_response = serde_json::to_value(response)
-                        .map_err(|e| {
-                            error!("Failed to serialize response: {}", e);
-                            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                                error_type: "InternalFailureException".to_string(),
-                                message: "Failed to serialize response".to_string(),
-                            }))
-                        })?;
-                    Ok(Json(json_response))
-                }
-                Err(e) => {
-                    error!("GetPublicKey failed: {}", e);
+                    error!("DescribeAccount failed: {}", e);
                     Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
                         error_type: "NotFoundException".to_string(),
                         message: e.to_string(),
@@ -128,16 +99,17 @@ async fn handle_aws_kms_action(
                 }
             }
         }
-        "TrentService.ListKeys" => {
-            match kms.list_keys().await {
-                Ok(keys) => {
+
+        "TrentService.ListAccounts" => {
+            match kms.list_accounts().await {
+                Ok(accounts) => {
                     let response = json!({
-                        "Keys": keys
+                        "Accounts": accounts
                     });
                     Ok(Json(response))
                 }
                 Err(e) => {
-                    error!("ListKeys failed: {}", e);
+                    error!("ListAccounts failed: {}", e);
                     Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                         error_type: "InternalFailureException".to_string(),
                         message: e.to_string(),
@@ -145,17 +117,18 @@ async fn handle_aws_kms_action(
                 }
             }
         }
-        "TrentService.DescribeKey" => {
-            let request: DescribeKeyRequest = serde_json::from_value(payload)
+
+        "TrentService.DeriveAddress" => {
+            let request: DeriveAddressRequest = serde_json::from_value(payload)
                 .map_err(|e| {
-                    error!("Failed to parse DescribeKey request: {}", e);
+                    error!("Failed to parse DeriveAddress request: {}", e);
                     (StatusCode::BAD_REQUEST, Json(ErrorResponse {
                         error_type: "ValidationException".to_string(),
                         message: format!("Invalid request: {}", e),
                     }))
                 })?;
 
-            match kms.describe_key(request).await {
+            match kms.derive_address(request).await {
                 Ok(response) => {
                     let json_response = serde_json::to_value(response)
                         .map_err(|e| {
@@ -168,31 +141,96 @@ async fn handle_aws_kms_action(
                     Ok(Json(json_response))
                 }
                 Err(e) => {
-                    error!("DescribeKey failed: {}", e);
-                    Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                        error_type: "NotFoundException".to_string(),
-                        message: e.to_string(),
+                    error!("DeriveAddress TA call failed: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                        error_type: "TAException".to_string(),
+                        message: format!("TA error: {}", e),
                     })))
                 }
             }
         }
+
+        "TrentService.SignTransaction" => {
+            let request: SignTransactionRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    error!("Failed to parse SignTransaction request: {}", e);
+                    (StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                        error_type: "ValidationException".to_string(),
+                        message: format!("Invalid request: {}", e),
+                    }))
+                })?;
+
+            match kms.sign_transaction(request).await {
+                Ok(response) => {
+                    let json_response = serde_json::to_value(response)
+                        .map_err(|e| {
+                            error!("Failed to serialize response: {}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                                error_type: "InternalFailureException".to_string(),
+                                message: "Failed to serialize response".to_string(),
+                            }))
+                        })?;
+                    Ok(Json(json_response))
+                }
+                Err(e) => {
+                    error!("SignTransaction TA call failed: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                        error_type: "TAException".to_string(),
+                        message: format!("TA error: {}", e),
+                    })))
+                }
+            }
+        }
+
+        "TrentService.RemoveAccount" => {
+            let request: RemoveAccountRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    error!("Failed to parse RemoveAccount request: {}", e);
+                    (StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                        error_type: "ValidationException".to_string(),
+                        message: format!("Invalid request: {}", e),
+                    }))
+                })?;
+
+            match kms.remove_account(request).await {
+                Ok(response) => {
+                    let json_response = serde_json::to_value(response)
+                        .map_err(|e| {
+                            error!("Failed to serialize response: {}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                                error_type: "InternalFailureException".to_string(),
+                                message: "Failed to serialize response".to_string(),
+                            }))
+                        })?;
+                    Ok(Json(json_response))
+                }
+                Err(e) => {
+                    error!("RemoveAccount TA call failed: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                        error_type: "TAException".to_string(),
+                        message: format!("TA error: {}", e),
+                    })))
+                }
+            }
+        }
+
         _ => {
-            error!("Unknown action: {}", action);
+            error!("🚫 Unsupported operation (TA-only mode): {}", action);
             Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error_type: "UnknownOperationException".to_string(),
-                message: format!("Unknown operation: {}", action),
+                error_type: "UnsupportedOperationException".to_string(),
+                message: format!("Operation not supported in TA-only mode: {}", action),
             })))
         }
     }
 }
 
-async fn list_keys(
-    State(kms): State<SharedKmsService>,
+async fn list_accounts(
+    State(kms): State<SharedTAKmsService>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    match kms.list_keys().await {
-        Ok(keys) => Ok(Json(json!({ "Keys": keys }))),
+    match kms.list_accounts().await {
+        Ok(accounts) => Ok(Json(json!({ "Accounts": accounts }))),
         Err(e) => {
-            error!("ListKeys failed: {}", e);
+            error!("ListAccounts failed: {}", e);
             Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error_type: "InternalFailureException".to_string(),
                 message: e.to_string(),
@@ -204,30 +242,38 @@ async fn list_keys(
 async fn health_check() -> Json<Value> {
     Json(json!({
         "status": "healthy",
-        "service": "KMS API",
-        "version": "0.1.0",
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "service": "TA-Only KMS API",
+        "version": "2.1.0-ta-only",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "mode": "TEE_ONLY",
+        "supported_operations": [
+            "TrentService.CreateAccount",
+            "TrentService.DescribeAccount",
+            "TrentService.ListAccounts",
+            "TrentService.DeriveAddress",
+            "TrentService.SignTransaction",
+            "TrentService.RemoveAccount"
+        ]
     }))
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    info!("🔐 Starting KMS API Server");
+    info!("🔒 Starting TA-Only KMS API Server");
+    info!("🛡️  ALL key operations performed in eth_wallet TA");
 
-    // Initialize KMS service
-    let kms_service = Arc::new(KmsService::new(
+    // Initialize TA KMS service
+    let kms_service = Arc::new(TAKmsService::new(
         "us-west-2".to_string(),
         "123456789012".to_string(),
     ));
 
-    // Build the application
     let app = Router::new()
         .route("/", post(handle_aws_kms_action))
         .route("/health", get(health_check))
-        .route("/keys", get(list_keys))
+        .route("/accounts", get(list_accounts))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -235,19 +281,20 @@ async fn main() {
         )
         .with_state(kms_service);
 
-    // Start the server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    info!("🚀 KMS API Server listening on http://0.0.0.0:8080");
-    info!("📖 API Documentation:");
-    info!("   POST / - AWS KMS compatible endpoints");
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await.unwrap();
+    info!("🚀 TA-Only KMS API Server listening on http://0.0.0.0:8081");
+    info!("📖 Supported TA-based APIs:");
+    info!("   POST / - AWS KMS compatible TA-only endpoints");
     info!("   GET  /health - Health check");
-    info!("   GET  /keys - List all keys");
+    info!("   GET  /accounts - List all accounts");
     info!("");
-    info!("🔧 Example usage:");
-    info!("   curl -X POST http://localhost:8080/ \\");
-    info!("     -H 'X-Amz-Target: TrentService.CreateKey' \\");
+    info!("🔧 Example usage (TA-based CreateAccount):");
+    info!("   curl -X POST http://localhost:8081/ \\");
+    info!("     -H 'X-Amz-Target: TrentService.CreateAccount' \\");
     info!("     -H 'Content-Type: application/x-amz-json-1.1' \\");
-    info!("     -d '{{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\"}}'");
+    info!("     -d '{{\"Description\":\"My TA Account\"}}'");
+    info!("");
+    info!("🔒 Security: All private keys remain in eth_wallet TA");
 
     axum::serve(listener, app).await.unwrap();
 }
