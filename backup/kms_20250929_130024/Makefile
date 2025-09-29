@@ -21,8 +21,6 @@ CROSS_COMPILE_HOST ?= aarch64-linux-gnu-
 CROSS_COMPILE_TA ?= aarch64-linux-gnu-
 TARGET_HOST ?= aarch64-unknown-linux-gnu
 TARGET_TA ?= aarch64-unknown-linux-gnu
-BUILDER ?= cargo
-FEATURES ?=
 
 .PHONY: host ta all clean
 
@@ -34,9 +32,7 @@ host:
 
 ta:
 	$(q)make -C ta TARGET=$(TARGET_TA) \
-		CROSS_COMPILE=$(CROSS_COMPILE_TA) \
-		BUILDER=$(BUILDER) \
-		FEATURES="$(FEATURES)"
+		CROSS_COMPILE=$(CROSS_COMPILE_TA)
 
 clean:
 	$(q)make -C host clean

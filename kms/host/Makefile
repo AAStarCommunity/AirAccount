@@ -15,29 +15,21 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# If _HOST or _TA specific compiler/target are not specified, then use common
-# compiler/target for both
-CROSS_COMPILE_HOST ?= aarch64-linux-gnu-
-CROSS_COMPILE_TA ?= aarch64-linux-gnu-
-TARGET_HOST ?= aarch64-unknown-linux-gnu
-TARGET_TA ?= aarch64-unknown-linux-gnu
-BUILDER ?= cargo
-FEATURES ?=
+NAME := eth_wallet-rs
 
-.PHONY: host ta all clean
+TARGET ?= aarch64-unknown-linux-gnu
+CROSS_COMPILE ?= aarch64-linux-gnu-
+OBJCOPY := $(CROSS_COMPILE)objcopy
+LINKER_CFG := target.$(TARGET).linker=\"$(CROSS_COMPILE)gcc\"
 
-all: host ta
+OUT_DIR := $(CURDIR)/target/$(TARGET)/release
+all: host strip
 
 host:
-	$(q)make -C host TARGET=$(TARGET_HOST) \
-		CROSS_COMPILE=$(CROSS_COMPILE_HOST)
+	@cargo build --target $(TARGET_HOST) --release --config $(LINKER_CFG)
 
-ta:
-	$(q)make -C ta TARGET=$(TARGET_TA) \
-		CROSS_COMPILE=$(CROSS_COMPILE_TA) \
-		BUILDER=$(BUILDER) \
-		FEATURES="$(FEATURES)"
+strip: host
+	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/$(NAME) $(OUT_DIR)/$(NAME)
 
 clean:
-	$(q)make -C host clean
-	$(q)make -C ta clean
+	@cargo clean

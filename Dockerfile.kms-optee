@@ -79,18 +79,21 @@ ENV OPTEE_DIR=${TEACLAVE_DIR}/optee
 WORKDIR ${TEACLAVE_DIR}
 
 # Copy Teaclave TrustZone SDK
-COPY third_party/incubator-teaclave-trustzone-sdk/ ${TEACLAVE_DIR}/
+COPY third_party/teaclave-trustzone-sdk/ ${TEACLAVE_DIR}/
 
 # Copy KMS source code
 COPY kms/ ${KMS_DIR}/
 
-# Set up Rust targets
+# Set up Rust targets and xargo for std mode
 RUN rustup target add aarch64-unknown-linux-gnu
 RUN rustup target add aarch64-unknown-optee
+RUN cargo install xargo
 
-# Copy custom OP-TEE target specs
-COPY third_party/incubator-teaclave-trustzone-sdk/aarch64-unknown-optee.json /root/.cargo/
-COPY third_party/incubator-teaclave-trustzone-sdk/arm-unknown-optee.json /root/.cargo/
+# Install cross-compilation toolchain
+RUN apt-get update && apt-get install -y \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set up OP-TEE environment
 RUN mkdir -p ${OPTEE_DIR}
