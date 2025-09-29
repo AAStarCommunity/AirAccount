@@ -15,29 +15,24 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# If _HOST or _TA specific compiler/target are not specified, then use common
-# compiler/target for both
-CROSS_COMPILE_HOST ?= aarch64-linux-gnu-
-CROSS_COMPILE_TA ?= aarch64-linux-gnu-
-TARGET_HOST ?= aarch64-unknown-linux-gnu
-TARGET_TA ?= aarch64-unknown-linux-gnu
-BUILDER ?= cargo
-FEATURES ?=
+[package]
+name = "eth_wallet-rs"
+version = "0.4.0"
+authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
+license = "Apache-2.0"
+repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
+description = "An example of Rust OP-TEE TrustZone SDK."
+edition = "2018"
 
-.PHONY: host ta all clean
+[dependencies]
+proto = { path = "../proto" }
+optee-teec = { path = "../../third_party/teaclave-trustzone-sdk/optee-teec" }
 
-all: host ta
+structopt = "0.3"
+bincode = "1.3.3"
+anyhow = "1.0"
+uuid = { version = "1.8", features = ["serde"] }
+hex = { version = "0.4", features = ["serde"] }
 
-host:
-	$(q)make -C host TARGET=$(TARGET_HOST) \
-		CROSS_COMPILE=$(CROSS_COMPILE_HOST)
-
-ta:
-	$(q)make -C ta TARGET=$(TARGET_TA) \
-		CROSS_COMPILE=$(CROSS_COMPILE_TA) \
-		BUILDER=$(BUILDER) \
-		FEATURES="$(FEATURES)"
-
-clean:
-	$(q)make -C host clean
-	$(q)make -C ta clean
+[profile.release]
+lto = true

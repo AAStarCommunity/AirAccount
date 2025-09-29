@@ -16,15 +16,36 @@
 # under the License.
 
 [package]
-name = "proto"
+name = "ta"
 version = "0.4.0"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
-description = "Data structures and functions shared by host and TA."
+description = "An example of Ethereum wallet TA."
 edition = "2018"
 
 [dependencies]
-uuid = { version = "1.8", features = ["serde"] }
+libc = "0.2"
+proto = { path = "../proto" }
+optee-utee-sys = { path = "../../third_party/teaclave-trustzone-sdk/optee-utee/optee-utee-sys", features = ["std"] }
+optee-utee = { path = "../../third_party/teaclave-trustzone-sdk/optee-utee", features = ["std"] }
+secure_db = { path = "../../third_party/teaclave-trustzone-sdk/crates/secure_db" }
+
+anyhow = "1.0"
+uuid = { version = "1.8", default-features = false }
+bip32 = { version = "0.3.0", features = ["bip39"]}
+hex = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-num_enum = { version = "0.7.3", default-features = false }
+sha3 = "0.10.6"
+secp256k1 = "0.27.0"
+ethereum-tx-sign = "6.1.3"
+bincode = "1.3.3"
+
+[build-dependencies]
+uuid = { version = "1.8", default-features = false }
+proto = { path = "../proto" }
+optee-utee-build = { path = "../../third_party/teaclave-trustzone-sdk/optee-utee-build" }
+
+[profile.release]
+lto = false
+opt-level = 3
