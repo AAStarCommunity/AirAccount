@@ -1,0 +1,98 @@
+#!/usr/bin/expect -f
+
+# Start QEMU and run KMS tests
+set timeout 60
+
+proc log_msg {level msg} {
+    puts "\[KMS-QEMU\] $level: $msg"
+}
+
+log_msg "INFO" "🚀 Starting QEMU OP-TEE with KMS API testing..."
+
+# Copy test script to shared directory
+spawn bash -c "docker exec kms-optee-test cp /opt/kms/../scripts/qemu-kms-test.sh /opt/teaclave/shared/host/"
+expect eof
+
+# Start QEMU
+spawn bash -c "docker exec kms-optee-test bash -c '
+export IMG_DIRECTORY=/opt/teaclave/images
+export IMG_NAME=aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+export QEMU_HOST_SHARE_DIR=/opt/teaclave/shared
+cd /opt/teaclave/images/aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+./qemu-system-aarch64 \
+    -nodefaults -nographic \
+    -serial stdio \
+    -smp 2 -s -machine virt,secure=on,acpi=off,gic-version=3 \
+    -cpu cortex-a57 -d unimp -semihosting-config enable=on,target=native \
+    -m 1057 -bios bl1.bin -initrd rootfs.cpio.gz \
+    -append \"console=ttyAMA0,115200 keep_bootcon root=/dev/vda2\" \
+    -kernel Image \
+    -fsdev local,id=fsdev0,path=/opt/teaclave/shared,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+    -netdev user,id=vmnic,hostfwd=tcp:127.0.0.1:8080-:8080 \
+    -device virtio-net-device,netdev=vmnic
+'"
+
+# Wait for login
+expect {
+    "buildroot login:" {
+        log_msg "SUCCESS" "QEMU started, logging in..."
+        send "root\r"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for login"
+        exit 1
+    }
+}
+
+# Wait for prompt
+expect {
+    "# " {
+        log_msg "SUCCESS" "Logged in successfully"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for prompt"
+        exit 1
+    }
+}
+
+# Run the KMS test script
+log_msg "INFO" "🧪 Running KMS test script..."
+send "mkdir -p /mnt/host && mount -t 9p -o trans=virtio host /mnt/host\r"
+expect "# "
+
+send "cp /mnt/host/host/qemu-kms-test.sh /tmp/ && chmod +x /tmp/qemu-kms-test.sh\r"
+expect "# "
+
+send "/tmp/qemu-kms-test.sh\r"
+expect {
+    "KMS QEMU test completed!" {
+        log_msg "SUCCESS" "✅ KMS test completed successfully!"
+    }
+    "# " {
+        log_msg "INFO" "Test script finished"
+    }
+    timeout {
+        log_msg "WARN" "Test script timeout"
+    }
+}
+
+# Keep QEMU running for manual testing
+log_msg "INFO" "🔧 QEMU environment ready for manual testing"
+log_msg "INFO" "📝 Available commands:"
+log_msg "INFO" "   - /tmp/kms-host create-wallet"
+log_msg "INFO" "   - /tmp/kms-api &"
+log_msg "INFO" "   - netstat -tulpn | grep 8080"
+
+# Wait for user to finish
+expect {
+    "poweroff" {
+        log_msg "INFO" "User requested shutdown"
+    }
+    timeout {
+        log_msg "INFO" "Session timeout - keeping QEMU running"
+        exp_continue
+    }
+}
+
+exit 0

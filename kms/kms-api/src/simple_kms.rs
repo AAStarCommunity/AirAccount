@@ -140,4 +140,14 @@ impl KmsService {
         let keys = self.keys.lock().unwrap();
         Ok(keys.values().map(|k| k.metadata.clone()).collect())
     }
+
+    pub async fn describe_key(&self, request: DescribeKeyRequest) -> Result<DescribeKeyResponse> {
+        let keys = self.keys.lock().unwrap();
+        let stored_key = keys.get(&request.key_id)
+            .ok_or_else(|| anyhow!("Key not found: {}", request.key_id))?;
+
+        Ok(DescribeKeyResponse {
+            key_metadata: stored_key.metadata.clone(),
+        })
+    }
 }

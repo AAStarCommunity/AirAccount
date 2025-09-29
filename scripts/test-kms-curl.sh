@@ -143,7 +143,7 @@ if [[ -n "$KEY_ID" && "$KEY_ID" != "test-key-id" ]]; then
         "curl -s -X POST '$BASE_URL/' \
             -H 'Content-Type: application/json' \
             -H 'X-Amz-Target: TrentService.Sign' \
-            -d '{\"KeyId\":\"$KEY_ID\",\"Message\":\"$MESSAGE_B64\",\"MessageType\":\"RAW\"}'" \
+            -d '{\"KeyId\":\"$KEY_ID\",\"Message\":\"$MESSAGE_B64\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"}'" \
         '"Signature"'
 else
     log_warn "跳过签名测试（无有效密钥ID）"
@@ -152,7 +152,7 @@ fi
 # 5. 列出密钥
 run_test "列出密钥" \
     "curl -s '$BASE_URL/keys'" \
-    '"keys"'
+    '"Keys"'
 
 # 6. 错误处理测试 - 不存在的密钥
 run_test "错误处理（不存在的密钥）" \
