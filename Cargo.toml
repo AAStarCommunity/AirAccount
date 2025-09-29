@@ -1,0 +1,32 @@
+[package]
+name = "kms-api-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kms-api-server"
+path = "kms_api_server.rs"
+
+[dependencies]
+# Web框架
+tokio = { version = "1.0", features = ["full"] }
+warp = "0.3"
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 实用工具
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+
+# 日志
+env_logger = "0.10"
+log = "0.4"
+
+[features]
+default = []
+
+# TA 集成功能（准备集成真实的 eth_wallet TA）
+# ta_integration = []

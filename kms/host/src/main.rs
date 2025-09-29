@@ -17,6 +17,7 @@
 
 mod cli;
 mod tests;
+mod api;
 
 use optee_teec::{Context, Operation, ParamType, Uuid};
 use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
@@ -124,7 +125,18 @@ pub fn hello_world(name: &str) -> Result<String> {
     Ok(output.message)
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 检查是否启动KMS API服务器
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--kms-server" {
+        env_logger::init();
+        println!("🚀 启动基于 eth_wallet TA 的 KMS API 服务器");
+        api::start_kms_server().await?;
+        return Ok(());
+    }
+
+    // 原有CLI模式
     let args = cli::Opt::from_args();
     match args.command {
         cli::Command::CreateWallet(_opt) => {
