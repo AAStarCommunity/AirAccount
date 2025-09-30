@@ -1,234 +1,301 @@
-# Eth-Wallet: A Sample Trusted Application for Wallet Abstraction and Transaction Signing
+# KMS (Key Management Service) - OP-TEE STD模式开发
 
-This repository provides a reference implementation of an Ethereum wallet as a
-Trusted Application (TA) written in Rust. The primary goal is to ensure that
-secret credentials (such as private keys) remain securely within the Trusted
-Execution Environment (TEE) throughout their entire lifecycle, enhancing
-security and privacy for Ethereum-based operations. This reference
-implementation can be extended to support additional wallet features or adapted
-to other blockchain platforms with similar requirements for secure key
-management. The implementation provides basic wallet abstractions, including:
+基于eth_wallet的企业级密钥管理服务，运行在OP-TEE TrustZone环境。
 
-- Key Generation: Securely generating random seeds within the TEE.
-- Key Derivation: Deriving keys from seeds within the TEE.
-- Key Persistency: Storing cryptographic keys securely in the TEE.
-- Transaction Signing: Signing Ethereum transactions without exposing private
-  keys to the normal world.
-- Key Erase: Erasing keys when they are no longer needed.
-
-## Security Assumptions
-
-This demo assumes the following security foundations:
-
-1. **Trusted Environment**:
-
-   - The device supports OP-TEE as the TEE operating system.
-   - Both the TEE OS and the Trusted Application (TA) are considered secure and
-     trusted.
-
-2. **Hardware-Specific Security Capabilities**
-   - The hardware provides secure storage capabilities to protect cryptographic
-     keys.
-   - The device includes secure display capabilities (or a Multi-Factor
-     Authentication device as alternative) for secure user interface. (MFA
-     integration is planned for another demo project)
-   - Note that these capabilities depend on specific hardware implementations.
-     While this demo provides a default implementation, it should be customized
-     to suit the target hardware.
-
-### Important Notes on Security Design
-
-This demo focuses on showcasing core functionalities and may not implement all
-security measures required for a production-grade key custodian solution across
-the entire key lifecycle. Developers should address the following considerations
-when adapting this demo for real-world use cases:
-
-- **Secure User Interface**:  
-  In the `create_wallet` function, the mnemonic is returned to the Normal World
-  for backup. This approach is inherently risky. For production systems, it is
-  strongly recommended to display the mnemonic on a Trusted UI or secure
-  display. Additionally, transactions should be confirmed by the user through
-  this secure display. As secure display implementations are hardware-specific,
-  this demo does not include such functionality.
-
-- **Secure Storage Limitations**:  
-  Keys in this demo are stored in an encrypted file on the Normal World File
-  System. While this approach ensures basic protection, root access in the
-  Normal World could delete this file, leading to key loss. For production
-  scenarios, consider more reliable storage solutions like Replay Protected
-  Memory Block (RPMB), which is hardware-specific and not included in this demo.
-
-For developers, please note that this demo is intended as a foundational
-reference and must be enhanced with hardware-specific adaptations for
-production-grade security.
-
-## Structure
-
-- [TA](./ta): The Trusted Application (TA) that performs all secure operations
-  related to the wallet. This component runs within the TrustZone TEE, ensuring
-  that secret credentials never leave the secure environment.
-- [CA](./host): The Client Application (CA) that runs in the normal world and
-  communicates with the TA. It is responsible for user interaction and
-  non-sensitive operations.
-- [Proto](./proto): Contains shared structures and definitions used by both the
-  TA and CA to facilitate communication between the two environments.
-
-## Setup
-
-To set up the environment, follow the instructions in the
-[Apache Teaclave™ TrustZone SDK README](https://github.com/apache/teaclave-trustzone-sdk/blob/master/README.md).
-
-## Functionalities
-
-- **Create Wallet**: Generate a new Ethereum wallet with a unique ID.
-- **Derive Address**: Derive an Ethereum address from a wallet.
-- **Sign Transaction**: Sign Ethereum transactions securely within the TEE.
-- **Remove Wallet**: Delete a wallet and its associated keys from the TEE.
-
-## Usage
-
-### Build
+## 📁 项目架构
 
 ```
-$ cd projects/eth_wallet-rs
-$ make
+AirAccount/
+├── kms/                                    # 📝 开发源码（在这里开发）
+│   ├── host/                              # CA (Client Application)
+│   │   ├── src/
+│   │   │   ├── main.rs                    # CLI工具
+│   │   │   ├── api_server.rs              # HTTP API服务器
+│   │   │   ├── ta_client.rs               # TA通信客户端
+│   │   │   ├── cli.rs                     # 命令行接口
+│   │   │   ├── tests.rs                   # 测试模块
+│   │   │   └── lib.rs                     # 共享库
+│   │   └── Cargo.toml                     # 双二进制配置
+│   ├── ta/                                # TA (Trusted Application)
+│   ├── proto/                             # 协议定义（Host-TA共享）
+│   └── uuid.txt                           # TA UUID
+│
+├── third_party/teaclave-trustzone-sdk/    # 🔧 SDK (git submodule)
+│   ├── projects/web3/kms/                 # 构建目标（脚本自动同步）
+│   ├── rust/                              # STD模式依赖（自动初始化）
+│   └── optee-teec/                        # OP-TEE客户端库
+│
+└── scripts/
+    ├── kms-deploy.sh                      # 🚀 一键部署
+    └── kms-dev-env.sh                     # 开发环境管理
 ```
 
-### Run
+## 🚀 快速开始
 
-After QEMU boots:
+### 1. 启动开发环境
+```bash
+./scripts/kms-dev-env.sh start  # 自动检查并初始化STD依赖
+```
+
+### 2. 开发代码
+在 `kms/` 目录下编辑代码
+
+### 3. 构建和部署
+```bash
+./scripts/kms-deploy.sh        # 一键构建和部署
+./scripts/kms-deploy.sh clean  # 完整构建
+```
+
+## 🔄 工作流程
+
+```
+📝 开发 (kms/)
+  ↓ rsync同步
+🔧 构建 (SDK/projects/web3/kms/)
+  ↓ Docker编译
+📦 部署 (/opt/teaclave/shared/)
+  ↓ QEMU运行
+🖥️ 测试 (Guest VM)
+```
+
+### 关键理解
+1. **Docker挂载**: SDK目录挂载到容器，本地修改实时可见
+2. **STD依赖**: rust/libc在`.gitignore`中，需要自动初始化
+3. **自动同步**: 脚本rsync代码，Docker挂载实时同步
+
+## 🐛 常见问题
+
+**Q: 为何setup_std_dependencies.sh之前执行过，这次又需要？**
+A: rust/目录在`.gitignore`中，git reset时被删除。脚本现已自动检测并初始化。
+
+**Q: 为何在kms/开发，但Docker内编译的是SDK内的代码？**
+A: 
+1. rsync同步: `kms/` → `third_party/.../projects/web3/kms/`
+2. Docker挂载: `third_party/...` → `/root/teaclave_sdk_src/`（实时同步）
+3. 所以修改kms/后，SDK内立即可见，Docker内也立即可见
+
+**Q: CA如何加载？**
+A: CA是普通Linux程序，复制到共享目录即可运行。TA需复制到`/lib/optee_armtz/`
+
+---
+
+*最后更新: 2025-09-30 15:00*
+
+## 📊 完整流程图
+
+### 代码同步与编译流程
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Host macOS 文件系统                       │
+│                                                              │
+│  /Volumes/.../AirAccount/                                   │
+│  ├── kms/host/src/main.rs          📝 你在这里开发          │
+│  │         ↓                                                │
+│  │    [rsync -av --delete]          🔄 脚本单向同步         │
+│  │         ↓                                                │
+│  └── third_party/teaclave-trustzone-sdk/                   │
+│      └── projects/web3/kms/                                 │
+│          └── host/src/main.rs       📄 同步后的文件         │
+│                    ↓                                         │
+│               [Docker -v 挂载]      🔗 实时双向同步         │
+│                    ↓                                         │
+└────────────────────┼────────────────────────────────────────┘
+                     ↓
+┌────────────────────┼────────────────────────────────────────┐
+│         Docker 容器内文件系统 (linux/amd64)                  │
+│                    ↓                                         │
+│  /root/teaclave_sdk_src/                                    │
+│  ├── projects/web3/kms/                                     │
+│  │   └── host/src/main.rs          🐳 编译这个文件          │
+│  │            ↓                                              │
+│  │       [make]                     🔨 交叉编译             │
+│  │            ↓                                              │
+│  │   └── target/aarch64-unknown-linux-gnu/release/          │
+│  │       ├── kms                    📦 CLI工具 (707K)       │
+│  │       └── kms-api-server         📦 API服务 (2.8M)       │
+│  │            ↓                                              │
+│  │   └── ta/target/aarch64-unknown-optee/release/           │
+│  │       └── 4319f351-*.ta          📦 TA应用 (595K)        │
+│  │            ↓                                              │
+│  │       [cp到共享目录]              📤 部署                 │
+│  │            ↓                                              │
+│  └── /opt/teaclave/shared/                                  │
+│      ├── kms                        ✅ 部署成功              │
+│      ├── kms-api-server             ✅ 部署成功              │
+│      └── *.ta                       ✅ 部署成功              │
+│                    ↓                                         │
+│          [QEMU启动]                 🖥️ ARM64虚拟机          │
+│                    ↓                                         │
+└────────────────────┼────────────────────────────────────────┘
+                     ↓
+┌────────────────────┼────────────────────────────────────────┐
+│         QEMU Guest VM (aarch64 Linux + OP-TEE)              │
+│                    ↓                                         │
+│  # mount -t 9p -o trans=virtio host shared                  │
+│  # cp shared/*.ta /lib/optee_armtz/                         │
+│  # cd shared                                                 │
+│                                                              │
+│  ┌──────────────────┬──────────────────────────┐            │
+│  │  Normal World    │    Secure World          │            │
+│  │  (Linux)         │    (OP-TEE)              │            │
+│  ├──────────────────┼──────────────────────────┤            │
+│  │  # ./kms         │  TA: 4319f351-*.ta       │            │
+│  │    create-wallet │    └─ wallet.rs          │            │
+│  │       ↓          │         ↓                 │            │
+│  │    [TEEC API] ───┼────→ [TA命令]            │            │
+│  │       ↓          │         ↓                 │            │
+│  │    [Response] ←──┼──── [返回数据]           │            │
+│  │       ↓          │                           │            │
+│  │  wallet_id       │                           │            │
+│  │                  │                           │            │
+│  │  # ./kms-api-server                          │            │
+│  │    (HTTP :3000)  │                           │            │
+│  │       ↓          │                           │            │
+│  │  curl POST → API │                           │            │
+│  └──────────────────┴──────────────────────────┘            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 依赖初始化流程
+
+```
+启动开发环境: ./scripts/kms-dev-env.sh start
+         ↓
+检查rust/目录是否存在？
+         ├─ 是 → ✅ 跳过初始化
+         └─ 否 → 运行 setup_std_dependencies.sh
+                  ↓
+            从GitHub克隆:
+            ├─ rust源码 (DemesneGH/rust:optee-xargo)
+            ├─ libc库 (DemesneGH/libc:optee)
+            └─ 保存到: third_party/.../rust/
+                       ↓
+                  ✅ 初始化完成
+                  
+注意: rust/目录在.gitignore中
+      git reset/clean后会被删除
+      脚本会自动重新初始化
+```
+
+### 文件挂载关系
+
+```
+Host macOS                          Docker Container
+──────────────────────────────────────────────────────────
+third_party/                   →    /root/teaclave_sdk_src/
+├── teaclave-trustzone-sdk/    →    ├── (SDK根目录)
+│   ├── projects/web3/kms/     →    │   ├── projects/web3/kms/
+│   │   ├── host/              →    │   │   ├── host/
+│   │   │   └── src/main.rs    →    │   │   │   └── src/main.rs  (实时同步)
+│   │   └── ta/                →    │   │   └── ta/
+│   ├── rust/                  →    │   ├── rust/
+│   │   ├── rust/              →    │   │   ├── rust/
+│   │   └── libc/              →    │   │   └── libc/
+│   └── optee-teec/            →    │   └── optee-teec/
+                                    
+箭头表示: 双向实时同步（Docker -v 挂载）
+修改左边文件 → 右边立即可见
+修改右边文件 → 左边立即可见
+```
+
+## 🎯 测试示例
+
+### CLI测试命令
 
 ```bash
-Welcome to Buildroot, type root or test to login
-buildroot login: root
-# mkdir shared && mount -t 9p -o trans=virtio host shared
-# cd shared/
-# ls
-be2dc9a0-02b4-4b33-ba21-9964dbdf1573.ta
-eth_wallet-rs
-# cp be2dc9a0-02b4-4b33-ba21-9964dbdf1573.ta /lib/optee_armtz/
-# ./eth_wallet-rs
+# 在QEMU Guest VM中
+
+# 1. 创建钱包
+./kms create-wallet
+# 输出: Wallet ID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# 2. 派生地址
+./kms derive-address <wallet-id> "m/44'/60'/0'/0/0"
+# 输出: Address: 0x...
+
+# 3. 签名交易
+./kms sign-transaction <wallet-id> "m/44'/60'/0'/0/0" \
+  --chain-id 1 \
+  --nonce 0 \
+  --to 0x742d35Cc6634C0532925a3b844Bc454e4438f44e \
+  --value 1000000000000000000 \
+  --gas-price 20000000000 \
+  --gas 21000
+
+# 4. 删除钱包
+./kms remove-wallet <wallet-id>
 ```
 
-### Command-Line Interface
+### API测试命令 (curl)
 
 ```bash
-A simple Ethereum wallet based on TEE
+# 确保API服务器运行
+./kms-api-server &
 
-USAGE:
-eth_wallet-rs <SUBCOMMAND>
+# 1. 创建密钥
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.CreateKey' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{
+    "Description": "Test Key",
+    "KeyUsage": "SIGN_VERIFY",
+    "KeySpec": "ECC_SECG_P256K1",
+    "Origin": "AWS_KMS"
+  }'
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+# 2. 获取公钥
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.GetPublicKey' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{
+    "KeyId": "<key-id-from-step-1>"
+  }'
 
-SUBCOMMANDS:
-    create-wallet       Create a new wallet
-    derive-address      Derive an address from a wallet
-    help                Prints this message or the help of the given subcommand(s)
-    remove-wallet       Remove a wallet
-    sign-transaction    Sign a transaction
-    test                Run tests
+# 3. 派生地址
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.DeriveAddress' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{
+    "KeyId": "<key-id>",
+    "DerivationPath": "m/44'"'"'/60'"'"'/0'"'"'/0/0"
+  }'
+
+# 4. 签名交易
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.Sign' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{
+    "KeyId": "<key-id>",
+    "DerivationPath": "m/44'"'"'/60'"'"'/0'"'"'/0/0",
+    "Transaction": {
+      "chainId": 1,
+      "nonce": 0,
+      "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+      "value": "0x0de0b6b3a7640000",
+      "gasPrice": "0x04a817c800",
+      "gas": 21000,
+      "data": "0x"
+    }
+  }'
+
+# 5. 列出所有密钥
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.ListKeys' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{}'
+
+# 6. 删除密钥
+curl -X POST http://localhost:3000/ \
+  -H 'X-Amz-Target: TrentService.ScheduleKeyDeletion' \
+  -H 'Content-Type: application/x-amz-json-1.1' \
+  -d '{
+    "KeyId": "<key-id>",
+    "PendingWindowInDays": 7
+  }'
 ```
 
-## Example Commands
+---
 
-### Create a Wallet
-
-```bash
-# ./eth_wallet-rs create-wallet
-```
-
-**CA Output:**
-
-```text
-CA: command: CreateWallet
-CA: invoke_command success
-Wallet ID: aa5798a1-3c89-4708-b316-712aea4f59e2
-```
-
-**TA Output:**
-
-```text
-[+] TA create
-[+] TA open session
-[+] TA invoke command
-[+] Wallet created: Wallet { id: aa5798a1-3c89-4708-b316-712aea4f59e2, entropy: [...] }
-[+] Wallet ID: aa5798a1-3c89-4708-b316-712aea4f59e2
-[+] Wallet saved in secure storage
-```
-
-### Derive an Address
-
-```bash
-# ./eth_wallet-rs derive-address -w aa5798a1-3c89-4708-b316-712aea4f59e2
-```
-
-**CA Output:**
-
-```text
-CA: command: DeriveAddress
-CA: invoke_command success
-Address: 0x7ca2b64a29bbf7a77bf8a3187ab09f50413826ea
-Public key: 03e1289e07eca6fe47c4825ea52f7cd27e3143ac5d65d5842aa5f59b5eba2d58df
-```
-
-**TA Output:**
-
-```text
-[+] TA invoke command
-[+] Deriving address: secure object loaded
-[+] Wallet::derive_pub_key(): pub key: "xpub6FhY8TmVeQ6Yo5ViNX6LK3mM66nMJDe4ZumHmznLNRkK2wEhGoEjaossvKmjgETpFHNGs9CFjUS7HK1un9Djzw9jfsukyNxu53b87abRJUv"
-[+] Wallet::derive_pub_key(): non-extended pub key: 03e1289e07eca6fe47c4825ea52f7cd27e3143ac5d65d5842aa5f59b5eba2d58df
-[+] Wallet::derive_address(): address: [124, 162, 182, 74, 41, 187, 247, 167, 123, 248, 163, 24, 122, 176, 159, 80, 65, 56, 38, 234]
-[+] Deriving address: address: [124, 162, 182, 74, 41, 187, 247, 167, 123, 248, 163, 24, 122, 176, 159, 80, 65, 56, 38, 234]
-[+] Deriving address: public key: [3, 225, 40, 158, 7, 236, 166, 254, 71, 196, 130, 94, 165, 47, 124, 210, 126, 49, 67, 172, 93, 101, 213, 132, 42, 165, 245, 155, 94, 186, 45, 88, 223]
-```
-
-### Sign a Transaction
-
-```bash
-# ./eth_wallet-rs sign-transaction -t 0xc0ffee254729296a45a3885639AC7E10F9d54979 -v 100 -w aa5798a1-3c89-4708-b316-712aea4f59e2
-```
-
-**CA Output:**
-
-```text
-CA: command: SignTransaction
-CA: invoke_command success
-Signature: "f86380843b9aca0082520894c0ffee254729296a45a3885639ac7e10f9d5497964802ea0774fc5a364c3d7e3f4e039f8da96b66fb0a5d51cad7524e54a0c9013fb473304a033922ecf964f02c6ebdd7380bc86fe759b65c87dc9e09677d983622e35334931"
-```
-
-**TA Output:**
-
-```text
-[+] TA invoke command
-[+] Sign transaction: secure object loaded
-[+] Wallet::derive_prv_key() finished
-[+] sign_transaction: signed transaction bytes: [248, 99, 128, 132, 59, 154, 202, 0, 130, 82, 8, 148, 192, 255, 238, 37, 71, 41, 41, 106, 69, 163, 136, 86, 57, 172, 126, 16, 249, 213, 73, 121, 100, 128, 46, 160, 119, 79, 197, 163, 100, 195, 215, 227, 244, 224, 57, 248, 218, 150, 182, 111, 176, 165, 213, 28, 173, 117, 36, 229, 74, 12, 144, 19, 251, 71, 51, 4, 160, 51, 146, 46, 207, 150, 79, 2, 198, 235, 221, 115, 128, 188, 134, 254, 117, 155, 101, 200, 125, 201, 224, 150, 119, 217, 131, 98, 46, 53, 51, 73, 49]
-[+] Sign transaction: signature: [248, 99, 128, 132, 59, 154, 202, 0, 130, 82, 8, 148, 192, 255, 238, 37, 71, 41, 41, 106, 69, 163, 136, 86, 57, 172, 126, 16, 249, 213, 73, 121, 100, 128, 46, 160, 119, 79, 197, 163, 100, 195, 215, 227, 244, 224, 57, 248, 218, 150
-
-, 182, 111, 176, 165, 213, 28, 173, 117, 36, 229, 74, 12, 144, 19, 251, 71, 51, 4, 160, 51, 146, 46, 207, 150, 79, 2, 198, 235, 221, 115, 128, 188, 134, 254, 117, 155, 101, 200, 125, 201, 224, 150, 119, 217, 131, 98, 46, 53, 51, 73, 49]
-```
-
-### Remove a Wallet
-
-```bash
-# ./eth_wallet-rs remove-wallet -w aa5798a1-3c89-4708-b316-712aea4f59e2
-```
-
-**CA Output:**
-
-```text
-CA: command: RemoveWallet
-CA: invoke_command success
-Wallet removed
-```
-
-**TA Output:**
-
-```text
-[+] TA invoke command
-[+] Removing wallet: secure object loaded
-[+] Wallet removed from secure storage
-```
+*最后更新: 2025-09-30 15:15*
