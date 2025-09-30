@@ -1264,3 +1264,135 @@ KMS企业级架构 (基于eth_wallet)
 为KMS项目的真实TEE环境迁移奠定了坚实的技术基础。
 
 *最后更新: 2025-09-29 17:30*
+---
+
+## 🛠️ Teaclave TrustZone SDK 开发环境搭建完成 (2025-09-30)
+
+### 完成官方Docker开发环境6步流程配置
+
+基于官方文档: https://teaclave.apache.org/trustzone-sdk-docs/emulate-and-dev-in-docker.md
+
+#### ✅ 完成的步骤
+
+##### 1. **Docker镜像和容器准备**
+- ✅ 拉取开发镜像: `teaclave/teaclave-trustzone-emulator-nostd-optee-4.5.0-expand-memory:latest`
+- ✅ 启动开发容器: `teaclave_dev_env` (挂载SDK到容器)
+- ⚠️ 平台兼容性: linux/amd64镜像在Apple Silicon(arm64)上通过Rosetta运行
+
+##### 2. **Hello World示例构建成功**
+- ✅ 构建Host应用: aarch64-unknown-linux-gnu目标
+- ✅ 构建TA应用: 签名UUID `133af0ca-bdab-11eb-9130-43bf7873bf67`
+- ✅ 编译环境: 使用login shell (`bash -l`)加载OP-TEE环境变量
+
+##### 3. **Artifacts同步到模拟器**
+- ✅ Host应用同步: `/opt/teaclave/shared/host/hello_world-rs`
+- ✅ TA同步: `/opt/teaclave/shared/ta/133af0ca-*.ta`
+- ✅ 使用Makefile emulate目标自动同步
+
+#### 📁 创建的开发工具
+
+##### 1. **自动化脚本**: `scripts/trustzone-dev-env.sh`
+```bash
+# 一键执行所有自动化步骤(步骤1-4)
+./scripts/trustzone-dev-env.sh all
+
+# 分步执行
+./scripts/trustzone-dev-env.sh 1    # 拉取镜像
+./scripts/trustzone-dev-env.sh 2    # 启动容器
+./scripts/trustzone-dev-env.sh 3    # 构建示例
+./scripts/trustzone-dev-env.sh 4    # 同步artifacts
+
+# 显示交互模式说明(步骤5-6)
+./scripts/trustzone-dev-env.sh interactive
+
+# 清理环境
+./scripts/trustzone-dev-env.sh clean
+```
+
+**功能特性**:
+- ✅ 自动容器管理(启动/停止/重启)
+- ✅ 挂载SDK目录到容器
+- ✅ 自动构建Hello World示例
+- ✅ 一键同步到QEMU环境
+
+##### 2. **完整开发文档**: `docs/trustzone-dev-setup.md`
+包含:
+- 📖 快速开始指南
+- 📋 6步详细操作说明
+- 🔧 交互式运行指令(多终端模式)
+- 📐 系统架构图解
+- 🐛 故障排查手册
+- 💡 手动操作备选方案
+
+#### 🏗️ 架构说明
+
+```
+┌─────────────────────────────────────────┐
+│       macOS Host (arm64)                │
+│  ┌───────────────────────────────────┐  │
+│  │  Docker Container (linux/amd64)   │  │
+│  │  ┌─────────────────────────────┐  │  │
+│  │  │  QEMU (aarch64)             │  │  │
+│  │  │  ┌───────────┬───────────┐  │  │  │
+│  │  │  │ Normal    │  Secure   │  │  │  │
+│  │  │  │ World     │  World    │  │  │  │
+│  │  │  │ (Linux)   │  (OP-TEE) │  │  │  │
+│  │  │  │ Host App  │    TA     │  │  │  │
+│  │  │  └───────────┴───────────┘  │  │  │
+│  │  └─────────────────────────────┘  │  │
+│  └───────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+#### ⏳ 交互式步骤(步骤5-6,需手动执行)
+
+需要3个终端协同工作:
+
+**Terminal 1 - QEMU控制台**:
+```bash
+docker exec -it teaclave_dev_env bash -l -c "LISTEN_MODE=ON start_qemuv8"
+```
+
+**Terminal 2 - Guest VM Shell**:
+```bash
+docker exec -it teaclave_dev_env bash -l -c "listen_on_guest_vm_shell"
+# 然后运行: ./host/hello_world-rs
+```
+
+**Terminal 3 - Secure World日志**:
+```bash
+docker exec -it teaclave_dev_env bash -l -c "listen_on_secure_world_log"
+```
+
+#### 🔑 关键技术发现
+
+1. **环境变量加载**: 必须使用 `bash -l` (login shell)加载OP-TEE环境
+2. **平台兼容性**: amd64镜像在arm64主机上可运行但性能受限
+3. **容器持久化**: 使用后台运行模式 `-d` 保持容器存活
+4. **SDK挂载**: 挂载 `third_party/teaclave-trustzone-sdk` 避免代码重复
+
+#### 📊 当前状态
+
+- ✅ **步骤1-4**: 完全自动化,一键完成
+- ⏸️ **步骤5-6**: 交互式运行,需多终端手动操作
+- 📦 **容器状态**: `teaclave_dev_env` 运行中
+- 🔧 **工具就绪**: 脚本和文档已创建
+
+#### 🚀 下一步
+
+基于此开发环境,可以:
+1. 开发和测试KMS TA应用
+2. 验证eth_wallet集成
+3. 在QEMU环境中进行完整功能测试
+4. 准备向真实硬件(Raspberry Pi 5)迁移
+
+#### 📝 相关文件
+
+- `scripts/trustzone-dev-env.sh` - 自动化部署脚本
+- `docs/trustzone-dev-setup.md` - 完整开发指南
+- `third_party/teaclave-trustzone-sdk/` - SDK子模块
+- `docs/Changes.md` - 本变更日志(已更新)
+
+**Teaclave TrustZone SDK开发环境现已就绪,可以开始真实TEE应用开发!**
+
+*最后更新: $(date '+%Y-%m-%d %H:%M:%S %z')*
