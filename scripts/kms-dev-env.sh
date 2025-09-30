@@ -47,9 +47,10 @@ step2_start_container() {
         docker rm -f $CONTAINER_NAME
     fi
 
-    # 启动新容器
+    # 启动新容器（映射3000端口）
     docker run -d \
         --name $CONTAINER_NAME \
+        -p 3000:3000 \
         -v "$SDK_PATH:/root/teaclave_sdk_src" \
         -w /root/teaclave_sdk_src \
         $DOCKER_IMAGE \
