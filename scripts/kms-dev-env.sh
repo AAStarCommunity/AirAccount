@@ -62,13 +62,23 @@ step2_start_container() {
     log_info "验证STD环境..."
     docker exec $CONTAINER_NAME bash -l -c "switch_config --status"
 
+    # 检查并初始化rust/libc依赖（STD模式必需）
+    log_info "检查STD模式依赖（rust/libc）..."
+    if ! docker exec $CONTAINER_NAME bash -l -c "[ -d /root/teaclave_sdk_src/rust/rust ] && [ -d /root/teaclave_sdk_src/rust/libc ]"; then
+        log_warn "rust/libc依赖不存在，开始初始化..."
+        docker exec $CONTAINER_NAME bash -l -c "cd /root/teaclave_sdk_src && ./setup_std_dependencies.sh"
+        log_info "✅ STD依赖初始化完成"
+    else
+        log_info "✅ STD依赖已存在，跳过初始化"
+    fi
+
     log_info "✅ Step 2 完成 - 容器已启动（STD模式）"
 }
 
 # Step 3: 构建KMS项目
 step3_build_kms() {
     log_info "Step 3: 构建KMS项目..."
-    docker exec $CONTAINER_NAME bash -l -c "cd /root/teaclave_sdk_src/kms && make clean && make"
+    docker exec $CONTAINER_NAME bash -l -c "cd /root/teaclave_sdk_src/projects/web3/kms && make clean && make"
     log_info "✅ Step 3 完成 - KMS构建成功"
 }
 
@@ -77,11 +87,12 @@ step4_sync_artifacts() {
     log_info "Step 4: 同步构建产物到QEMU共享目录..."
     docker exec $CONTAINER_NAME bash -l -c "
         mkdir -p /opt/teaclave/shared && \
-        cp /root/teaclave_sdk_src/kms/host/target/aarch64-unknown-linux-gnu/release/kms /opt/teaclave/shared/ && \
-        cp /root/teaclave_sdk_src/kms/ta/target/aarch64-unknown-optee/release/*.ta /opt/teaclave/shared/ && \
+        cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms /opt/teaclave/shared/ && \
+        cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/ && \
+        cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/aarch64-unknown-optee/release/*.ta /opt/teaclave/shared/ && \
         ls -lh /opt/teaclave/shared/
     "
-    log_info "✅ Step 4 完成 - 构建产物已同步"
+    log_info "✅ Step 4 完成 - 构建产物已同步（CLI + API Server）"
 }
 
 # 显示使用帮助

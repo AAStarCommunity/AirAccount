@@ -15,7 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-NAME := eth_wallet-rs
+NAME := kms
+API_SERVER_NAME := kms-api-server
 
 TARGET ?= aarch64-unknown-linux-gnu
 CROSS_COMPILE ?= aarch64-linux-gnu-
@@ -30,6 +31,7 @@ host:
 
 strip: host
 	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/$(NAME) $(OUT_DIR)/$(NAME)
+	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/$(API_SERVER_NAME) $(OUT_DIR)/$(API_SERVER_NAME)
 
 clean:
 	@cargo clean
