@@ -517,6 +517,43 @@ fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
 pub async fn start_kms_server() -> Result<()> {
     let server = Arc::new(KmsApiServer::new());
 
+    // Root path - serve simple welcome message
+    let index = warp::path::end()
+        .and(warp::get())
+        .map(|| {
+            warp::reply::html(r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>KMS API</title></head>
+<body style="font-family: system-ui; max-width: 800px; margin: 50px auto; padding: 20px;">
+<h1>🔐 AirAccount KMS API</h1>
+<p>Welcome to the KMS API Server. This server provides AWS KMS-compatible APIs powered by OP-TEE.</p>
+<h2>Endpoints:</h2>
+<ul>
+<li>POST /CreateKey - Create new wallet</li>
+<li>POST /DescribeKey - Query wallet metadata</li>
+<li>POST /ListKeys - List all wallets</li>
+<li>POST /DeriveAddress - Derive Ethereum address</li>
+<li>POST /Sign - Sign message</li>
+<li>POST /GetPublicKey - Get public key</li>
+<li>POST /DeleteKey - Schedule key deletion</li>
+<li>GET /health - Health check</li>
+</ul>
+<p>For interactive testing, visit: <a href="/test">Test UI</a></p>
+<p>API is running on OP-TEE Secure World with TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd</p>
+</body>
+</html>"#)
+        });
+
+    // Test UI page
+    let test_ui = warp::path("test")
+        .and(warp::get())
+        .map(|| {
+            match std::fs::read_to_string("/root/shared/kms-test-page.html") {
+                Ok(html) => warp::reply::html(html),
+                Err(_) => warp::reply::html("<html><body><h1>Test UI not available</h1><p>Please deploy kms-test-page.html to /root/shared/</p></body></html>")
+            }
+        });
+
     // Health check
     let health = warp::path("health")
         .and(warp::get())
@@ -587,7 +624,9 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
 
-    let routes = health
+    let routes = index
+        .or(test_ui)
+        .or(health)
         .or(create_key)
         .or(describe_key)
         .or(list_keys)
@@ -599,6 +638,8 @@ pub async fn start_kms_server() -> Result<()> {
 
     println!("🚀 KMS API Server starting on http://0.0.0.0:3000");
     println!("📚 Supported APIs:");
+    println!("   GET  /              - Welcome page");
+    println!("   GET  /test          - Interactive test UI");
     println!("   POST /CreateKey     - Create new TEE wallet");
     println!("   POST /DescribeKey   - Query wallet metadata");
     println!("   POST /ListKeys      - List all wallets");
@@ -609,6 +650,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   GET  /health        - Health check");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
+    println!("🌐 Public URL: https://kms.aastar.io");
 
     warp::serve(routes)
         .run(([0, 0, 0, 0], 3000))
