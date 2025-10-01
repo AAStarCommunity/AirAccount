@@ -28,6 +28,8 @@ pub enum Command {
     RemoveWallet,
     DeriveAddress,
     SignTransaction,
+    SignMessage,
+    SignHash,
     #[default]
     Unknown,
 }

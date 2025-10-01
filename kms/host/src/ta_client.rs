@@ -120,6 +120,48 @@ impl TaClient {
             .context("Failed to deserialize SignTransactionOutput")?;
         Ok(output.signature)
     }
+
+    /// Sign a raw message
+    /// Returns raw signature bytes (65 bytes: r + s + v)
+    pub fn sign_message(
+        &mut self,
+        wallet_id: uuid::Uuid,
+        hd_path: &str,
+        message: &[u8],
+    ) -> Result<Vec<u8>> {
+        let input = proto::SignMessageInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+            message: message.to_vec(),
+        };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize SignMessageInput")?;
+        let serialized_output = self.invoke_command(proto::Command::SignMessage, &serialized_input)?;
+        let output: proto::SignMessageOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize SignMessageOutput")?;
+        Ok(output.signature)
+    }
+
+    /// Sign a 32-byte hash directly (no additional hashing)
+    /// Returns raw signature bytes (65 bytes: r + s + v)
+    pub fn sign_hash(
+        &mut self,
+        wallet_id: uuid::Uuid,
+        hd_path: &str,
+        hash: &[u8; 32],
+    ) -> Result<Vec<u8>> {
+        let input = proto::SignHashInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+            hash: *hash,
+        };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize SignHashInput")?;
+        let serialized_output = self.invoke_command(proto::Command::SignHash, &serialized_input)?;
+        let output: proto::SignHashOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize SignHashOutput")?;
+        Ok(output.signature)
+    }
 }
 
 /// Convenience functions for one-off calls (creates new client each time)
