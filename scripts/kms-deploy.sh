@@ -73,8 +73,9 @@ docker exec teaclave_dev_env bash -l -c "
     mkdir -p /opt/teaclave/shared && \
     cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms /opt/teaclave/shared/kms && \
     cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/kms-api-server && \
+    cp /root/teaclave_sdk_src/projects/web3/kms/host/kms-test-page.html /opt/teaclave/shared/kms-test-page.html 2>/dev/null || true && \
     cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/aarch64-unknown-optee/release/*.ta /opt/teaclave/shared/ && \
-    ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.ta$'
+    ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.ta$|\.html$'
 "
 
 log_step "4/5 验证部署..."
