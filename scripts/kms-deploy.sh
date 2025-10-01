@@ -77,20 +77,56 @@ docker exec teaclave_dev_env bash -l -c "
     ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.ta$'
 "
 
-log_step "4/4 验证部署..."
+log_step "4/5 验证部署..."
 docker exec teaclave_dev_env bash -l -c "ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.ta$'"
+
+log_step "5/5 重启 QEMU 内的 API Server..."
+# 检查 QEMU 是否在运行
+if docker exec teaclave_dev_env ps aux | grep -q "[q]emu-system-aarch64"; then
+    log_info "检测到 QEMU 正在运行，尝试重启 API Server..."
+
+    # 通过 /opt/teaclave/shared 创建重启脚本
+    docker exec teaclave_dev_env bash -c "cat > /opt/teaclave/shared/.restart_api.sh << 'EOF'
+#!/bin/sh
+# 停止旧的 API Server
+pkill kms-api-server 2>/dev/null || true
+sleep 1
+
+# 启动新版本
+cd /root/shared
+./kms-api-server > kms-api.log 2>&1 &
+
+sleep 2
+ps aux | grep kms-api-server | grep -v grep
+echo 'API Server restarted'
+EOF
+chmod +x /opt/teaclave/shared/.restart_api.sh"
+
+    # 尝试通过 socat 执行重启（如果 QEMU 可访问）
+    timeout 5 docker exec teaclave_dev_env bash -c "echo 'cd /root/shared && sh .restart_api.sh' | socat - TCP:localhost:54320" 2>/dev/null || {
+        log_warn "无法通过 socat 自动重启，请手动执行以下命令："
+        echo -e "${YELLOW}  docker exec teaclave_dev_env bash -c \"echo 'cd /root/shared && sh .restart_api.sh' | socat - TCP:localhost:54320\"${NC}"
+    }
+else
+    log_warn "QEMU 未运行，跳过 API Server 重启"
+    echo -e "${YELLOW}  启动 QEMU 后，API Server 会自动启动${NC}"
+fi
 
 echo ""
 log_info "✅ 部署完成！"
 echo ""
-echo -e "${BLUE}开发流程说明：${NC}"
-echo "  📝 日常开发: 编辑 kms/ 目录下的代码"
-echo "  🚀 构建部署: ./scripts/kms-deploy.sh"
-echo "  🧹 完整构建: ./scripts/kms-deploy.sh clean"
+echo -e "${BLUE}📊 当前状态：${NC}"
+echo "  ✅ 代码已同步到 SDK"
+echo "  ✅ 编译完成（Host CA + TA）"
+echo "  ✅ 二进制文件已部署到 /opt/teaclave/shared"
+if docker exec teaclave_dev_env ps aux | grep -q "[q]emu-system-aarch64"; then
+    echo "  🔄 API Server 重启中..."
+else
+    echo "  ⏸️  QEMU 未运行，等待启动"
+fi
 echo ""
-echo -e "${BLUE}QEMU中运行：${NC}"
-echo "  1. 挂载共享目录: mount -t 9p -o trans=virtio host shared"
-echo "  2. 部署TA: cp shared/*.ta /lib/optee_armtz/"
-echo "  3a. 运行CLI: cd shared && ./kms --help"
-echo "  3b. 运行API服务器: cd shared && ./kms-api-server"
+echo -e "${BLUE}开发流程：${NC}"
+echo "  📝 修改代码: 编辑 kms/ 目录"
+echo "  🚀 部署: ./scripts/kms-deploy.sh"
+echo "  🧪 测试: curl http://localhost:3000/health"
 echo ""

@@ -39,7 +39,7 @@ docker exec teaclave_dev_env bash -l -c "pkill -f qemu-system-aarch64 || true"
 sleep 2
 
 log_info "使用挂载的SDK脚本启动QEMU（已配置3000端口转发）..."
-docker exec -d teaclave_dev_env bash -l -c "cd /root/teaclave_sdk_src && LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8 > /tmp/qemu.log 2>&1"
+docker exec -d teaclave_dev_env bash -c "cd /root/teaclave_sdk_src && IMG_DIRECTORY=/opt/teaclave/images IMG_NAME=x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory QEMU_HOST_SHARE_DIR=/opt/teaclave/shared LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8 > /tmp/qemu.log 2>&1"
 
 log_info "等待QEMU启动..."
 sleep 5

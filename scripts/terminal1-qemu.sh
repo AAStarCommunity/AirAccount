@@ -11,4 +11,4 @@ echo ""
 echo "按回车继续,或Ctrl+C取消..."
 read
 
-docker exec -it teaclave_dev_env bash -l -c "LISTEN_MODE=ON start_qemuv8"
+docker exec -it teaclave_dev_env bash -c "cd /root/teaclave_sdk_src && IMG_DIRECTORY=/opt/teaclave/images IMG_NAME=x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory QEMU_HOST_SHARE_DIR=/opt/teaclave/shared LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8"

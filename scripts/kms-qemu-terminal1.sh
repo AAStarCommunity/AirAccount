@@ -6,4 +6,5 @@ echo "⚠️  请确保 Terminal 2 和 Terminal 3 已经启动并运行！"
 echo "🚀 启动 QEMU (3秒后开始)..."
 sleep 3
 
-docker exec -it teaclave_dev_env bash -l -c "LISTEN_MODE=ON start_qemuv8"
+# 使用修复后的 SDK 脚本（包含 3000 端口转发）
+docker exec -it teaclave_dev_env bash -c "cd /root/teaclave_sdk_src && IMG_DIRECTORY=/opt/teaclave/images IMG_NAME=x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory QEMU_HOST_SHARE_DIR=/opt/teaclave/shared LISTEN_MODE=ON ./scripts/runtime/bin/start_qemuv8"

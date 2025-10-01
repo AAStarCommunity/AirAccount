@@ -1,5 +1,414 @@
 # Project Changes Log
 
+## 🎉 完全修复端口转发和自动启动 (2025-10-01 17:28, 最终验证: 2025-10-01 17:39)
+
+### 问题：Docker 重启后 `curl localhost:3000/health` 返回 Connection reset
+
+**症状**：
+- QEMU 启动后 `curl http://localhost:3000/health` 返回 "Connection reset by peer"
+- 用户说 "kms-api-server is running, ta copied"，但 Mac 无法访问
+
+**根本原因**：
+1. **QEMU 端口转发配置缺少 3000 端口**
+   - 检查发现：`hostfwd=:127.0.0.1:54433-:4433` （只有 4433，没有 3000）
+   - 即使 QEMU 内 API Server 在运行，没有端口转发就无法从 Mac 访问
+
+2. **expect 脚本没有自动启动 API Server**
+   - `listen_on_guest_vm_shell` 只做了挂载和 TA 绑定
+   - QEMU 重启后需要手动启动 `kms-api-server`
+
+### 解决方案
+
+#### 1. 修改 expect 脚本自动启动 API Server
+
+**文件**: `/opt/teaclave/bin/listen_on_guest_vm_shell` （Docker 内）
+
+**修改内容**：在 interact 之前添加自动启动命令：
+
+```expect
+expect "# $"
+send -- "./kms-api-server > kms-api.log 2>&1 &\r"
+expect "# $"
+send -- "echo 'KMS API Server started'\r"
+expect "# $"
+interact
+```
+
+**效果**：
+- ✅ QEMU 启动后自动登录
+- ✅ 自动挂载共享目录到 `/root/shared`
+- ✅ 自动绑定 TA 目录到 `/lib/optee_armtz`
+- ✅ **自动启动 kms-api-server**
+- ✅ 进入交互模式供手动调试
+
+#### 2. 验证 QEMU 端口转发配置
+
+**检查命令**：
+```bash
+docker exec teaclave_dev_env ps aux | grep qemu | grep hostfwd
+```
+
+**正确输出应该包含**：
+```
+hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:0.0.0.0:3000-:3000
+```
+
+**关键点**：
+- `0.0.0.0:3000` 而不是 `127.0.0.1:3000` （允许 Docker 端口映射）
+- 两个 hostfwd 配置用逗号分隔
+
+#### 3. 完整重启流程（验证通过）
+
+```bash
+# 1. 停止 QEMU
+docker exec teaclave_dev_env pkill -f qemu-system-aarch64
+
+# 2. 停止并重启 expect 脚本（应用新修改）
+docker exec teaclave_dev_env pkill -f listen_on_guest_vm_shell
+docker exec -d teaclave_dev_env bash -l -c "listen_on_guest_vm_shell"
+
+# 3. 等待 3 秒让监听器启动
+sleep 3
+
+# 4. 启动 QEMU（使用修复后的 SDK 脚本）
+docker exec -d teaclave_dev_env bash -c "cd /root/teaclave_sdk_src && IMG_DIRECTORY=/opt/teaclave/images IMG_NAME=x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory QEMU_HOST_SHARE_DIR=/opt/teaclave/shared LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8 > /tmp/qemu.log 2>&1"
+
+# 5. 等待 45 秒让 QEMU 启动和 API Server 自动启动
+sleep 45
+
+# 6. 验证端口转发
+docker exec teaclave_dev_env ps aux | grep qemu | grep hostfwd
+
+# 7. 测试 Mac 访问
+curl http://localhost:3000/health
+
+# 8. 测试公网访问（如果 cloudflared 已启动）
+curl https://kms.aastar.io/health
+```
+
+### 验证结果
+
+```bash
+$ curl http://localhost:3000/health
+{
+  "service": "kms-api",
+  "status": "healthy",
+  "version": "0.1.0",
+  "ta_mode": "real",
+  "endpoints": {
+    "GET": ["/health"],
+    "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/DeleteKey"]
+  }
+}
+
+$ curl https://kms.aastar.io/health
+{
+  "service": "kms-api",
+  "status": "healthy",
+  "version": "0.1.0",
+  "ta_mode": "real",
+  "endpoints": {
+    "GET": ["/health"],
+    "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/DeleteKey"]
+  }
+}
+```
+
+✅ **所有测试通过！**
+
+### 更新：完善自动启动脚本 (2025-10-01 17:45)
+
+**发现的问题**：
+- Docker 重启后，54321 端口（Secure World Console）的监听器没有自动启动
+- QEMU 启动失败，错误：`Failed to connect to 'localhost:54321': Connection refused`
+
+**修复**：修改 `scripts/kms-auto-start.sh`，添加 54321 端口监听器启动：
+
+```bash
+# 启动 Secure World 监听器（端口 54321）
+docker exec -d teaclave_dev_env bash -c "socat TCP-LISTEN:54321,reuseaddr,fork -,raw,echo=0 > /dev/null 2>&1"
+sleep 1
+
+# 启动 Guest VM 监听脚本（端口 54320）
+docker exec -d teaclave_dev_env bash -l -c "listen_on_guest_vm_shell"
+```
+
+**验证结果**：
+```bash
+# 重启 Docker 后测试
+$ docker restart teaclave_dev_env
+$ sleep 10
+$ ./scripts/kms-auto-start.sh
+
+🔄 停止旧的 QEMU 和监听器...
+🚀 启动 Secure World 监听器（端口 54321）...
+🚀 启动 Guest VM 监听脚本（端口 54320）...
+🖥️  启动 QEMU（带 3000 端口转发）...
+⏳ 等待 45 秒让 QEMU 和 API Server 启动...
+✅ 验证端口转发配置...
+hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:0.0.0.0:3000-:3000
+✅ 测试 Mac 本地访问...
+{
+  "service": "kms-api",
+  "status": "healthy",
+  "ta_mode": "real",
+  "version": "0.1.0"
+}
+✅ 所有服务已启动！
+```
+
+🎉 **Docker 重启后一键启动完全成功！**
+
+### 更新 3：添加端口清理和开发流程改进 (2025-10-01 18:15)
+
+#### 问题：端口占用导致启动失败
+
+**错误信息**：
+```
+2025/10/01 10:12:03 socat[3001] E bind(14, {AF=2 0.0.0.0:54321}, 16): Address already in use
+```
+
+**修复**：
+
+1. **修改 `terminal2-guest-vm.sh`**：启动前自动清理 54320 端口
+   ```bash
+   docker exec teaclave_dev_env pkill -f "listen_on_guest_vm_shell"
+   docker exec teaclave_dev_env pkill -f "TCP-LISTEN:54320"
+   docker exec teaclave_dev_env bash -c "lsof -ti:54320 | xargs -r kill -9 2>/dev/null || true"
+   ```
+
+2. **修改 `terminal3-secure-log.sh`**：启动前自动清理 54321 端口
+   ```bash
+   docker exec teaclave_dev_env pkill -f "listen_on_secure_world_log"
+   docker exec teaclave_dev_env pkill -f "TCP-LISTEN:54321"
+   docker exec teaclave_dev_env bash -c "lsof -ti:54321 | xargs -r kill -9 2>/dev/null || true"
+   ```
+
+3. **修改 `kms-auto-start.sh`**：启动前强制清理所有相关端口
+
+#### 开发流程改进
+
+**问题发现**：POST API 返回 `{"error":"Internal server error"}` 不是真正的错误，而是缺少 AWS KMS 兼容的 HTTP header。
+
+**解决方案**：
+
+✅ **正确的 API 调用方式**：
+```bash
+# 需要添加 x-amz-target header
+curl -X POST http://localhost:3000/CreateKey \
+  -H "Content-Type: application/json" \
+  -H "x-amz-target: TrentService.CreateKey" \
+  -d '{"Description":"Test","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
+```
+
+**完整开发流程**：
+
+1. **修改代码**：编辑 `kms/host/src/api_server.rs`
+2. **部署**：`./scripts/kms-deploy.sh`（自动编译 + 复制到共享目录）
+3. **重启 API**：`./scripts/kms-restart-api.sh`（新增脚本）
+4. **测试**：使用带正确 header 的 curl 命令
+
+**新增脚本**：
+- ✅ `scripts/kms-restart-api.sh` - 重启 QEMU 内的 API Server
+- ✅ `scripts/kms-monitor.sh` - 在 auto-start 后监控各种日志
+- ✅ 所有 terminal 脚本现在会自动清理端口
+
+### 更新 4: 修复 Cloudflared IPv6 连接错误 (2025-10-01 17:23)
+
+**问题**：Cloudflared 日志中不断出现：
+```
+read tcp [::1]:50823->[::1]:3000: read: connection reset by peer
+```
+
+**根本原因**：
+- Cloudflared 配置使用 `http://localhost:3000`
+- 系统优先尝试 IPv6 (`[::1]`)
+- 但 KMS API Server 只绑定 IPv4 (`0.0.0.0:3000`)
+
+**解决方案**：
+1. 修改 `~/.cloudflared/config.yml`:
+   ```yaml
+   service: http://127.0.0.1:3000  # 明确使用 IPv4
+   ```
+
+2. 重启 cloudflared:
+   ```bash
+   pkill cloudflared
+   cloudflared tunnel run kms-tunnel > /tmp/cloudflared.log 2>&1 &
+   ```
+
+**结果**：✅ 不再出现 IPv6 连接错误
+
+### 更新 4: 新增日志监控脚本
+
+**问题**：用户担心使用 `kms-auto-start.sh` 后无法监控 TA/CA 日志
+
+**解决方案**：创建 `scripts/kms-monitor.sh` 脚本
+
+**功能**：
+- 选项 1：监控 Secure World 日志 (TA)
+- 选项 2：监控 Guest VM Shell (CA)
+- 选项 3：查看 QEMU 日志
+- 选项 4：查看 API Server 日志
+- 选项 5：查看 Cloudflared 日志
+
+**使用方法**：
+```bash
+# 先启动服务
+./scripts/kms-auto-start.sh
+
+# 等待启动完成后，在另一个终端运行
+./scripts/kms-monitor.sh
+```
+
+### 更新 4: 完整工作流程澄清
+
+**推荐工作流程 A：使用终端脚本（可实时监控）**
+```bash
+docker start teaclave_dev_env
+./scripts/terminal3-secure-log.sh    # Terminal 3: TA 日志
+./scripts/terminal2-guest-vm.sh      # Terminal 2: CA 日志
+./scripts/terminal1-qemu.sh          # Terminal 1: QEMU + API 自动启动
+# 等待 45 秒后测试
+curl http://localhost:3000/health
+```
+
+**推荐工作流程 B：使用自动启动（更快速）**
+```bash
+docker start teaclave_dev_env
+./scripts/kms-auto-start.sh
+# 脚本会自动等待 45 秒并测试
+# 如需监控日志，另开终端运行：./scripts/kms-monitor.sh
+```
+
+**关键点**：
+- ✅ API Server 会自动启动（expect 脚本实现）
+- ✅ 无需手动重启 API Server
+- ✅ 两种方式都支持完整功能
+- ✅ 可以在 auto-start 后使用 monitor 脚本查看日志
+
+### 更新 5: 修复 QEMU hostfwd 协议错误 (2025-10-01 17:32)
+
+**问题**：terminal1 脚本启动 QEMU 失败：
+```
+qemu-system-aarch64: Could not set up host forwarding rule ':127.0.0.1:54433-:4433'
+```
+
+**根本原因**：
+- SDK 脚本 `/root/teaclave_sdk_src/scripts/runtime/bin/start_qemuv8` 第 68 行
+- `hostfwd=:127.0.0.1:54433-:4433` 缺少协议类型 (tcp/udp)
+- 正确格式应为 `hostfwd=tcp:127.0.0.1:54433-:4433`
+
+**解决方案**：
+```bash
+# 修复 SDK 脚本
+docker exec teaclave_dev_env sed -i '68s/hostfwd=:127.0.0.1:54433-:4433/hostfwd=tcp:127.0.0.1:54433-:4433/' /root/teaclave_sdk_src/scripts/runtime/bin/start_qemuv8
+```
+
+**修复后的配置**：
+```bash
+-netdev user,id=vmnic,hostfwd=tcp:127.0.0.1:54433-:4433,hostfwd=tcp:0.0.0.0:3000-:3000
+```
+
+**结果**：
+- ✅ terminal1 脚本现在可以正常启动 QEMU
+- ✅ 两个端口转发都正确配置
+- ✅ kms-auto-start.sh 也使用相同的修复
+
+### 更新 6: 统一 terminal1 和 auto-start 脚本 (2025-10-01 17:41)
+
+**问题**：terminal1 脚本无法正常启动 QEMU，但 auto-start 可以
+
+**根本原因**：
+- terminal1 使用 `bash -l -c "LISTEN_MODE=ON start_qemuv8"`（依赖环境变量）
+- auto-start 使用完整路径和显式环境变量
+
+**解决方案**：
+修改 `scripts/terminal1-qemu.sh` 使用与 auto-start 相同的启动方式：
+```bash
+docker exec -it teaclave_dev_env bash -c "cd /root/teaclave_sdk_src && IMG_DIRECTORY=/opt/teaclave/images IMG_NAME=x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory QEMU_HOST_SHARE_DIR=/opt/teaclave/shared LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8"
+```
+
+**新增启动指南脚本**：
+- `scripts/kms-startup-guide.sh` - 显示系统状态和启动说明
+- 自动检查 Docker、Cloudflared、QEMU、API Server 状态
+- 提供两种启动方式的详细说明
+
+**结果**：
+- ✅ terminal1 和 auto-start 现在使用相同的启动逻辑
+- ✅ 两种方式都能正常工作
+- ✅ 新增启动指南方便用户使用
+
+### 最终验证 (2025-10-01 17:41)
+
+所有功能已完全验证正常：
+
+**✅ 本地访问**：
+```bash
+$ curl http://localhost:3000/health
+{"status":"healthy","service":"kms-api","version":"0.1.0"}
+```
+
+**✅ 公网访问**：
+```bash
+$ curl https://kms.aastar.io/health
+{"status":"healthy","service":"kms-api","version":"0.1.0"}
+```
+
+**✅ 创建密钥**：
+```bash
+$ curl -X POST https://kms.aastar.io/CreateKey \
+  -H "Content-Type: application/json" \
+  -H "x-amz-target: TrentService.CreateKey" \
+  -d '{"Description":"Test","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
+{"KeyMetadata":{...},"Mnemonic":"[MNEMONIC_IN_SECURE_WORLD]"}
+```
+
+**✅ Cloudflared**：
+- IPv6 连接错误已修复
+- 自 10:35 重启后无新错误
+- 稳定运行超过 5 分钟
+
+**✅ 启动流程**：
+- Docker 重启后一键启动: `./scripts/kms-auto-start.sh`
+- 手动三终端启动: terminal3 → terminal2 → terminal1
+- 两种方式都正常工作
+
+### 诊断过程总结
+
+1. **检查 QEMU 端口转发配置** → 发现缺少 3000 端口
+2. **确认 Docker 内访问失败** → `docker exec teaclave_dev_env curl http://127.0.0.1:3000` 也失败
+3. **尝试通过 socat 连接 QEMU** → 超时（QEMU 可能还在启动）
+4. **测试 Mac localhost:3000** → "Empty reply from server"（端口转发工作，但服务未运行）
+5. **意识到问题**：端口转发正确，但 API Server 在 QEMU 重启后没有自动启动
+6. **修改 expect 脚本** → 添加自动启动 `kms-api-server`
+7. **重启整个流程** → 成功！
+
+### 关键经验
+
+1. **Docker 重启后的完整启动顺序**：
+   - 先启动 expect 监听脚本
+   - 再启动 QEMU
+   - expect 自动登录并启动 API Server
+
+2. **端口转发调试方法**：
+   ```bash
+   # 检查 QEMU 配置
+   docker exec teaclave_dev_env ps aux | grep qemu | grep hostfwd
+
+   # 测试 Docker 内访问
+   docker exec teaclave_dev_env curl http://127.0.0.1:3000/health
+
+   # 测试 Mac 访问
+   curl http://localhost:3000/health
+   ```
+
+3. **"Empty reply from server" vs "Connection reset"**：
+   - Empty reply: 端口转发正常，但服务未运行
+   - Connection reset: 端口转发有问题或端口未开放
+
+---
+
 ## 🔧 监控系统稳定性修复 (2025-09-30 20:20)
 
 ### 解决 Terminal 2/3 在 tmux 中无日志显示的问题
