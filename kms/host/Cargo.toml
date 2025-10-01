@@ -54,6 +54,7 @@ chrono = { version = "0.4.35", features = ["serde"] }
 env_logger = "0.10.2"
 log = "0.4.21"
 num_enum = "0.7.3"
+base64 = "0.21"
 
 # Pinned transitive dependencies for Rust 1.80 compatibility
 idna = "=0.5.0"

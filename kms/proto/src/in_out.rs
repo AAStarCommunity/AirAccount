@@ -69,3 +69,27 @@ pub struct SignTransactionInput {
 pub struct SignTransactionOutput {
     pub signature: Vec<u8>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignMessageInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub message: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignMessageOutput {
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub hash: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashOutput {
+    pub signature: Vec<u8>,
+}

@@ -121,6 +121,32 @@ fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTr
     Ok(proto::SignTransactionOutput { signature })
 }
 
+fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Sign message: error: wallet not found: {:?}", e))?;
+    dbg_println!("[+] Sign message: wallet loaded");
+
+    let signature = wallet.sign_message(&input.hd_path, &input.message)?;
+    dbg_println!("[+] Sign message: signature: {:?}", signature);
+
+    Ok(proto::SignMessageOutput { signature })
+}
+
+fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Sign hash: error: wallet not found: {:?}", e))?;
+    dbg_println!("[+] Sign hash: wallet loaded");
+
+    let signature = wallet.sign_hash(&input.hd_path, &input.hash)?;
+    dbg_println!("[+] Sign hash: signature: {:?}", signature);
+
+    Ok(proto::SignHashOutput { signature })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -137,6 +163,8 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RemoveWallet => process(serialized_input, remove_wallet),
         Command::DeriveAddress => process(serialized_input, derive_address),
         Command::SignTransaction => process(serialized_input, sign_transaction),
+        Command::SignMessage => process(serialized_input, sign_message),
+        Command::SignHash => process(serialized_input, sign_hash),
         _ => bail!("Unsupported command"),
     }
 }

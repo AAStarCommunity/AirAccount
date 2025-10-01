@@ -116,8 +116,14 @@ pub struct SignRequest {
     pub key_id: String,
     #[serde(rename = "DerivationPath")]
     pub derivation_path: String,
-    #[serde(rename = "Transaction")]
-    pub transaction: EthereumTransaction,
+    // Transaction signing mode (original)
+    #[serde(rename = "Transaction", skip_serializing_if = "Option::is_none", default)]
+    pub transaction: Option<EthereumTransaction>,
+    // Message signing mode (new)
+    #[serde(rename = "Message", skip_serializing_if = "Option::is_none", default)]
+    pub message: Option<String>,
+    #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
+    pub signing_algorithm: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,6 +132,24 @@ pub struct SignResponse {
     pub signature: String,
     #[serde(rename = "TransactionHash")]
     pub transaction_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignHashRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    #[serde(rename = "DerivationPath")]
+    pub derivation_path: String,
+    #[serde(rename = "Hash")]
+    pub hash: String,
+    #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
+    pub signing_algorithm: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignHashResponse {
+    #[serde(rename = "Signature")]
+    pub signature: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -276,44 +300,106 @@ impl KmsApiServer {
         }
         drop(store); // 释放读锁
 
-        // 解析交易参数
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let to_bytes = if req.transaction.to.starts_with("0x") {
-            hex::decode(&req.transaction.to[2..])
-        } else {
-            hex::decode(&req.transaction.to)
-        }?;
-        let mut to_array = [0u8; 20];
-        to_array.copy_from_slice(&to_bytes[..20]);
-
-        // 构造 EthTransaction
-        let data = if req.transaction.data.is_empty() {
-            vec![]
-        } else {
-            hex::decode(&req.transaction.data.trim_start_matches("0x"))?
-        };
-
-        let transaction = proto::EthTransaction {
-            chain_id: req.transaction.chain_id,
-            nonce: req.transaction.nonce as u128,
-            to: Some(to_array),
-            value: u128::from_str_radix(&req.transaction.value.trim_start_matches("0x"), 16)?,
-            gas_price: u128::from_str_radix(&req.transaction.gas_price.trim_start_matches("0x"), 16)?,
-            gas: req.transaction.gas as u128,
-            data,
-        };
-
-        // 调用 TaClient SignTransaction
         let mut ta_client = TaClient::new()?;
-        let signature = ta_client.sign_transaction(
-            wallet_uuid,
-            &req.derivation_path,
-            transaction,
-        )?;
+
+        // 根据请求类型选择签名模式
+        let signature = if let Some(transaction) = req.transaction {
+            // Transaction signing mode (original)
+            println!("  📝 Transaction signing mode");
+            let to_bytes = if transaction.to.starts_with("0x") {
+                hex::decode(&transaction.to[2..])
+            } else {
+                hex::decode(&transaction.to)
+            }?;
+            let mut to_array = [0u8; 20];
+            to_array.copy_from_slice(&to_bytes[..20]);
+
+            // 构造 EthTransaction
+            let data = if transaction.data.is_empty() {
+                vec![]
+            } else {
+                hex::decode(&transaction.data.trim_start_matches("0x"))?
+            };
+
+            let eth_transaction = proto::EthTransaction {
+                chain_id: transaction.chain_id,
+                nonce: transaction.nonce as u128,
+                to: Some(to_array),
+                value: u128::from_str_radix(&transaction.value.trim_start_matches("0x"), 16)?,
+                gas_price: u128::from_str_radix(&transaction.gas_price.trim_start_matches("0x"), 16)?,
+                gas: transaction.gas as u128,
+                data,
+            };
+
+            ta_client.sign_transaction(
+                wallet_uuid,
+                &req.derivation_path,
+                eth_transaction,
+            )?
+        } else if let Some(message) = req.message {
+            // Message signing mode (new)
+            println!("  📝 Message signing mode");
+
+            // Decode message (base64 or hex)
+            let message_bytes = if message.starts_with("0x") {
+                hex::decode(&message[2..])?
+            } else {
+                // Try base64 first
+                base64::decode(&message).unwrap_or_else(|_| message.as_bytes().to_vec())
+            };
+
+            ta_client.sign_message(
+                wallet_uuid,
+                &req.derivation_path,
+                &message_bytes,
+            )?
+        } else {
+            return Err(anyhow!("Either Transaction or Message must be provided"));
+        };
 
         Ok(SignResponse {
             signature: hex::encode(&signature),
-            transaction_hash: "[TX_HASH]".to_string(),
+            transaction_hash: "[TX_HASH_OR_MESSAGE_HASH]".to_string(),
+        })
+    }
+
+    pub async fn sign_hash(&self, req: SignHashRequest) -> Result<SignHashResponse> {
+        println!("📝 KMS SignHash API called for key: {}", req.key_id);
+
+        // 验证密钥存在
+        let store = self.metadata_store.read().await;
+        if !store.contains_key(&req.key_id) {
+            return Err(anyhow!("Key not found: {}", req.key_id));
+        }
+        drop(store); // 释放读锁
+
+        let wallet_uuid = Uuid::parse_str(&req.key_id)?;
+
+        // Decode hash (must be exactly 32 bytes)
+        let hash_bytes = if req.hash.starts_with("0x") {
+            hex::decode(&req.hash[2..])?
+        } else {
+            hex::decode(&req.hash)?
+        };
+
+        if hash_bytes.len() != 32 {
+            return Err(anyhow!("Hash must be exactly 32 bytes, got {} bytes", hash_bytes.len()));
+        }
+
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&hash_bytes);
+
+        // 调用 TaClient SignHash
+        let mut ta_client = TaClient::new()?;
+        let signature = ta_client.sign_hash(
+            wallet_uuid,
+            &req.derivation_path,
+            &hash_array,
+        )?;
+
+        Ok(SignHashResponse {
+            signature: hex::encode(&signature),
         })
     }
 
@@ -375,7 +461,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": "0.1.0",
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/DeleteKey"],
+            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey"],
             "GET": ["/health"]
         }
     })))
@@ -441,6 +527,19 @@ async fn handle_sign(
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("Sign error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_hash(
+    body: SignHashRequest,
+    server: Arc<KmsApiServer>
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.sign_hash(body).await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("SignHash error: {}", e);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -608,6 +707,15 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server5.clone()))
         .and_then(handle_sign);
 
+    // SignHash API
+    let server6_clone = Arc::clone(&server);
+    let sign_hash = warp::path("SignHash")
+        .and(warp::post())
+        .and(warp::header::exact("x-amz-target", "TrentService.SignHash"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server6_clone.clone()))
+        .and_then(handle_sign_hash);
+
     // GetPublicKey API
     let get_public_key = warp::path("GetPublicKey")
         .and(warp::post())
@@ -632,6 +740,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(list_keys)
         .or(derive_address)
         .or(sign)
+        .or(sign_hash)
         .or(get_public_key)
         .or(delete_key)
         .recover(handle_rejection);
@@ -644,7 +753,8 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /DescribeKey   - Query wallet metadata");
     println!("   POST /ListKeys      - List all wallets");
     println!("   POST /DeriveAddress - Derive Ethereum address");
-    println!("   POST /Sign          - Sign Ethereum transaction");
+    println!("   POST /Sign          - Sign Ethereum transaction or message");
+    println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
     println!("   POST /DeleteKey     - Schedule key deletion");
     println!("   GET  /health        - Health check");
