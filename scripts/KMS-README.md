@@ -202,11 +202,53 @@ docker exec teaclave_dev_env cat /tmp/qemu.log
 
 ## ⚙️ 开发工作流
 
-1. **修改代码** → 编辑 `kms/host/` 或 `kms/ta/`
-2. **部署** → `./scripts/kms-deploy.sh`
-3. **重启 API** → `./scripts/kms-restart-api.sh`（如果部署脚本自动重启失败）
-4. **测试** → `curl http://localhost:3000/...`
-5. **查看日志** → `./scripts/kms-monitor.sh`
+### 开发流程 A: 使用 auto-start（快速迭代）
+
+```bash
+# 1. 修改代码
+vim kms/host/src/api_server.rs
+
+# 2. 部署
+./scripts/kms-deploy.sh
+
+# 3. 重启服务（快速）
+docker exec teaclave_dev_env pkill -f qemu-system-aarch64
+./scripts/kms-auto-start.sh
+
+# 4. 测试
+curl http://localhost:3000/health
+
+# 5. 查看日志（如需要）
+./scripts/kms-monitor.sh
+```
+
+### 开发流程 B: 使用手动终端（实时监控）
+
+```bash
+# 1. 修改代码
+vim kms/host/src/api_server.rs
+
+# 2. 部署
+./scripts/kms-deploy.sh
+
+# 3. 清理并准备手动启动
+./scripts/kms-cleanup.sh
+
+# 4. 启动三个终端（可实时看日志）
+# Terminal 1: ./scripts/terminal3-secure-log.sh
+# Terminal 2: ./scripts/terminal2-guest-vm.sh
+# Terminal 3: ./scripts/terminal1-qemu.sh
+
+# 5. 测试（在第四个终端）
+curl http://localhost:3000/health
+```
+
+### 关键命令
+
+- **清理所有进程**: `./scripts/kms-cleanup.sh`
+- **重启 API**: `./scripts/kms-restart-api.sh`
+- **查看日志**: `./scripts/kms-monitor.sh`
+- **查看状态**: `./scripts/kms-startup-guide.sh`
 
 ## 🎯 系统架构
 
