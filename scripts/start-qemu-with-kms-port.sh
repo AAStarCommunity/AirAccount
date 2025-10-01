@@ -38,40 +38,8 @@ log_info "停止当前QEMU进程..."
 docker exec teaclave_dev_env bash -l -c "pkill -f qemu-system-aarch64 || true"
 sleep 2
 
-log_info "创建修改后的QEMU启动脚本..."
-docker exec teaclave_dev_env bash -l -c "cat > /tmp/start_qemuv8_with_kms.sh << 'EOFSCRIPT'
-#!/bin/bash
-set -xe
-
-IMG_DIRECTORY=/opt/teaclave/optee
-IMG_NAME=qemuv8-rootfs
-IMG=\${IMG_DIRECTORY}/\${IMG_NAME}
-QEMU_HOST_SHARE_DIR=/opt/teaclave/shared
-
-cd \${IMG}
-
-./qemu-system-aarch64 \\
-    -nodefaults \\
-    -nographic \\
-    -serial tcp:localhost:54320 -serial tcp:localhost:54321 \\
-    -smp 2 \\
-    -s -machine virt,secure=on,acpi=off,gic-version=3 \\
-    -cpu cortex-a57 \\
-    -d unimp -semihosting-config enable=on,target=native \\
-    -m 1057 \\
-    -bios bl1.bin \\
-    -initrd rootfs.cpio.gz \\
-    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \\
-    -kernel Image \\
-    -fsdev local,id=fsdev0,path=\${QEMU_HOST_SHARE_DIR},security_model=none \\
-    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \\
-    -netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:127.0.0.1:3000-:3000 \\
-    -device virtio-net-device,netdev=vmnic
-EOFSCRIPT
-chmod +x /tmp/start_qemuv8_with_kms.sh"
-
-log_info "启动带有KMS端口转发的QEMU..."
-docker exec -d teaclave_dev_env bash -l -c "cd /tmp && ./start_qemuv8_with_kms.sh > /tmp/qemu.log 2>&1"
+log_info "使用挂载的SDK脚本启动QEMU（已配置3000端口转发）..."
+docker exec -d teaclave_dev_env bash -l -c "cd /root/teaclave_sdk_src && LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8 > /tmp/qemu.log 2>&1"
 
 log_info "等待QEMU启动..."
 sleep 5

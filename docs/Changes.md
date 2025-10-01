@@ -1273,3 +1273,137 @@ Internet → kms.aastar.io → Cloudflare Edge → Tunnel → localhost:3000 →
 ---
 
 (以下内容省略，保持原有历史记录...)
+## 🔧 修复 QEMU 端口转发和公网访问 (2025-10-01 16:30)
+
+### 问题：502/1033 错误，无法通过 cloudflared 访问 KMS API
+
+**症状**:
+- `curl https://kms.aastar.io/health` 返回 502 或 1033 错误
+- Docker 内部可以访问 `http://127.0.0.1:3000`，但 Mac 无法访问 `http://localhost:3000`
+
+**根本原因**:
+1. QEMU 的端口转发配置为 `hostfwd=tcp:127.0.0.1:3000-:3000`
+   - 只绑定到 Docker 容器内的 `127.0.0.1`
+   - Docker 端口映射期望服务监听在 `0.0.0.0` 上才能转发到宿主机
+2. `start-qemu-with-kms-port.sh` 使用了错误的路径和配置方式
+
+### 解决方案
+
+#### 1. 修改 QEMU 端口转发配置
+
+**文件**: `third_party/teaclave-trustzone-sdk/scripts/runtime/bin/start_qemuv8`
+
+**修改**（第 68 行）:
+```bash
+# 修改前
+-netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:127.0.0.1:3000-:3000 \
+
+# 修改后  
+-netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:0.0.0.0:3000-:3000 \
+```
+
+**关键**: 使用 `0.0.0.0:3000` 而不是 `127.0.0.1:3000`，使得 Docker 端口映射能够正常工作。
+
+#### 2. 修复 `start-qemu-with-kms-port.sh` 脚本
+
+**问题**:
+- 脚本试图创建临时启动脚本，但 heredoc 转义问题导致失败
+- 使用了不存在的路径 `/opt/teaclave/scripts`
+
+**解决**:
+直接使用挂载的 SDK 脚本：
+```bash
+docker exec -d teaclave_dev_env bash -l -c "cd /root/teaclave_sdk_src && LISTEN_MODE=1 ./scripts/runtime/bin/start_qemuv8 > /tmp/qemu.log 2>&1"
+```
+
+#### 3. 完整的网络链路
+
+成功建立了完整的网络转发链路：
+
+```
+QEMU Guest (10.0.2.15:3000)
+  ↓ QEMU user network + hostfwd=tcp:0.0.0.0:3000-:3000
+Docker Container (0.0.0.0:3000)
+  ↓ Docker port mapping -p 3000:3000
+Mac Host (localhost:3000)
+  ↓ cloudflared tunnel
+Public Internet (https://kms.aastar.io)
+```
+
+### 验证结果
+
+✅ **本地访问成功**:
+```bash
+$ curl http://localhost:3000/health
+{"endpoints":{"GET":["/health"],"POST":[...]},"service":"kms-api","status":"healthy","ta_mode":"real","version":"0.1.0"}
+```
+
+✅ **公网访问成功**:
+```bash
+$ curl https://kms.aastar.io/health
+{"endpoints":{"GET":["/health"],"POST":[...]},"service":"kms-api","status":"healthy","ta_mode":"real","version":"0.1.0"}
+```
+
+### 启动流程
+
+**完整部署流程**:
+```bash
+# 1. 确保 Docker 容器运行
+./scripts/kms-dev-env.sh status
+
+# 2. 启动 QEMU（使用修复后的配置）
+./scripts/start-qemu-with-kms-port.sh
+
+# 3. 连接到 QEMU 并启动 API Server
+./scripts/terminal2-guest-vm.sh
+# 在 QEMU 内:
+mount -t 9p -o trans=virtio host /root/shared
+cd /root/shared && ./kms-api-server > kms-api.log 2>&1 &
+# 按 Ctrl+C 退出
+
+# 4. 在 Mac 上启动 cloudflared
+cloudflared tunnel run kms-tunnel &
+
+# 5. 测试
+curl https://kms.aastar.io/health
+```
+
+### 关键教训
+
+1. **QEMU user network hostfwd**: 绑定地址很重要
+   - `127.0.0.1:port` 只能在容器内访问
+   - `0.0.0.0:port` 或不指定地址才能通过 Docker 端口映射访问
+
+2. **Docker 端口映射**: 需要服务监听 `0.0.0.0`，而不是 `127.0.0.1`
+
+3. **挂载的文件修改会实时同步**: Docker `-v` 挂载的文件修改在容器内立即可见
+
+4. **cloudflared 位置**: 在 Mac 上运行 cloudflared，连接到 `localhost:3000`，通过 Docker 端口映射访问容器内的服务
+
+### 相关文件
+
+- `third_party/teaclave-trustzone-sdk/scripts/runtime/bin/start_qemuv8` (修改)
+- `scripts/start-qemu-with-kms-port.sh` (修复)
+- `~/.cloudflared/config.yml` (cloudflared 配置)
+
+---
+
+
+## 📌 重要提示：SDK 修改 (2025-10-01)
+
+**修改文件**（不在 git 版本控制中）：
+`third_party/teaclave-trustzone-sdk/scripts/runtime/bin/start_qemuv8`
+
+**第 68 行修改**：
+```bash
+# 修改前
+-netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433 \
+
+# 修改后
+-netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433,hostfwd=tcp:0.0.0.0:3000-:3000 \
+```
+
+**重要**：每次重新 clone 或更新 SDK submodule 后，需要重新应用此修改！
+
+---
+
