@@ -550,7 +550,7 @@ pub async fn start_kms_server() -> Result<()> {
         .map(|| {
             match std::fs::read_to_string("/root/shared/kms-test-page.html") {
                 Ok(html) => warp::reply::html(html),
-                Err(_) => warp::reply::html("<html><body><h1>Test UI not available</h1><p>Please deploy kms-test-page.html to /root/shared/</p></body></html>")
+                Err(_) => warp::reply::html("<html><body><h1>Test UI not available</h1><p>Please deploy kms-test-page.html to /root/shared/</p></body></html>".to_string())
             }
         });
 
