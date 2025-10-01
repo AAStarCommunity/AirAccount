@@ -51,48 +51,77 @@ AirAccount/
 
 ## 🚀 快速开始
 
-### 1. 启动开发环境
+### 首次启动或 Mac 重启后
+
 ```bash
-./scripts/kms-dev-env.sh start  # 自动检查并初始化STD依赖
+# 1. 启动 Docker 容器
+docker start teaclave_dev_env
+
+# 2. 启动 Cloudflare 隧道（仅需运行一次）
+cloudflared tunnel run kms-tunnel > /tmp/cloudflared.log 2>&1 &
+
+# 3. 一键启动 KMS 服务（推荐）
+./scripts/kms-auto-start.sh
 ```
 
-### 2. 开发代码
-在 `kms/` 目录下编辑代码
+### 开发流程
 
-### 3. 构建和部署
+**方式 A: 快速迭代（推荐日常开发）**
 ```bash
-./scripts/kms-deploy.sh        # 一键构建和部署
-./scripts/kms-deploy.sh clean  # 完整构建
+# 1. 修改代码
+vim kms/host/src/api_server.rs
+
+# 2. 部署新代码
+./scripts/kms-deploy.sh
+
+# 3. 快速重启
+docker exec teaclave_dev_env pkill -f qemu-system-aarch64
+./scripts/kms-auto-start.sh
+
+# 4. 测试
+curl http://localhost:3000/health
+
+# 5. 查看日志（如需要）
+./scripts/kms-monitor.sh
 ```
 
-### 4. 启动监控系统（查看调用链）
-
-**方案 A: 真实日志监控（推荐，显示 CA/TA 真实日志）**
+**方式 B: 调试模式（实时查看日志）**
 ```bash
-# 一次性配置（在单独终端）
-socat - TCP:localhost:54320
-# 在 QEMU 中执行:
-killall kms-api-server
-cd /root/shared
-./kms-api-server > /root/shared/kms-api.log 2>&1 &
-# 退出 (Ctrl+C)
+# 1. 修改代码
+vim kms/host/src/api_server.rs
 
-# 启动监控
-./scripts/monitor-all-tmux-direct.sh
+# 2. 部署新代码
+./scripts/kms-deploy.sh
+
+# 3. 清理并准备手动启动
+./scripts/kms-cleanup.sh
+
+# 4. 启动三个终端
+# Terminal 1: ./scripts/terminal3-secure-log.sh  (TA 日志)
+# Terminal 2: ./scripts/terminal2-guest-vm.sh    (CA 日志)
+# Terminal 3: ./scripts/terminal1-qemu.sh        (QEMU)
+
+# 5. 测试（在第四个终端）
+curl http://localhost:3000/health
 ```
 
-**方案 B: 稳定版监控（无需配置，从 Cloudflared 推断）**
+### 常用命令
+
 ```bash
-./scripts/start-cloudflared-debug.sh      # 启用 debug 日志
-./scripts/monitor-all-tmux-v2.sh          # 启动监控
+# 查看系统状态
+./scripts/kms-startup-guide.sh
+
+# 清理所有进程
+./scripts/kms-cleanup.sh
+
+# 监控日志
+./scripts/kms-monitor.sh
+
+# 重启 API Server
+./scripts/kms-restart-api.sh
 ```
 
-详细说明：
-- [监控系统使用指南](../docs/Monitoring-Guide.md)
-- [真实日志配置](../docs/Enable-Real-Logging.md)
-- [故障排查](../docs/Monitoring-Troubleshooting.md)
-
-### 5. 测试 API
+### 测试 API
 
 **浏览器测试**:
 ```bash
