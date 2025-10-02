@@ -1,3 +1,98 @@
+### 下一步
+等待用户确认开始实施
+
+---
+
+
+---
+
+## 🔍 全面代码审查 + 严重Bug发现 (2025-10-02 19:30)
+
+✅ **完成所有核心代码的深度审查和问题识别**
+
+### 工作内容
+1. ✅ 合并 main 分支到 KMS-feat-passkey (无冲突)
+2. ✅ 审视所有核心代码 (kms/ta, kms/host, kms/proto)
+3. ✅ 发现 5 个严重bug和架构缺陷
+4. ✅ 更新 API_Refactoring_Plan.md v3.0
+
+### 🚨 发现的严重问题
+
+#### 1. SignHash API 路由丢失 🔥
+- **TA 实现:** ✅ 完整 (kms/ta/src/main.rs:261)
+- **ta_client.rs:** ❌ 缺失 `sign_hash()` 方法
+- **api_server.rs:** ❌ 缺失路由处理
+- **影响:** 用户报告可用的功能实际不可用 (Git commit 25a0c1c 有实现,后续被覆盖)
+
+#### 2. Challenge 时间戳永远为 0 🔥
+- **文件:** kms/ta/src/challenge.rs:74
+- **问题:** `fn get_current_time() -> u64 { 0 }` 硬编码
+- **影响:** 所有 challenge 永不过期 (可重放攻击)
+
+#### 3. Passkey 验证流程不完整 ⚠️
+- **当前:** 只验证 P-256 签名 (`verify_passkey_signature()`)
+- **缺失:** WebAuthn 完整流程 (authenticatorData, clientDataJSON, rpId, origin, flags)
+- **影响:** 不符合 W3C WebAuthn 标准
+
+#### 4. 缺少 credential_id 管理 ⚠️
+- **Wallet 结构:** 无 `passkey_credential_id` 字段
+- **影响:** 无法按 Passkey 列出钱包,无法实现多钱包管理
+
+#### 5. 缺少 account_index 自增 ⚠️
+- **CreateWallet:** 不支持自动派生地址
+- **影响:** 无法实现账户索引管理 (0-99)
+
+### API 实现状态矩阵
+
+| API | TA层 | ta_client | api_server | 路由 | 状态 |
+|-----|------|----------|-----------|-----|------|
+| SignHash | ✅ :261 | ❌ 缺失 | ❌ 缺失 | ❌ 缺失 | **不可用** |
+| GetChallenge | ✅ :193 | ✅ :142 | ✅ :377 | ✅ | ⚠️ 时间bug |
+| SetPasskeyPubkey | ✅ :221 | ❌ 缺失 | ❌ 缺失 | ❌ 缺失 | **不可用** |
+| SetPasskeyEnabled | ✅ :239 | ❌ 缺失 | ❌ 缺失 | ❌ 缺失 | **不可用** |
+
+### 新增 Phase 0: 紧急修复 (P0+++ 🔥)
+
+**目标:** 恢复基本可用性 (1小时)
+
+#### 修复内容:
+1. **恢复 SignHash API** (从 commit 25a0c1c)
+   - ta_client.rs 添加 `sign_hash()` 方法
+   - api_server.rs 添加路由处理
+   
+2. **修复 Challenge 时间戳**
+   - 集成 OP-TEE time API (`optee_utee::time::SystemTime`)
+   - Fallback 使用 AtomicU64 计数器
+
+3. **添加 SetPasskey* API**
+   - ta_client.rs 添加方法
+   - api_server.rs 添加路由
+
+### 更新后的实施计划
+
+| Phase | 内容 | 时间 | 优先级 |
+|-------|-----|------|--------|
+| **Phase 0** | **紧急Bug修复** | **1h** | **P0+++ 🔥** |
+| Phase 10 | WebAuthn 完整验证 | 3-4h | P0 🔴 |
+| Phase 11 | Wallet 结构和索引 | 3-4h | P1 🟠 |
+| Phase 12 | Challenge 绑定 | 2h | P1 🟠 |
+| Phase 13 | API 清理 | 1-2h | P2 🟡 |
+| **总计** | | **10-13h** | |
+
+### 结论
+
+**代码审查发现的问题比预期严重:**
+- ✅ TA 层实现完整,功能正常
+- ❌ TaClient 和 API Server 缺失关键方法
+- ❌ Challenge 管理存在安全漏洞
+- ❌ Passkey 验证流程不符合标准
+
+**建议:** 立即执行 Phase 0 恢复基本功能,然后讨论是否继续后续阶段。
+
+### 输出文档
+📄 docs/API_Refactoring_Plan.md v3.0 (新增紧急修复计划和完整代码审查结果)
+
+---
 # Project Changes Log
 
 ## 🎉 TA 编译成功突破！依赖冲突全部解决 (2025-10-02 14:58)
@@ -2269,6 +2364,119 @@ curl https://kms.aastar.io/health
 
 ### 代码统计
 4 文件修改, +272 行, +3 TA 命令, +6 输入输出结构
+
+---
+
+
+
+## 📋 API 重构分析与计划 (2025-10-02 15:45)
+
+✅ **完成核心代码全面分析和API重构方案**
+
+### 分析范围
+- TA层: wallet.rs, passkey.rs, challenge.rs, main.rs
+- CA层: ta_client.rs
+- API层: api_server.rs
+- Proto层: Command枚举和Input/Output结构
+
+### 发现的关键问题 (Critical Issues)
+
+#### 🔴 P0 - 安全问题
+1. **Passkey签名验证错误** (kms/ta/src/main.rs:310-314)
+   - 当前: 只签名/验证 challenge
+   - 应该: 签名/验证 hash + challenge 组合
+   - 影响: 无法证明用户同意签署特定交易
+
+#### 🟠 P1 - 核心功能缺失
+2. **缺少 credential_id 绑定机制**
+   - Wallet结构只存储pubkey,未存储credential_id
+   - 无法实现 "一个Passkey管理多个钱包"
+   - 无法按Passkey查询钱包列表
+
+3. **缺少自动地址派生管理**
+   - 无自动递增机制
+   - 无100个钱包上限控制
+
+4. **删除机制不符合要求**
+   - 当前: 立即删除
+   - 要求: 两步删除(标记→1年后删除)
+
+#### 🟡 P2 - 优化问题
+5. **元数据持久化缺失** - API Server重启丢失所有元数据
+6. **API设计过于复杂** - 9个端点,很多未实现或重复
+
+### 重构方案要点
+
+#### 目标API (6个核心端点)
+- POST /wallet/create - 创建钱包(绑定Passkey)
+- POST /wallet/list - 列出Passkey名下所有钱包
+- POST /transaction/sign - 签名交易哈希
+- POST /message/sign - 签名消息
+- POST /wallet/delete - 两步删除
+- POST /challenge/get - 获取挑战
+
+#### TA层改造
+- Wallet结构新增: credential_id, account_index, status, created_at
+- 新增 PasskeyIndex 数据结构 (credential_id → wallet_ids映射)
+- 修复 sign_hash() 验证逻辑 (hash + challenge)
+- 新增命令: CreateWalletWithPasskey, ListWalletsByPasskey, SignMessage, MarkWalletDeleted
+
+#### 实施阶段
+- Phase 10: Wallet结构和索引 (2-3h)
+- Phase 11: 修复Passkey签名验证 (1-2h) ← P0优先级
+- Phase 12: 新增TA命令 (3-4h)
+- Phase 13: API层重构 (3-4h)
+- Phase 14: 测试和文档 (2-3h)
+- 总计: 13-18小时
+
+### 待讨论问题
+1. Passkey签名消息格式: hash+challenge vs sha256(hash+challenge)?
+2. Credential ID存储格式和长度?
+3. 账户索引管理: 自动递增 vs 用户指定?
+4. 删除触发条件: 是否需要Passkey签名?
+5. 工具函数暴露: CLI工具 vs HTTP端点?
+
+### 输出文档
+📄 docs/API_Refactoring_Plan.md (完整详细方案,包含代码示例)
+
+### 下一步
+等待用户讨论确认以上5个问题后,开始实施
+
+---
+
+
+
+## 📋 最终实施方案确认 (2025-10-02 17:00)
+
+✅ **完成文档更新和方案确认**
+
+### 核心澄清
+1. **系统定位:** TEE-based KMS (非 Passkey Server)
+   - Passkey 作为身份验证层
+   - 核心功能: HD Wallet 密钥管理 + 交易签名
+
+2. **Passkey 签名格式:** 选项C - 结构化消息
+   - 防止跨协议重放攻击
+   - 符合 EIP-191/EIP-712 最佳实践
+
+### 代码实现状态确认
+- ✅ POST /SignHash: 已实现并测试通过
+- ✅ bin/export_key: 已完成
+- ❌ 自动地址派生: 确认未实现,需开发
+- ⚠️ WebAuthn 验证: 需完整实现
+
+### 输出文档
+📄 docs/Final_Implementation_Plan.md (完整实施方案 v2.0)
+
+### 实施计划
+**Phase 10 (P0):** WebAuthn 完整验证 (3-4h)
+**Phase 11 (P1):** Wallet 结构和索引 (3-4h)
+**Phase 12 (P2):** API 层重构 (2-3h)
+**Phase 13 (P2):** Challenge 绑定 (2h)
+**总计:** 10-13小时
+
+### 下一步
+等待用户确认开始实施
 
 ---
 
