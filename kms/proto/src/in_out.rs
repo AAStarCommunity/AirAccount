@@ -93,3 +93,16 @@ pub struct SignHashInput {
 pub struct SignHashOutput {
     pub signature: Vec<u8>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeriveAddressAutoInput {
+    pub wallet_id: Option<Uuid>,  // None = create new wallet, Some = use existing
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeriveAddressAutoOutput {
+    pub wallet_id: Uuid,
+    pub address: [u8; 20],
+    pub public_key: Vec<u8>,
+    pub derivation_path: String,
+}

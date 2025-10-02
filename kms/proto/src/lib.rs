@@ -30,6 +30,7 @@ pub enum Command {
     SignTransaction,
     SignMessage,
     SignHash,
+    DeriveAddressAuto,
     #[default]
     Unknown,
 }

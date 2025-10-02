@@ -70,12 +70,15 @@ fi
 # 同步到QEMU共享目录
 log_step "3/4 部署到QEMU共享目录..."
 docker exec teaclave_dev_env bash -l -c "
-    mkdir -p /opt/teaclave/shared && \
+    mkdir -p /opt/teaclave/shared/ta && \
+    mkdir -p /opt/teaclave/shared/plugin && \
     cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms /opt/teaclave/shared/kms && \
     cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/kms-api-server && \
     cp /root/teaclave_sdk_src/projects/web3/kms/host/kms-test-page.html /opt/teaclave/shared/kms-test-page.html 2>/dev/null || true && \
-    cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/aarch64-unknown-optee/release/*.ta /opt/teaclave/shared/ && \
-    ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.ta$|\.html$'
+    cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/aarch64-unknown-optee/release/*.ta /opt/teaclave/shared/ta/ && \
+    ls -lh /opt/teaclave/shared/ta/ && \
+    echo '---' && \
+    ls -lh /opt/teaclave/shared/ | grep -E 'kms|\.html$'
 "
 
 log_step "4/5 验证部署..."

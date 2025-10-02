@@ -162,6 +162,23 @@ impl TaClient {
             .context("Failed to deserialize SignHashOutput")?;
         Ok(output.signature)
     }
+
+    /// Automatically derive address with incremented index
+    /// If wallet_id is None, creates new wallet
+    /// If wallet_id is Some, uses existing wallet and increments address index
+    /// Returns (wallet_id, address, public_key, derivation_path)
+    pub fn derive_address_auto(
+        &mut self,
+        wallet_id: Option<uuid::Uuid>,
+    ) -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
+        let input = proto::DeriveAddressAutoInput { wallet_id };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize DeriveAddressAutoInput")?;
+        let serialized_output = self.invoke_command(proto::Command::DeriveAddressAuto, &serialized_input)?;
+        let output: proto::DeriveAddressAutoOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize DeriveAddressAutoOutput")?;
+        Ok((output.wallet_id, output.address, output.public_key, output.derivation_path))
+    }
 }
 
 /// Convenience functions for one-off calls (creates new client each time)

@@ -31,6 +31,8 @@ use secure_db::Storable;
 pub struct Wallet {
     id: Uuid,
     entropy: Vec<u8>,
+    next_address_index: u32,
+    next_account_index: u32,
 }
 
 impl Storable for Wallet {
@@ -55,7 +57,32 @@ impl Wallet {
         )
         .into_uuid();
 
-        Ok(Self { id: uuid, entropy })
+        Ok(Self {
+            id: uuid,
+            entropy,
+            next_address_index: 0,
+            next_account_index: 0,
+        })
+    }
+
+    pub fn get_next_address_index(&self) -> u32 {
+        self.next_address_index
+    }
+
+    pub fn increment_address_index(&mut self) -> Result<u32> {
+        const MAX_ADDRESSES_PER_WALLET: u32 = 100;
+
+        if self.next_address_index >= MAX_ADDRESSES_PER_WALLET {
+            return Err(anyhow!(
+                "Wallet address limit reached ({}/{})",
+                self.next_address_index,
+                MAX_ADDRESSES_PER_WALLET
+            ));
+        }
+
+        let current = self.next_address_index;
+        self.next_address_index += 1;
+        Ok(current)
     }
 
     pub fn get_id(&self) -> Uuid {
