@@ -31,6 +31,7 @@ pub enum Command {
     SignMessage,
     SignHash,
     DeriveAddressAuto,
+    ExportPrivateKey,
     #[default]
     Unknown,
 }

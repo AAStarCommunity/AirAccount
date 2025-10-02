@@ -24,7 +24,7 @@ repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
 description = "KMS (Key Management Service) based on OP-TEE TrustZone."
 edition = "2018"
 
-# 两个binary: CLI工具 和 API服务器
+# 三个binary: CLI工具、API服务器、导出私钥工具
 [[bin]]
 name = "kms"
 path = "src/main.rs"
@@ -32,6 +32,10 @@ path = "src/main.rs"
 [[bin]]
 name = "kms-api-server"
 path = "src/api_server.rs"
+
+[[bin]]
+name = "export_key"
+path = "src/bin/export_key.rs"
 
 [dependencies]
 proto = { path = "../proto" }

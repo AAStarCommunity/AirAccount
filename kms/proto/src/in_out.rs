@@ -106,3 +106,14 @@ pub struct DeriveAddressAutoOutput {
     pub public_key: Vec<u8>,
     pub derivation_path: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyInput {
+    pub wallet_id: Uuid,
+    pub derivation_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyOutput {
+    pub private_key: Vec<u8>,  // 32 bytes
+}
