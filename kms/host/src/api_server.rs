@@ -14,6 +14,7 @@ use hex;
 
 // Import from kms library and proto
 use kms::ta_client::TaClient;
+use kms::address_cache::{update_address_entry, lookup_address};
 use proto;
 
 // ========================================
@@ -22,6 +23,8 @@ use proto;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateKeyRequest {
+    #[serde(rename = "KeyId", skip_serializing_if = "Option::is_none", default)]
+    pub key_id: Option<String>,
     #[serde(rename = "Description")]
     pub description: String,
     #[serde(rename = "KeyUsage")]
@@ -78,6 +81,12 @@ pub struct KeyListEntry {
 pub struct KeyMetadata {
     #[serde(rename = "KeyId")]
     pub key_id: String,
+    #[serde(rename = "Address", skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(rename = "PublicKey", skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none")]
+    pub derivation_path: Option<String>,
     #[serde(rename = "Arn")]
     pub arn: String,
     #[serde(rename = "CreationDate")]
@@ -112,10 +121,14 @@ pub struct DeriveAddressResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignRequest {
-    #[serde(rename = "KeyId")]
-    pub key_id: String,
-    #[serde(rename = "DerivationPath")]
-    pub derivation_path: String,
+    // New: Address-based lookup (priority)
+    #[serde(rename = "Address", skip_serializing_if = "Option::is_none", default)]
+    pub address: Option<String>,
+    // Old: KeyId + DerivationPath (backward compatibility)
+    #[serde(rename = "KeyId", skip_serializing_if = "Option::is_none", default)]
+    pub key_id: Option<String>,
+    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none", default)]
+    pub derivation_path: Option<String>,
     // Transaction signing mode (original)
     #[serde(rename = "Transaction", skip_serializing_if = "Option::is_none", default)]
     pub transaction: Option<EthereumTransaction>,
@@ -217,13 +230,31 @@ impl KmsApiServer {
     pub async fn create_key(&self, req: CreateKeyRequest) -> Result<CreateKeyResponse> {
         println!("📝 KMS CreateKey API called");
 
-        // 调用 TaClient CreateWallet
+        // Parse optional wallet_id
+        let wallet_id_opt = if let Some(ref key_id_str) = req.key_id {
+            Some(uuid::Uuid::parse_str(key_id_str)
+                .map_err(|e| anyhow!("Invalid KeyId format: {}", e))?)
+        } else {
+            None
+        };
+
+        // Call TA to derive address with auto-increment
         let mut ta_client = TaClient::new()?;
-        let wallet_id = ta_client.create_wallet()?;
+        let (wallet_id, address, public_key, derivation_path) = ta_client.derive_address_auto(wallet_id_opt)?;
+
+        // Convert to hex strings
+        let address_hex = format!("0x{}", hex::encode(&address));
+        let pubkey_hex = format!("0x{}", hex::encode(&public_key));
+
+        // Update address cache
+        update_address_entry(&address_hex, wallet_id, &derivation_path, &pubkey_hex)?;
 
         // 创建密钥元数据
         let key_metadata = KeyMetadata {
             key_id: wallet_id.to_string(),
+            address: Some(address_hex),
+            public_key: Some(pubkey_hex),
+            derivation_path: Some(derivation_path),
             arn: format!("arn:aws:kms:region:account:key/{}", wallet_id),
             creation_date: Utc::now(),
             enabled: true,
@@ -291,16 +322,44 @@ impl KmsApiServer {
     }
 
     pub async fn sign(&self, req: SignRequest) -> Result<SignResponse> {
-        println!("📝 KMS Sign API called for key: {}", req.key_id);
+        // Resolve wallet_id and derivation_path (support both Address and KeyId modes)
+        let (wallet_uuid, derivation_path) = if let Some(ref address) = req.address {
+            // Mode 1: Address-based lookup (new)
+            println!("📝 KMS Sign API called with Address: {}", address);
 
-        // 验证密钥存在
-        let store = self.metadata_store.read().await;
-        if !store.contains_key(&req.key_id) {
-            return Err(anyhow!("Key not found: {}", req.key_id));
-        }
-        drop(store); // 释放读锁
+            let metadata = lookup_address(address)?
+                .ok_or_else(|| anyhow!(
+                    "Address not found in cache: {}. \
+                     Use 'kms-recovery-cli rebuild-cache --wallet-id <id>' to recover, \
+                     or provide KeyId + DerivationPath directly.",
+                    address
+                ))?;
 
-        let wallet_uuid = Uuid::parse_str(&req.key_id)?;
+            let wallet_uuid = metadata.wallet_id;
+            let derivation_path = metadata.derivation_path.clone();
+
+            // Note: Cache consistency is assumed. Use kms-recovery-cli verify-cache to check integrity.
+            // Verification on every sign would be too expensive (requires TA derivation call).
+
+            (wallet_uuid, derivation_path)
+        } else if let (Some(ref key_id), Some(ref path)) = (req.key_id.as_ref(), req.derivation_path.as_ref()) {
+            // Mode 2: KeyId + DerivationPath (backward compatibility)
+            println!("📝 KMS Sign API called with KeyId: {}, Path: {}", key_id, path);
+
+            // 验证密钥存在
+            let store = self.metadata_store.read().await;
+            if !store.contains_key(&key_id.to_string()) {
+                return Err(anyhow!("Key not found: {}", key_id));
+            }
+            drop(store);
+
+            let wallet_uuid = Uuid::parse_str(key_id)?;
+            (wallet_uuid, path.to_string())
+        } else {
+            return Err(anyhow!(
+                "Must provide either Address or (KeyId + DerivationPath)"
+            ));
+        };
         let mut ta_client = TaClient::new()?;
 
         // 根据请求类型选择签名模式
@@ -334,7 +393,7 @@ impl KmsApiServer {
 
             ta_client.sign_transaction(
                 wallet_uuid,
-                &req.derivation_path,
+                &derivation_path,
                 eth_transaction,
             )?
         } else if let Some(message) = req.message {
@@ -351,7 +410,7 @@ impl KmsApiServer {
 
             ta_client.sign_message(
                 wallet_uuid,
-                &req.derivation_path,
+                &derivation_path,
                 &message_bytes,
             )?
         } else {

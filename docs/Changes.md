@@ -1,5 +1,439 @@
 # Project Changes Log
 
+---
+
+## 🚀 KMS v2.0 生产环境部署成功 (2025-10-02 11:14)
+
+### 部署概况
+
+使用**模式1 (自动化模式)** 成功部署到生产环境 `https://kms.aastar.io`
+
+**部署步骤**:
+```bash
+# 1. 清理
+./scripts/kms-cleanup.sh
+
+# 2. 编译部署
+./scripts/kms-deploy.sh clean
+
+# 3. 一键启动 (自动化模式)
+./scripts/kms-auto-start.sh
+
+# 4. Cloudflare tunnel
+cloudflared tunnel run kms-tunnel
+```
+
+### 生产验证结果
+
+#### API 健康检查
+```json
+// https://kms.aastar.io/health
+{
+  "endpoints": {
+    "GET": ["/health"],
+    "POST": [
+      "/CreateKey", "/DescribeKey", "/ListKeys",
+      "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey"
+    ]
+  },
+  "service": "kms-api",
+  "status": "healthy",
+  "ta_mode": "real",
+  "version": "0.1.0"
+}
+```
+
+#### v2.0 功能测试
+
+**1. 创建新钱包** ✅
+```json
+{
+  "KeyId": "c9ff2117-2fe4-4f6e-8c3a-a197cf74ad07",
+  "Address": "0xf424e314aa58d2c881eb89facb4dd807e6f8e7d8",
+  "PublicKey": "0x022ddd417dd88fbf9e42452324d39fa05fb6d7d9ba73f0c4068bf118846ba43e38",
+  "DerivationPath": "m/44'/60'/0'/0/0"  // ✅ 第一个地址
+}
+```
+
+**2. 添加第二个地址** ✅
+```json
+{
+  "KeyId": "c9ff2117-2fe4-4f6e-8c3a-a197cf74ad07",
+  "Address": "0x61968822ad395eb8f78292d60a3a0491c45d4296",
+  "PublicKey": "0x021580b31196ff9c4dc4203dafffc665b8c55f21af12adb057dd07036479e1dd50",
+  "DerivationPath": "m/44'/60'/0'/0/1"  // ✅ 自动递增到 index 1
+}
+```
+
+**3. 使用 Address 参数签名** ✅
+```bash
+curl -X POST https://kms.aastar.io/Sign \
+  -d '{"Address":"0x61968822ad395eb8f78292d60a3a0491c45d4296","Message":"0x1234567890abcdef",...}'
+
+# ✅ 成功返回签名
+{
+  "Signature": "be65e9738d63c338e0562019c192ee91d6d7a10f88de4650f9b6efec19869c2e1d6118e89d4523e827ccd0ec20840793bc5bbea01bcddcce59394da204f4458d1c",
+  "TransactionHash": "[TX_HASH_OR_MESSAGE_HASH]"
+}
+```
+
+### v2.0 核心特性确认
+
+1. ✅ **自动地址派生**: CreateKey 自动返回 Address, PublicKey, DerivationPath
+2. ✅ **地址自动递增**: 同一钱包新地址 index 自动递增 (0→1)
+3. ✅ **Address Cache**: Normal World 缓存 Address → (wallet_id, path) 映射
+4. ✅ **Address-based 签名**: 支持 `{"Address":"0x..."}` 参数签名
+
+### 部署环境
+
+- **本地访问**: `http://localhost:3000`
+- **公网访问**: `https://kms.aastar.io`
+- **模式**: 自动化模式 (Mode 1)
+- **启动时间**: ~45秒
+
+### 已知问题
+
+- ⚠️ HTML 测试页面返回 500 错误 (warp 静态文件路由问题)
+- ✅ 核心 API 功能全部正常
+
+---
+
+## ✅ 钱包地址自动管理系统部署成功 (2025-10-02 03:52)
+
+### 部署验证结果
+
+**本次部署完成以下验证**:
+
+1. ✅ **编译成功**: 修复所有编译错误（模块导入、类型匹配、未使用变量）
+2. ✅ **部署成功**: 新二进制文件正确部署到 `/opt/teaclave/shared/ta/`
+3. ✅ **API 启动**: Health endpoint 显示新的 `/SignHash` 端点
+4. ✅ **CreateKey 测试**: 返回 Address, PublicKey, DerivationPath
+5. ✅ **地址递增测试**: 同一钱包创建两个地址，路径正确递增
+6. ✅ **Address-based 签名**: 使用 Address 参数成功签名
+
+**测试结果**:
+```json
+// 第一个地址
+{
+  "KeyId": "48c8d60e-0134-4488-926a-5521accb9e14",
+  "Address": "0xad365342c8ee4a951251c10fff8f840cbdf1dd4e",
+  "DerivationPath": "m/44'/60'/0'/0/0"
+}
+
+// 第二个地址（同一钱包）
+{
+  "KeyId": "48c8d60e-0134-4488-926a-5521accb9e14",
+  "Address": "0xc6ba2ba8537eb5aed7a049d5e51ca7bb08279ff9",
+  "DerivationPath": "m/44'/60'/0'/0/1"  ✅ 自动递增
+}
+
+// Address-based 签名
+curl -X POST /Sign -d '{"Address":"0xad...","Message":"Hello"}'
+// ✅ 成功返回签名，无需 DerivationPath
+```
+
+### 修复的问题
+
+#### 1. 部署脚本问题 (scripts/kms-deploy.sh)
+**问题**: .ta 文件只复制到根目录，expect 脚本期望 ta/ 子目录
+
+**修复**:
+```bash
+# 添加 ta/ 子目录部署
+mkdir -p /opt/teaclave/shared/ta
+cp *.ta /opt/teaclave/shared/ta/
+```
+
+**影响**: 确保 `mount --bind ta/` 能正确挂载 TA 文件
+
+#### 2. 模块导入错误 (host/src/api_server.rs)
+**问题**: `error[E0433]: use of undeclared crate or module kms_host`
+
+**修复**:
+```rust
+// 添加正确的导入
+use kms::address_cache::{update_address_entry, lookup_address};
+
+// 移除错误的调用
+// kms_host::update_address_entry(...)  ❌
+update_address_entry(...)  ✅
+```
+
+#### 3. 类型不匹配错误 (host/src/api_server.rs)
+**问题**: `expected (Uuid, String), found (Uuid, &String)`
+
+**修复**:
+```rust
+// Line 351: contains_key 需要引用
+if !store.contains_key(&key_id.to_string()) {
+
+// Line 357: 转换为 String
+(wallet_uuid, path.to_string())  // 不是 path.clone()
+```
+
+**根本原因**: `path` 是 `&String` 类型，`.clone()` 在某些上下文中不会自动解引用
+
+#### 4. 未使用的 mut 变量 (ta/src/main.rs)
+**问题**: TA 编译时 `-D unused-mut` 导致错误
+
+**修复**:
+```rust
+// Line 153: 移除外部 mut（内部已重新声明）
+let (wallet_id, wallet, address_index) = if ...
+```
+
+### 开发流程优化
+
+**简化前** (9 步):
+1. 停止 Docker
+2. 启动 Cloudflare
+3. 清理进程
+4. 部署编译
+5. 启动 Terminal 3
+6. 启动 Terminal 2
+7. 启动 Terminal 1
+8. **手动挂载和启动 API** ❌
+9. 测试
+
+**简化后** (4 步):
+1. 清理: `./scripts/kms-cleanup.sh`
+2. 部署: `./scripts/kms-deploy.sh clean`
+3. **只启动 Terminal 2**: `./scripts/terminal2-guest-vm.sh` ⭐
+4. 测试: `curl http://localhost:3000/health`
+
+**关键发现**:
+- ✅ Terminal 2 的 expect 脚本自动完成所有挂载和启动
+- ✅ 无需手动执行步骤 8
+- ✅ Terminal 1 和 3 是可选的（仅用于调试）
+
+### 文档更新
+
+新增文档:
+1. ✅ `docs/KMS-README.md` - 文档导航和快速决策
+2. ✅ `docs/KMS-Quick-Start.md` - 快速开始指南（自动化模式 - 4步）
+3. ✅ `docs/KMS-Development-Guide-Manual.md` - 三终端手动模式（查看日志 - 9步）
+4. ✅ `docs/KMS-Development-Mode-Comparison.md` - 两种模式详细对比
+5. ✅ `docs/KMS-Development-Workflow.md` - 完整开发流程和经验总结
+
+**两种开发模式**:
+
+**模式 1: 自动化模式**（快速开发）
+- 适用场景: 日常开发、快速测试
+- 步骤: 4 步（清理 → 部署 → 启动 Terminal 2 → 测试）
+- 文档: `docs/KMS-Quick-Start.md`
+
+**模式 2: 三终端手动模式**（调试监控）
+- 适用场景: 查看实时日志、调试问题、监控 TA/CA 输出
+- 步骤: 9 步（包含三终端监控）
+- 文档: `docs/KMS-Development-Guide-Manual.md`
+- 特点:
+  - ✅ Terminal 3: 查看 Secure World (TA) 日志
+  - ✅ Terminal 2: 查看 Guest VM (CA) 日志 + 交互式 shell
+  - ✅ Terminal 1: 查看 QEMU 系统日志
+  - ✅ 步骤 8 增强: 虽然自动化，但保留手动操作说明用于调试
+
+文档内容:
+- 成功经验总结
+- 问题排查指南
+- 两种开发模式对比
+- 一键部署脚本示例
+- 常见问题解答
+- 三终端日志监控指南
+
+### 关键文件变更
+
+**新增文件**:
+- `kms/host/src/address_cache.rs` - 地址缓存模块
+
+**修改文件**:
+- `kms/proto/src/lib.rs` - 添加 DeriveAddressAuto 命令
+- `kms/proto/src/in_out.rs` - 添加 Input/Output 结构
+- `kms/ta/src/wallet.rs` - 添加计数器字段和方法
+- `kms/ta/src/main.rs` - 实现 derive_address_auto
+- `kms/host/src/lib.rs` - 导出 address_cache 模块
+- `kms/host/src/ta_client.rs` - 添加 derive_address_auto 方法
+- `kms/host/src/api_server.rs` - 重构 CreateKey 和 Sign API
+- `scripts/kms-deploy.sh` - 修复 ta 子目录部署
+
+### 下次开发
+
+**快速命令**:
+```bash
+# 修改代码后
+vim kms/host/src/api_server.rs
+
+# 一键部署测试
+./scripts/kms-cleanup.sh && \
+./scripts/kms-deploy.sh clean && \
+./scripts/terminal2-guest-vm.sh
+```
+
+**参考文档**: `docs/KMS-Quick-Start.md`
+
+---
+
+## ✅ 实现钱包地址自动管理系统 (2025-10-02 00:11)
+
+### 实现内容
+
+#### 1. TEE 层实现
+- ✅ 扩展 `Wallet` 结构体：添加 `next_address_index` 和 `next_account_index` 字段
+- ✅ 实现 `increment_address_index()` 方法：自动递增并检查限制（MAX_ADDRESSES_PER_WALLET = 100）
+- ✅ 添加 `DeriveAddressAuto` 命令：支持创建新钱包或使用已有钱包递增地址
+- ✅ 实现地址自动派生逻辑：`m/44'/60'/0'/0/{index}`
+
+**核心文件**：
+- `kms/proto/src/lib.rs`: 添加 `DeriveAddressAuto` 命令
+- `kms/proto/src/in_out.rs`: 添加 `DeriveAddressAutoInput/Output` 结构
+- `kms/ta/src/wallet.rs`: 添加计数器和限制检查方法
+- `kms/ta/src/main.rs`: 实现 `derive_address_auto()` 处理函数
+
+#### 2. Host 层实现
+- ✅ 实现 `address_cache.rs` 模块：管理 `address_map.json` 缓存
+- ✅ 添加 `TaClient::derive_address_auto()` 方法
+- ✅ 修改 `CreateKey` API：
+  - 支持可选 `KeyId` 参数（None = 新钱包，Some = 已有钱包）
+  - 自动派生地址并返回 `Address`, `PublicKey`, `DerivationPath`
+  - 更新 `address_map.json` 缓存
+- ✅ 修改 `Sign` API：
+  - 支持 `Address` 参数（优先使用）
+  - 保留 `KeyId + DerivationPath` 参数（向后兼容）
+  - 实现缓存查询和一致性验证
+
+**核心文件**：
+- `kms/host/src/address_cache.rs`: 新建，管理地址缓存
+- `kms/host/src/ta_client.rs`: 添加 `derive_address_auto()` 方法
+- `kms/host/src/api_server.rs`: 修改 `CreateKey` 和 `Sign` API
+
+#### 3. API 变化
+**CreateKey API (改进后)**:
+```json
+Request:
+{
+    "KeyId": "optional-uuid",  // 可选，不提供则创建新钱包
+    "Description": "...",
+    "KeyUsage": "SIGN_VERIFY",
+    "KeySpec": "ECC_SECG_P256K1",
+    "Origin": "AWS_KMS"
+}
+
+Response:
+{
+    "KeyMetadata": {
+        "KeyId": "uuid-xxx",
+        "Address": "0x1234...",          // ✅ 新增
+        "PublicKey": "0x04...",          // ✅ 新增
+        "DerivationPath": "m/44'/60'/0'/0/0",  // ✅ 新增
+        ...
+    }
+}
+```
+
+**Sign API (改进后)**:
+```json
+Request (新方式):
+{
+    "Address": "0x1234...",  // ✅ 优先使用
+    "Message": "base64..."
+}
+
+Request (旧方式 - 向后兼容):
+{
+    "KeyId": "uuid-xxx",
+    "DerivationPath": "m/44'/60'/0'/0/0",
+    "Message": "base64..."
+}
+```
+
+### 技术细节
+
+1. **确定性派生**：所有地址可从 `(wallet_id, entropy, next_address_index)` 重新计算
+2. **地址限制**：开发阶段限制每个钱包 100 个地址（编译时常量）
+3. **缓存机制**：`address_map.json` 存储 `address → (wallet_id, derivation_path)` 映射
+4. **一致性验证**：Sign API 查询缓存后会验证地址是否匹配，防止缓存污染
+5. **恢复能力**：缓存丢失后可通过 `kms-recovery-cli` 工具从 wallet_id 恢复
+
+### 待完成工作
+
+- [ ] 创建 `kms-recovery-cli` 工具
+  - `rebuild-cache` 命令：从 wallet_id 重建缓存
+  - `list-addresses` 命令：列出钱包所有地址
+  - `verify-cache` 命令：验证缓存一致性
+- [ ] Docker 环境编译测试
+- [ ] 端到端功能测试
+
+### 下一步
+
+用户可以在 Docker 环境中编译测试新功能：
+```bash
+# 1. 进入 Docker
+docker exec -it teaclave_dev_env bash
+
+# 2. 编译 TA
+cd /root/shared/kms
+make ta
+
+# 3. 编译 Host
+make host
+
+# 4. 部署和测试（three-terminal 模式）
+# Terminal 1: 启动 QEMU
+# Terminal 2: 启动 CA
+# Terminal 3: 测试新 API
+```
+
+---
+
+## 📋 设计讨论：钱包地址管理系统优化 (2025-10-01 23:46)
+
+### 背景
+当前 KMS 系统要求用户在每次 API 调用时都提供 `DerivationPath` 参数，使用体验复杂。讨论了自动化地址管理和简化 API 的设计方案。
+
+### 设计方案关键点
+
+1. **存储架构优化**
+   - **TEE Secure Storage**：最小化存储，仅保存 `(wallet_id, entropy, next_address_index, next_account_index)` (56字节/钱包)
+   - **确定性推导**：所有历史地址可从 entropy 重新计算，无需存储完整地址列表
+   - **反向索引**：新增 `address → (wallet_id, derivation_path)` 映射用于快速查询和恢复
+   - **Normal World 缓存**：使用 JSON 文件存储地址映射（可损坏可重建）
+
+2. **API 改进**
+   - `CreateKey`：支持自动递增 address_index，返回 Address/PublicKey/DerivationPath
+   - `Sign`：支持直接使用 `Address` 参数，隐藏 derivation_path 细节
+   - 向后兼容：保留旧参数 `KeyId + DerivationPath`
+
+3. **恢复机制**
+   - **场景 1**：Normal World 损坏 → 从 TEE address_lookup 重建缓存
+   - **场景 2**：已知 wallet_id → 根据 next_address_index 重新派生所有地址
+   - **场景 3**：仅记得地址 → 通过 TEE 反向索引查询 wallet_id
+   - **场景 4**：完全遗忘 → 列出所有钱包供用户识别
+
+4. **容量分析**
+   - 单钱包（100地址）：~5.66 KB
+   - 1000 钱包：~5.66 MB
+   - 10000 钱包：~56.6 MB
+   - 结论：OP-TEE 典型容量（16-64 MB）足够支持数千钱包
+
+5. **安全决策**
+   - 完全禁用 `ExportMnemonic` API（Mnemonic 可从 entropy 实时计算，无需导出）
+   - Normal World 缓存需验证一致性（防止缓存污染攻击）
+
+### 待确认问题
+- ✅ TEE 存储容量：确认计数器方案可完全推导所有地址
+- ✅ Mnemonic 导出：完全禁用
+- ✅ 兼容性策略：先保留旧参数
+- ✅ Normal World 缓存：开发阶段使用 JSON，后续迁移 SQLite
+
+### 文档输出
+- 创建详细设计文档：`docs/KMS-Wallet-Address-Management-Design.md`
+
+### 下一步
+- 等待用户确认设计细节后进入实现阶段
+
+---
+
+# Project Changes Log
+
 ## 🎉 完全修复端口转发和自动启动 (2025-10-01 17:28, 最终验证: 2025-10-01 17:39)
 
 ### 问题：Docker 重启后 `curl localhost:3000/health` 返回 Connection reset

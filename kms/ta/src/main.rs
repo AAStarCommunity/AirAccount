@@ -147,6 +147,53 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     Ok(proto::SignHashOutput { signature })
 }
 
+fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::DeriveAddressAutoOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+
+    let (wallet_id, wallet, address_index) = if let Some(existing_id) = input.wallet_id {
+        // Use existing wallet and increment address index
+        dbg_println!("[+] Loading existing wallet: {:?}", existing_id);
+        let mut wallet = db_client
+            .get::<Wallet>(&existing_id)
+            .map_err(|e| anyhow!("[+] Derive address auto: wallet not found: {:?}", e))?;
+
+        let index = wallet.increment_address_index()?;
+        dbg_println!("[+] Incremented address index to: {}", index);
+
+        (existing_id, wallet, index)
+    } else {
+        // Create new wallet
+        dbg_println!("[+] Creating new wallet");
+        let mut wallet = Wallet::new()?;
+        let wallet_id = wallet.get_id();
+        dbg_println!("[+] New wallet ID: {:?}", wallet_id);
+
+        // First address uses index 0, then increment for next time
+        let index = wallet.increment_address_index()?;
+        dbg_println!("[+] First address index: {}", index);
+
+        (wallet_id, wallet, index)
+    };
+
+    // Derive address with auto-incremented path
+    let derivation_path = format!("m/44'/60'/0'/0/{}", address_index);
+    dbg_println!("[+] Derivation path: {}", derivation_path);
+
+    let (address, public_key) = wallet.derive_address(&derivation_path)?;
+    dbg_println!("[+] Derived address: {:?}", address);
+
+    // Save wallet (with updated counter)
+    db_client.put(&wallet)?;
+    dbg_println!("[+] Wallet saved");
+
+    Ok(proto::DeriveAddressAutoOutput {
+        wallet_id,
+        address,
+        public_key,
+        derivation_path,
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -165,6 +212,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignTransaction => process(serialized_input, sign_transaction),
         Command::SignMessage => process(serialized_input, sign_message),
         Command::SignHash => process(serialized_input, sign_hash),
+        Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
         _ => bail!("Unsupported command"),
     }
 }

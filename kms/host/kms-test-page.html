@@ -247,15 +247,28 @@
         </div>
 
         <div class="api-grid">
-            <!-- CreateKey -->
+            <!-- CreateKey - New Wallet -->
             <div class="api-card">
                 <div class="api-title">
                     <span class="api-icon">🔑</span>
-                    CreateKey - 创建密钥
+                    CreateKey - 创建新钱包
+                    <span class="example-badge">v2.0</span>
                 </div>
-                <div class="endpoint-info">POST /CreateKey</div>
+                <div class="endpoint-info">POST /CreateKey (自动地址派生)</div>
                 <textarea id="createKeyInput" placeholder='{"Description":"test-wallet","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'></textarea>
-                <button onclick="callAPI('CreateKey', 'createKeyInput')">创建密钥</button>
+                <button onclick="callAPI('CreateKey', 'createKeyInput')">创建新钱包</button>
+            </div>
+
+            <!-- CreateKey - More Address -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">➕</span>
+                    CreateKey - 添加地址
+                    <span class="example-badge">v2.0</span>
+                </div>
+                <div class="endpoint-info">POST /CreateKey (同一钱包，新地址)</div>
+                <textarea id="createKeyMoreInput" placeholder='{"KeyId":"wallet-id-here","Description":"Second address","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'></textarea>
+                <button onclick="callAPI('CreateKey', 'createKeyMoreInput')">添加新地址</button>
             </div>
 
             <!-- DescribeKey -->
