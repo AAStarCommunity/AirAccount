@@ -16,9 +16,9 @@
 # under the License.
 
 [dependencies.std]
-path = "../../../../rust/rust/library/std"
+path = "../../rust/rust/library/std"
 
 [patch.crates-io]
-libc =  { path = "../../../../rust/libc" }
-rustc-std-workspace-core = { path = "../../../../rust/rust/library/rustc-std-workspace-core" }
-rustc-std-workspace-alloc = { path = "../../../../rust/rust/library/rustc-std-workspace-alloc" }
+libc =  { path = "../../rust/libc" }
+rustc-std-workspace-core = { path = "../../rust/rust/library/rustc-std-workspace-core" }
+rustc-std-workspace-alloc = { path = "../../rust/rust/library/rustc-std-workspace-alloc" }

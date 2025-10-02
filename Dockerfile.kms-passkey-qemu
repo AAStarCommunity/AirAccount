@@ -1,0 +1,42 @@
+# Dockerfile for KMS Passkey Feature Branch Testing
+# Based on Teaclave TrustZone SDK STD mode with OP-TEE 4.5.0
+# Completely isolated from main branch (teaclave_dev_env)
+
+FROM teaclave/teaclave-trustzone-emulator-std-optee-4.5.0-expand-memory:latest
+
+# Environment variables
+ENV TEACLAVE_TOOLCHAIN_BASE=/opt/teaclave
+ENV RUST_STD_DIR=${TEACLAVE_TOOLCHAIN_BASE}/std
+ENV KMS_BRANCH=KMS-feat-passkey
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install additional dependencies for KMS development
+RUN apt-get update && apt-get install -y \
+    socat \
+    lsof \
+    jq \
+    curl \
+    vim \
+    tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create shared directory for QEMU (KMS-specific)
+RUN mkdir -p /opt/kms_passkey/shared
+
+# Create project directories
+RUN mkdir -p /root/kms_passkey_src
+RUN mkdir -p /root/teaclave_sdk_src
+
+# Copy entrypoint script
+COPY scripts/kms-passkey-entrypoint.sh /usr/local/bin/kms-entrypoint.sh
+RUN chmod +x /usr/local/bin/kms-entrypoint.sh
+
+# Set working directory
+WORKDIR /root/kms_passkey_src
+
+# Set default shell to bash
+SHELL ["/bin/bash", "-c"]
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/kms-entrypoint.sh"]
+CMD ["/bin/bash"]

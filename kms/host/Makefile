@@ -27,7 +27,7 @@ OUT_DIR := $(CURDIR)/target/$(TARGET)/release
 all: host strip
 
 host:
-	@cargo build --target $(TARGET_HOST) --release --config $(LINKER_CFG)
+	@cargo build --target $(TARGET) --release --config $(LINKER_CFG)
 
 strip: host
 	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/$(NAME) $(OUT_DIR)/$(NAME)

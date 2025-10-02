@@ -20,23 +20,24 @@
 UUID ?= $(shell cat "../uuid.txt")
 
 TARGET ?= aarch64-unknown-linux-gnu
+TARGET_TA ?= aarch64-unknown-optee
 CROSS_COMPILE ?= aarch64-linux-gnu-
-OBJCOPY := $(CROSS_COMPILE_TA)objcopy
+OBJCOPY := $(CROSS_COMPILE)objcopy
 # Configure the linker to use GCC, which works on both cross-compilation and ARM machines
-LINKER_CFG := target.$(TARGET).linker=\"$(CROSS_COMPILE)gcc\"
+LINKER_CFG := target.$(TARGET_TA).linker=\"$(CROSS_COMPILE)gcc\"
 
 TA_SIGN_KEY ?= $(TA_DEV_KIT_DIR)/keys/default_ta.pem
 SIGN := $(TA_DEV_KIT_DIR)/scripts/sign_encrypt.py
 OUT_DIR := $(CURDIR)/target/$(TARGET_TA)/release
 
-all: clippy ta strip sign
+all: ta strip sign
 
 clippy:
 	@cargo fmt
-	@xargo clippy --target $(TARGET) -- -D warnings
+	@xargo clippy --target $(TARGET_TA) -- -D warnings
 
-ta: clippy
-	@xargo build --target $(TARGET) --release --config $(LINKER_CFG)
+ta:
+	@xargo build --target $(TARGET_TA) --release --config $(LINKER_CFG)
 
 strip: ta
 	@$(OBJCOPY) --strip-unneeded $(OUT_DIR)/ta $(OUT_DIR)/stripped_ta

@@ -17,8 +17,19 @@
 
 #![no_main]
 
+mod challenge;
 mod hash;
+mod passkey;
 mod wallet;
+
+// Register custom getrandom implementation for OP-TEE
+// Reference: https://docs.rs/getrandom/0.2.16/getrandom/macro.register_custom_getrandom.html
+fn optee_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    use optee_utee::Random;
+    Random::generate(buf);
+    Ok(())
+}
+getrandom::register_custom_getrandom!(optee_getrandom);
 
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
@@ -28,10 +39,19 @@ use proto::Command;
 use secure_db::SecureStorageClient;
 
 use anyhow::{anyhow, bail, Result};
+use challenge::ChallengeManager;
 use std::io::Write;
+use std::sync::Mutex;
 use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
+
+// Global challenge manager (initialized on first use)
+static CHALLENGE_MANAGER: Mutex<Option<ChallengeManager>> = Mutex::new(None);
+
+fn get_challenge_manager() -> &'static Mutex<Option<ChallengeManager>> {
+    &CHALLENGE_MANAGER
+}
 
 #[ta_create]
 fn create() -> optee_utee::Result<()> {
@@ -121,6 +141,83 @@ fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTr
     Ok(proto::SignTransactionOutput { signature })
 }
 
+fn test_p256_verify(input: &proto::TestP256VerifyInput) -> Result<proto::TestP256VerifyOutput> {
+    dbg_println!("[+] Testing P-256 signature verification");
+    dbg_println!("    Pubkey length: {}", input.pubkey_sec1.len());
+    dbg_println!("    Message length: {}", input.message.len());
+    dbg_println!("    Signature length: {}", input.signature_der.len());
+
+    match passkey::verify_passkey_signature(
+        &input.pubkey_sec1,
+        &input.message,
+        &input.signature_der,
+    ) {
+        Ok(_) => {
+            dbg_println!("[+] ✅ P-256 signature verification: SUCCESS");
+            Ok(proto::TestP256VerifyOutput {
+                success: true,
+                error_msg: String::new(),
+            })
+        }
+        Err(e) => {
+            let err_msg = format!("{:?}", e);
+            dbg_println!("[+] ❌ P-256 signature verification: FAILED - {}", err_msg);
+            Ok(proto::TestP256VerifyOutput {
+                success: false,
+                error_msg: err_msg,
+            })
+        }
+    }
+}
+
+fn export_private_key(
+    input: &proto::ExportPrivateKeyInput,
+) -> Result<proto::ExportPrivateKeyOutput> {
+    dbg_println!(
+        "[+] Exporting private key for wallet: {:?}",
+        input.wallet_id
+    );
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Export private key: wallet not found: {:?}", e))?;
+    dbg_println!("[+] Export private key: wallet loaded");
+
+    let private_key = wallet.derive_prv_key(&input.hd_path)?;
+    dbg_println!("[+] Export private key: derived for path {}", input.hd_path);
+
+    Ok(proto::ExportPrivateKeyOutput { private_key })
+}
+
+fn get_challenge(_input: &proto::GetChallengeInput) -> Result<proto::GetChallengeOutput> {
+    dbg_println!("[+] Generating new challenge for Passkey authentication");
+
+    // Initialize challenge manager if not already done
+    let manager_lock = get_challenge_manager();
+    let mut manager_opt = manager_lock
+        .lock()
+        .map_err(|e| anyhow!("Failed to lock challenge manager: {:?}", e))?;
+
+    if manager_opt.is_none() {
+        dbg_println!("[+] Initializing challenge manager");
+        *manager_opt = Some(ChallengeManager::new());
+    }
+
+    let manager = manager_opt.as_mut().unwrap();
+    let challenge = manager.generate_challenge()?;
+
+    dbg_println!(
+        "[+] Challenge generated: {} bytes",
+        challenge.challenge.len()
+    );
+
+    Ok(proto::GetChallengeOutput {
+        challenge: challenge.challenge.to_vec(),
+        expires_in: 180, // 3 minutes
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -137,6 +234,9 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RemoveWallet => process(serialized_input, remove_wallet),
         Command::DeriveAddress => process(serialized_input, derive_address),
         Command::SignTransaction => process(serialized_input, sign_transaction),
+        Command::TestP256Verify => process(serialized_input, test_p256_verify),
+        Command::ExportPrivateKey => process(serialized_input, export_private_key),
+        Command::GetChallenge => process(serialized_input, get_challenge),
         _ => bail!("Unsupported command"),
     }
 }
