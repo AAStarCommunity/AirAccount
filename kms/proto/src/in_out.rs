@@ -69,3 +69,39 @@ pub struct SignTransactionInput {
 pub struct SignTransactionOutput {
     pub signature: Vec<u8>,
 }
+
+// P-256 signature verification test
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TestP256VerifyInput {
+    pub pubkey_sec1: Vec<u8>,      // SEC1 encoded public key (65 bytes)
+    pub message: Vec<u8>,           // Message that was signed
+    pub signature_der: Vec<u8>,     // DER encoded signature
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TestP256VerifyOutput {
+    pub success: bool,
+    pub error_msg: String,
+}
+
+// Export private key
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyOutput {
+    pub private_key: Vec<u8>,  // 32 bytes secp256k1 private key
+}
+
+// Get Challenge for Passkey authentication
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GetChallengeInput {}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GetChallengeOutput {
+    pub challenge: Vec<u8>,    // 32 bytes random challenge
+    pub expires_in: u64,        // seconds until expiration (180 = 3 minutes)
+}

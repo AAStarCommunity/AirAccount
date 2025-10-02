@@ -33,9 +33,13 @@ path = "src/main.rs"
 name = "kms-api-server"
 path = "src/api_server.rs"
 
+[[bin]]
+name = "export_key"
+path = "src/bin/export_key.rs"
+
 [dependencies]
 proto = { path = "../proto" }
-optee-teec = { path = "../../../../optee-teec" }
+optee-teec = { path = "../../optee-teec" }
 
 # CLI dependencies
 structopt = "0.3"

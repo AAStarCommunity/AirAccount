@@ -175,6 +175,17 @@ pub struct EthereumTransaction {
     pub data: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetChallengeRequest {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetChallengeResponse {
+    #[serde(rename = "Challenge")]
+    pub challenge: String,        // 32 bytes hex-encoded
+    #[serde(rename = "ExpiresIn")]
+    pub expires_in: u64,           // seconds (180 = 3 minutes)
+}
+
 // ========================================
 // KMS API Server
 // ========================================
@@ -362,6 +373,19 @@ impl KmsApiServer {
             deletion_date,
         })
     }
+
+    pub async fn get_challenge(&self) -> Result<GetChallengeResponse> {
+        println!("📝 KMS GetChallenge API called");
+
+        // 调用 TaClient GetChallenge
+        let mut ta_client = TaClient::new()?;
+        let (challenge, expires_in) = ta_client.get_challenge()?;
+
+        Ok(GetChallengeResponse {
+            challenge: hex::encode(&challenge),
+            expires_in,
+        })
+    }
 }
 
 // ========================================
@@ -375,7 +399,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": "0.1.0",
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/DeleteKey"],
+            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey", "/GetChallenge"],
             "GET": ["/health"]
         }
     })))
@@ -467,6 +491,19 @@ async fn handle_delete_key(
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("ScheduleKeyDeletion error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_get_challenge(
+    _body: GetChallengeRequest,
+    server: Arc<KmsApiServer>
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.get_challenge().await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("GetChallenge error: {}", e);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -567,6 +604,7 @@ pub async fn start_kms_server() -> Result<()> {
     let server5 = server.clone();
     let server6 = server.clone();
     let server7 = server.clone();
+    let server8 = server.clone();
 
     // CreateKey API
     let create_key = warp::path("CreateKey")
@@ -624,6 +662,14 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
 
+    // GetChallenge API
+    let get_challenge = warp::path("GetChallenge")
+        .and(warp::post())
+        .and(warp::header::exact("x-amz-target", "TrentService.GetChallenge"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server8.clone()))
+        .and_then(handle_get_challenge);
+
     let routes = index
         .or(test_ui)
         .or(health)
@@ -634,6 +680,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign)
         .or(get_public_key)
         .or(delete_key)
+        .or(get_challenge)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server starting on http://0.0.0.0:3000");

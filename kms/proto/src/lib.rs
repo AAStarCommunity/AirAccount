@@ -28,6 +28,12 @@ pub enum Command {
     RemoveWallet,
     DeriveAddress,
     SignTransaction,
+    SignMessage,
+    SignHash,
+    DeriveAddressAuto,
+    ExportPrivateKey,
+    TestP256Verify,  // Test P-256 signature verification
+    GetChallenge,    // Generate new challenge for Passkey authentication
     #[default]
     Unknown,
 }

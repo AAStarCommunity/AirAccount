@@ -25,27 +25,37 @@ description = "An example of Ethereum wallet TA."
 edition = "2018"
 
 [dependencies]
-libc = { path = "../../../../rust/libc" }
+libc = { path = "../../rust/libc" }
 proto = { path = "../proto" }
-optee-utee-sys = { path = "../../../../optee-utee/optee-utee-sys", features = ["std"] }
-optee-utee = { path = "../../../../optee-utee", features = ["std"] }
-secure_db = { path = "../../../../crates/secure_db" }
+optee-utee-sys = { path = "../../optee-utee/optee-utee-sys", features = ["std"] }
+optee-utee = { path = "../../optee-utee", features = ["std"] }
+secure_db = { path = "../../crates/secure_db" }
 
 anyhow = "1.0"
 uuid = { version = "1.8", default-features = false }
-bip32 = { version = "0.3.0", features = ["bip39"]}
+bip32 = { version = "0.3", features = ["bip39", "secp256k1"], default-features = false }
 hex = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 sha3 = "0.10.6"
+sha2 = "0.10"
 secp256k1 = "0.27.0"
+p256 = { version = "0.10", features = ["ecdsa"] }
 ethereum-tx-sign = "6.1.3"
 bincode = "1.3.3"
+# Lock base64ct to version that doesn't require edition2024
+base64ct = "=1.6.0"
+# Add getrandom with custom feature for OP-TEE RNG
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 
 [build-dependencies]
 uuid = { version = "1.8", default-features = false }
 proto = { path = "../proto" }
-optee-utee-build = { path = "../../../../optee-utee-build" }
+optee-utee-build = { path = "../../optee-utee-build" }
 
 [profile.release]
 lto = false
 opt-level = 3
+
+# Explicitly specify signature version to resolve conflict
+# bip32 (via k256) needs signature 1.3-1.4, but p256 needs 1.5-1.6
+# We upgrade bip32's k256 dependency to be compatible with signature 1.6

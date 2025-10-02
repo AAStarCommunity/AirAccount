@@ -120,6 +120,34 @@ impl TaClient {
             .context("Failed to deserialize SignTransactionOutput")?;
         Ok(output.signature)
     }
+
+    /// Export private key for a derivation path
+    /// ⚠️ SECURITY WARNING: This exports the raw private key from TEE
+    /// Should only be used for migration or backup purposes
+    pub fn export_private_key(&mut self, wallet_id: uuid::Uuid, hd_path: &str) -> Result<Vec<u8>> {
+        let input = proto::ExportPrivateKeyInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+        };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize ExportPrivateKeyInput")?;
+        let serialized_output = self.invoke_command(proto::Command::ExportPrivateKey, &serialized_input)?;
+        let output: proto::ExportPrivateKeyOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize ExportPrivateKeyOutput")?;
+        Ok(output.private_key)
+    }
+
+    /// Get a new challenge for Passkey authentication
+    /// Returns (challenge_bytes, expires_in_seconds)
+    pub fn get_challenge(&mut self) -> Result<(Vec<u8>, u64)> {
+        let input = proto::GetChallengeInput {};
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize GetChallengeInput")?;
+        let serialized_output = self.invoke_command(proto::Command::GetChallenge, &serialized_input)?;
+        let output: proto::GetChallengeOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize GetChallengeOutput")?;
+        Ok((output.challenge, output.expires_in))
+    }
 }
 
 /// Convenience functions for one-off calls (creates new client each time)
