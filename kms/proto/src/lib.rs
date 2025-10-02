@@ -34,6 +34,8 @@ pub enum Command {
     ExportPrivateKey,
     TestP256Verify,  // Test P-256 signature verification
     GetChallenge,    // Generate new challenge for Passkey authentication
+    SetPasskeyPubkey,  // Configure Passkey public key for a wallet
+    SetPasskeyEnabled, // Enable/disable Passkey authentication
     #[default]
     Unknown,
 }

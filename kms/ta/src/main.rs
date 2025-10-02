@@ -218,6 +218,120 @@ fn get_challenge(_input: &proto::GetChallengeInput) -> Result<proto::GetChalleng
     })
 }
 
+fn set_passkey_pubkey(input: &proto::SetPasskeyPubkeyInput) -> Result<proto::SetPasskeyPubkeyOutput> {
+    dbg_println!("[+] Setting passkey pubkey for wallet: {:?}", input.wallet_id);
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let mut wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Set passkey pubkey: error: wallet not found: {:?}", e))?;
+
+    dbg_println!("[+] Wallet loaded, setting passkey public key");
+    wallet.set_passkey_pubkey(input.passkey_pubkey.clone())?;
+
+    // Save updated wallet
+    db_client.put(&wallet)?;
+    dbg_println!("[+] Passkey public key configured and saved");
+
+    Ok(proto::SetPasskeyPubkeyOutput { success: true })
+}
+
+fn set_passkey_enabled(input: &proto::SetPasskeyEnabledInput) -> Result<proto::SetPasskeyEnabledOutput> {
+    dbg_println!(
+        "[+] Setting passkey enabled={} for wallet: {:?}",
+        input.enabled,
+        input.wallet_id
+    );
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let mut wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Set passkey enabled: error: wallet not found: {:?}", e))?;
+
+    dbg_println!("[+] Wallet loaded, setting passkey enabled");
+    wallet.set_passkey_enabled(input.enabled)?;
+
+    // Save updated wallet
+    db_client.put(&wallet)?;
+    dbg_println!("[+] Passkey enabled status updated and saved");
+
+    Ok(proto::SetPasskeyEnabledOutput { success: true })
+}
+
+fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
+    use crate::passkey::verify_passkey_signature;
+
+    dbg_println!("[+] Sign hash for wallet: {:?}", input.wallet_id);
+
+    // Load wallet
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Sign hash: error: wallet not found: {:?}", e))?;
+
+    dbg_println!("[+] Wallet loaded, passkey_enabled={}", wallet.is_passkey_enabled());
+
+    // If passkey is enabled, verify passkey signature
+    if wallet.is_passkey_enabled() {
+        dbg_println!("[+] Passkey authentication required");
+
+        let passkey_sig = input
+            .passkey_signature
+            .as_ref()
+            .ok_or_else(|| anyhow!("Passkey signature required but not provided"))?;
+
+        let passkey_pubkey = wallet
+            .get_passkey_pubkey()
+            .ok_or_else(|| anyhow!("Passkey public key not configured"))?;
+
+        // Verify challenge with challenge manager
+        let mut manager_guard = get_challenge_manager()
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock challenge manager: {:?}", e))?;
+
+        let manager = manager_guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("Challenge manager not initialized"))?;
+
+        // Convert challenge bytes to [u8; 32]
+        if passkey_sig.challenge.len() != 32 {
+            return Err(anyhow!(
+                "Invalid challenge length: expected 32, got {}",
+                passkey_sig.challenge.len()
+            ));
+        }
+        let mut challenge_array = [0u8; 32];
+        challenge_array.copy_from_slice(&passkey_sig.challenge);
+
+        manager.verify_and_consume(&challenge_array)?;
+        dbg_println!("[+] Challenge verified and consumed");
+
+        // Verify Passkey signature
+        verify_passkey_signature(
+            passkey_pubkey,
+            &passkey_sig.challenge,
+            &passkey_sig.signature_der,
+        )?;
+        dbg_println!("[+] Passkey signature verified successfully");
+    }
+
+    // Convert hash to [u8; 32]
+    if input.hash.len() != 32 {
+        return Err(anyhow!(
+            "Invalid hash length: expected 32, got {}",
+            input.hash.len()
+        ));
+    }
+    let mut hash_array = [0u8; 32];
+    hash_array.copy_from_slice(&input.hash);
+
+    // Sign the hash with secp256k1
+    let signature = wallet.sign_hash(&input.hd_path, &hash_array)?;
+    dbg_println!("[+] Hash signed successfully: {} bytes", signature.len());
+
+    Ok(proto::SignHashOutput { signature })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -234,9 +348,12 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RemoveWallet => process(serialized_input, remove_wallet),
         Command::DeriveAddress => process(serialized_input, derive_address),
         Command::SignTransaction => process(serialized_input, sign_transaction),
+        Command::SignHash => process(serialized_input, sign_hash),
         Command::TestP256Verify => process(serialized_input, test_p256_verify),
         Command::ExportPrivateKey => process(serialized_input, export_private_key),
         Command::GetChallenge => process(serialized_input, get_challenge),
+        Command::SetPasskeyPubkey => process(serialized_input, set_passkey_pubkey),
+        Command::SetPasskeyEnabled => process(serialized_input, set_passkey_enabled),
         _ => bail!("Unsupported command"),
     }
 }
