@@ -31,6 +31,13 @@ use secure_db::Storable;
 pub struct Wallet {
     id: Uuid,
     entropy: Vec<u8>,
+    /// Passkey P-256 public key (SEC1 uncompressed format: 65 bytes)
+    /// None means passkey is not configured for this wallet
+    #[serde(default)]
+    passkey_pubkey: Option<Vec<u8>>,
+    /// Whether passkey authentication is enabled for critical operations
+    #[serde(default)]
+    passkey_enabled: bool,
 }
 
 impl Storable for Wallet {
@@ -55,7 +62,12 @@ impl Wallet {
         )
         .into_uuid();
 
-        Ok(Self { id: uuid, entropy })
+        Ok(Self {
+            id: uuid,
+            entropy,
+            passkey_pubkey: None,
+            passkey_enabled: false,
+        })
     }
 
     pub fn get_id(&self) -> Uuid {
@@ -123,6 +135,97 @@ impl Wallet {
         let signature = legacy_transaction.sign(&ecdsa);
         Ok(signature)
     }
+
+    /// Sign a raw hash using secp256k1
+    ///
+    /// # Arguments
+    /// * `hd_path` - HD derivation path (e.g., "m/44'/60'/0'/0/0")
+    /// * `hash` - 32-byte hash to sign
+    ///
+    /// # Returns
+    /// 65-byte signature (r + s + v)
+    pub fn sign_hash(&self, hd_path: &str, hash: &[u8; 32]) -> Result<Vec<u8>> {
+        use secp256k1::{ecdsa::RecoverableSignature, Message, Secp256k1, SecretKey};
+
+        if hash.len() != 32 {
+            return Err(anyhow!("Hash must be exactly 32 bytes"));
+        }
+
+        // Derive private key
+        let xprv_bytes = self.derive_prv_key(hd_path)?;
+        let secret_key = SecretKey::from_slice(&xprv_bytes[..32])?;
+
+        // Sign the hash
+        let secp = Secp256k1::new();
+        // In secp256k1 0.27, Message::from_slice expects exactly 32 bytes
+        let message = Message::from_slice(hash)
+            .map_err(|e| anyhow!("Failed to create message from hash: {:?}", e))?;
+        let sig: RecoverableSignature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+        let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+        // Combine signature + recovery_id into 65 bytes
+        let mut signature = Vec::with_capacity(65);
+        signature.extend_from_slice(&sig_bytes);
+        signature.push(recovery_id.to_i32() as u8);
+
+        Ok(signature)
+    }
+
+    // ===== Passkey-related methods =====
+
+    /// Configure passkey public key for this wallet
+    ///
+    /// # Arguments
+    /// * `pubkey_sec1` - P-256 public key in SEC1 uncompressed format (65 bytes: 0x04 + x + y)
+    ///
+    /// # Security
+    /// This permanently associates a passkey with this wallet.
+    /// Once set, passkey verification can be enabled for critical operations.
+    pub fn set_passkey_pubkey(&mut self, pubkey_sec1: Vec<u8>) -> Result<()> {
+        if pubkey_sec1.len() != 65 {
+            return Err(anyhow!(
+                "Invalid passkey public key length: expected 65 bytes, got {}",
+                pubkey_sec1.len()
+            ));
+        }
+        if pubkey_sec1[0] != 0x04 {
+            return Err(anyhow!(
+                "Invalid passkey public key format: must be uncompressed (start with 0x04)"
+            ));
+        }
+
+        self.passkey_pubkey = Some(pubkey_sec1);
+        Ok(())
+    }
+
+    /// Get the configured passkey public key
+    pub fn get_passkey_pubkey(&self) -> Option<&[u8]> {
+        self.passkey_pubkey.as_deref()
+    }
+
+    /// Enable or disable passkey authentication
+    ///
+    /// # Errors
+    /// Returns error if trying to enable passkey when no public key is configured
+    pub fn set_passkey_enabled(&mut self, enabled: bool) -> Result<()> {
+        if enabled && self.passkey_pubkey.is_none() {
+            return Err(anyhow!(
+                "Cannot enable passkey: no passkey public key configured"
+            ));
+        }
+        self.passkey_enabled = enabled;
+        Ok(())
+    }
+
+    /// Check if passkey authentication is enabled
+    pub fn is_passkey_enabled(&self) -> bool {
+        self.passkey_enabled
+    }
+
+    /// Check if passkey is configured (has public key)
+    pub fn has_passkey(&self) -> bool {
+        self.passkey_pubkey.is_some()
+    }
 }
 
 impl TryFrom<Wallet> for Vec<u8> {
@@ -143,6 +246,10 @@ impl TryFrom<Vec<u8>> for Wallet {
 
 impl Drop for Wallet {
     fn drop(&mut self) {
+        // Zero out sensitive data
         self.entropy.iter_mut().for_each(|x| *x = 0);
+        if let Some(ref mut pubkey) = self.passkey_pubkey {
+            pubkey.iter_mut().for_each(|x| *x = 0);
+        }
     }
 }

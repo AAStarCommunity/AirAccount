@@ -105,3 +105,48 @@ pub struct GetChallengeOutput {
     pub challenge: Vec<u8>,    // 32 bytes random challenge
     pub expires_in: u64,        // seconds until expiration (180 = 3 minutes)
 }
+
+// Set Passkey Public Key
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SetPasskeyPubkeyInput {
+    pub wallet_id: Uuid,
+    pub passkey_pubkey: Vec<u8>,  // SEC1 uncompressed P-256 public key (65 bytes)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SetPasskeyPubkeyOutput {
+    pub success: bool,
+}
+
+// Enable/Disable Passkey Authentication
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SetPasskeyEnabledInput {
+    pub wallet_id: Uuid,
+    pub enabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SetPasskeyEnabledOutput {
+    pub success: bool,
+}
+
+// Sign Hash with optional Passkey verification
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub hash: Vec<u8>,  // 32 bytes hash to sign
+    /// Optional Passkey authentication (required if passkey_enabled = true)
+    pub passkey_signature: Option<PasskeySignature>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PasskeySignature {
+    pub challenge: Vec<u8>,      // 32 bytes challenge from GetChallenge
+    pub signature_der: Vec<u8>,  // DER encoded P-256 signature
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashOutput {
+    pub signature: Vec<u8>,  // secp256k1 signature (65 bytes: r + s + v)
+}

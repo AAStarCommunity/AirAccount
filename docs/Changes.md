@@ -2237,3 +2237,38 @@ curl https://kms.aastar.io/health
 
 ---
 
+
+## 🎯 Passkey 完整功能实现 (Phase 6-8) (2025-10-02 15:12)
+
+✅ **完成 Passkey 身份验证与 HD Wallet 签名的完整集成**
+
+### Phase 6: Wallet 结构升级
+- 添加 passkey_pubkey (Option<Vec<u8>>) 和 passkey_enabled (bool)
+- 实现 6 个 Passkey 配置 API
+- 向后兼容 + 安全清零
+
+### Phase 7: Passkey 配置命令
+- SetPasskeyPubkey: 配置 P-256 公钥
+- SetPasskeyEnabled: 启用/禁用验证
+- 钱包状态持久化到 SecureDB
+
+### Phase 8: SignHash with Passkey 验证
+**完整验证流程**:
+1. 加载 Wallet
+2. if passkey_enabled: 验证 Challenge + P-256 签名
+3. 使用 secp256k1 签名 hash
+4. 返回 65 字节签名
+
+**双曲线架构**:
+- P-256 (r1): Passkey 身份验证层
+- secp256k1 (k1): Ethereum 区块链签名层
+
+### 编译状态
+✅ proto + ta 编译成功 (662KB)  
+✅ 依赖: bip32=0.3, p256=0.10, signature=1.4.0
+
+### 代码统计
+4 文件修改, +272 行, +3 TA 命令, +6 输入输出结构
+
+---
+
