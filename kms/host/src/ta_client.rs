@@ -222,6 +222,25 @@ pub fn sign_transaction(
     client.sign_transaction(wallet_id, hd_path, transaction)
 }
 
+impl TaClient {
+    /// Export private key for a given wallet and derivation path
+    /// WARNING: This should only be used for debugging/verification purposes
+    pub fn export_private_key(&mut self, wallet_id: uuid::Uuid, derivation_path: &str) -> Result<Vec<u8>> {
+        let input = proto::ExportPrivateKeyInput {
+            wallet_id,
+            derivation_path: derivation_path.to_string(),
+        };
+
+        let serialized_input = bincode::serialize(&input)?;
+        let output_bytes = self.invoke_command(proto::Command::ExportPrivateKey, &serialized_input)?;
+
+        let output: proto::ExportPrivateKeyOutput = bincode::deserialize(&output_bytes)
+            .with_context(|| "Failed to deserialize ExportPrivateKeyOutput")?;
+
+        Ok(output.private_key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

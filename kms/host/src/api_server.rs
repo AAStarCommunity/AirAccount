@@ -149,10 +149,12 @@ pub struct SignResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignHashRequest {
-    #[serde(rename = "KeyId")]
-    pub key_id: String,
-    #[serde(rename = "DerivationPath")]
-    pub derivation_path: String,
+    #[serde(rename = "KeyId", skip_serializing_if = "Option::is_none", default)]
+    pub key_id: Option<String>,
+    #[serde(rename = "Address", skip_serializing_if = "Option::is_none", default)]
+    pub address: Option<String>,
+    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none", default)]
+    pub derivation_path: Option<String>,
     #[serde(rename = "Hash")]
     pub hash: String,
     #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
@@ -424,16 +426,32 @@ impl KmsApiServer {
     }
 
     pub async fn sign_hash(&self, req: SignHashRequest) -> Result<SignHashResponse> {
-        println!("📝 KMS SignHash API called for key: {}", req.key_id);
+        // 支持两种方式: KeyId + DerivationPath 或 Address
+        let (wallet_uuid, derivation_path) = if let Some(address) = &req.address {
+            println!("📝 KMS SignHash API called with Address: {}", address);
 
-        // 验证密钥存在
-        let store = self.metadata_store.read().await;
-        if !store.contains_key(&req.key_id) {
-            return Err(anyhow!("Key not found: {}", req.key_id));
-        }
-        drop(store); // 释放读锁
+            // 从缓存查找 Address → (wallet_id, path)
+            let metadata = lookup_address(address)?
+                .ok_or_else(|| anyhow!("Address not found in cache: {}", address))?;
 
-        let wallet_uuid = Uuid::parse_str(&req.key_id)?;
+            (metadata.wallet_id, metadata.derivation_path)
+        } else if let Some(key_id) = &req.key_id {
+            println!("📝 KMS SignHash API called with KeyId: {}", key_id);
+
+            let derivation_path = req.derivation_path
+                .ok_or_else(|| anyhow!("DerivationPath is required when using KeyId"))?;
+
+            // 验证密钥存在
+            let store = self.metadata_store.read().await;
+            if !store.contains_key(key_id) {
+                return Err(anyhow!("Key not found: {}", key_id));
+            }
+            drop(store);
+
+            (Uuid::parse_str(key_id)?, derivation_path)
+        } else {
+            return Err(anyhow!("Either KeyId or Address must be provided"));
+        };
 
         // Decode hash (must be exactly 32 bytes)
         let hash_bytes = if req.hash.starts_with("0x") {
@@ -453,7 +471,7 @@ impl KmsApiServer {
         let mut ta_client = TaClient::new()?;
         let signature = ta_client.sign_hash(
             wallet_uuid,
-            &req.derivation_path,
+            &derivation_path,
             &hash_array,
         )?;
 

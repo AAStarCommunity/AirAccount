@@ -194,6 +194,22 @@ fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::D
     })
 }
 
+fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::ExportPrivateKeyOutput> {
+    dbg_println!("[+] Export private key for wallet: {:?}, path: {}", input.wallet_id, input.derivation_path);
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Export private key: wallet not found: {:?}", e))?;
+
+    let private_key = wallet.export_private_key(&input.derivation_path)?;
+    dbg_println!("[+] Private key exported (length: {} bytes)", private_key.len());
+
+    Ok(proto::ExportPrivateKeyOutput {
+        private_key,
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -213,6 +229,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignMessage => process(serialized_input, sign_message),
         Command::SignHash => process(serialized_input, sign_hash),
         Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
+        Command::ExportPrivateKey => process(serialized_input, export_private_key),
         _ => bail!("Unsupported command"),
     }
 }

@@ -197,6 +197,14 @@ impl Wallet {
 
         Ok(signature)
     }
+
+    /// Export private key for a given derivation path
+    /// WARNING: This should only be used for debugging/verification purposes
+    pub fn export_private_key(&self, hd_path: &str) -> Result<Vec<u8>> {
+        let xprv = self.derive_prv_key(hd_path)?;
+        // Return the 32-byte private key
+        Ok(xprv[..32].to_vec())
+    }
 }
 
 impl TryFrom<Wallet> for Vec<u8> {
