@@ -2,6 +2,66 @@
 
 ---
 
+## ✨ SignHash API 增强 - 支持 KeyId-only 模式 (2025-10-16 16:05)
+
+### 功能更新
+
+**SignHash API 现在支持三种调用模式**:
+
+1. **Address 模式** (优先级最高)
+   ```json
+   {
+     "Address": "0x35cfbc5170465721118b4798fd7ef25055ebe6e7",
+     "Hash": "0x1234...cdef"
+   }
+   ```
+   从 address_cache 自动查找 wallet_id 和 derivation_path
+
+2. **KeyId + DerivationPath 模式** (向后兼容)
+   ```json
+   {
+     "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+     "DerivationPath": "m/44'/60'/0'/0/0",
+     "Hash": "0x1234...cdef"
+   }
+   ```
+   手动指定派生路径
+
+3. **KeyId only 模式** (新增)
+   ```json
+   {
+     "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+     "Hash": "0x1234...cdef"
+   }
+   ```
+   自动从 metadata_store 读取默认派生路径
+
+### 设计原理
+
+- **符合 v2.0 架构**: CreateKey 自动返回 Address,用户无需管理 DerivationPath
+- **向后兼容**: 仍支持手动指定 DerivationPath 的旧调用方式
+- **简化调用**: KeyId-only 模式让 API 调用更简单
+
+### 实现细节
+
+```rust
+// kms/host/src/api_server.rs:428-459
+// 从 metadata_store 读取默认路径
+let store = self.metadata_store.read().await;
+let metadata = store.get(key_id)?;
+
+let derivation_path = req.derivation_path
+    .or_else(|| metadata.derivation_path.clone())
+    .ok_or_else(|| anyhow!("No derivation path available"))?;
+```
+
+### 提交信息
+
+- Commit: `3d5a66a`
+- 文件: `kms/host/src/api_server.rs`
+
+---
+
 ## 🎨 KMS 测试页面更新 (2025-10-16 14:37)
 
 ### 更新内容
