@@ -2,6 +2,47 @@
 
 ---
 
+## 🎨 KMS 测试页面更新 (2025-10-16 14:37)
+
+### 更新内容
+
+**新增 API 测试界面**:
+1. ✅ **SignHash API** - 直接签名 32 字节哈希
+   - KeyId + DerivationPath 模式
+   - Address 模式(通过地址查询)
+2. ✅ **Sign API 增强** - 拆分为三种模式
+   - 消息签名模式 (Message)
+   - 交易签名模式 (Transaction)
+   - 地址签名模式 (Address)
+
+**测试钱包信息展示**:
+```
+1. dev-wallet-1 (0x35cfbc5170465721118b4798fd7ef25055ebe6e7)
+   KeyId: 862ae409-843f-456a-83c8-ebd8f884d1e1
+   Private: 0x29fec7da916c64ef96ea140f3baec501572f213c304f610875a11fba9affd268
+
+2. dev-wallet-2 (0x54ff96c162441cf489598dc6e42da52fea3da3d4)
+   KeyId: 38f39e59-f2da-4007-a197-a7eeed3352bf
+   Private: 0xb186a6cb03115860a62313809f892f4336b26e7888d75e799f34d61e5a9be4ad
+
+3. dev-wallet-3 (0x4cb9b4bce794d00b3035d9700a9a5c3e089d4cbe)
+   KeyId: c4a501d2-2075-488d-98f1-b7c6dfb37ff3
+   Private: 0x0b9e79cbc0353ac69235d19d9fced53ce288ae45e8a9e81cac4fb7b5c6b30ad5
+```
+
+### 测试页面访问
+
+- **本地**: http://localhost:3000/test
+- **公网**: https://kms.aastar.io/test
+
+### 部署
+
+```bash
+./scripts/kms-deploy.sh  # 自动同步并部署测试页面到 QEMU
+```
+
+---
+
 ## 🚀 KMS v2.0 生产环境部署成功 (2025-10-02 11:14)
 
 ### 部署概况
