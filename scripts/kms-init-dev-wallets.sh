@@ -60,11 +60,11 @@ for i in "${!DEV_MNEMONICS[@]}"; do
 
     echo -e "${BLUE}[$((i + 1))/${#DEV_MNEMONICS[@]}] 创建: $NAME${NC}"
 
-    # 创建钱包
+    # 创建钱包（AWS KMS 兼容格式）
     RESULT=$(curl -s -X POST http://localhost:3000/CreateKey \
       -H "Content-Type: application/json" \
       -H "x-amz-target: TrentService.CreateKey" \
-      -d "{\"Mnemonic\":\"$MNEMONIC\"}")
+      -d "{\"Mnemonic\":\"$MNEMONIC\",\"Description\":\"$NAME\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\"}")
 
     WALLET_ID=$(echo "$RESULT" | jq -r '.KeyMetadata.KeyId // empty')
 
