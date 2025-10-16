@@ -375,6 +375,18 @@
                 <button onclick="callAPI('SignHash', 'signHashInput')">签名哈希</button>
             </div>
 
+            <!-- SignHash - KeyId Only Mode -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">⚡</span>
+                    SignHash - KeyId 简化模式
+                    <span class="example-badge">v2.0 NEW</span>
+                </div>
+                <div class="endpoint-info">POST /SignHash (KeyId-only, 自动路径)</div>
+                <textarea id="signHashKeyIdOnlyInput" placeholder='{"KeyId":"862ae409-843f-456a-83c8-ebd8f884d1e1","Hash":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'></textarea>
+                <button onclick="callAPI('SignHash', 'signHashKeyIdOnlyInput')">KeyId 简化签名</button>
+            </div>
+
             <!-- SignHash - Address Mode -->
             <div class="api-card">
                 <div class="api-title">
@@ -463,6 +475,11 @@
             document.getElementById('signHashInput').value = JSON.stringify({
                 "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
                 "DerivationPath": "m/44'/60'/0'/0/0",
+                "Hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            }, null, 2);
+
+            document.getElementById('signHashKeyIdOnlyInput').value = JSON.stringify({
+                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
                 "Hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             }, null, 2);
 
@@ -559,7 +576,8 @@
                     'Sign': inputId === 'signMessageInput' ? '签名消息' :
                             inputId === 'signTxInput' ? '签名交易' :
                             inputId === 'signAddressInput' ? '地址签名' : '数字签名',
-                    'SignHash': inputId === 'signHashAddressInput' ? '地址哈希签名' : '签名哈希',
+                    'SignHash': inputId === 'signHashKeyIdOnlyInput' ? 'KeyId 简化签名' :
+                                inputId === 'signHashAddressInput' ? '地址哈希签名' : '签名哈希',
                     'DeleteKey': '删除密钥'
                 };
                 button.textContent = buttonTexts[endpoint];
