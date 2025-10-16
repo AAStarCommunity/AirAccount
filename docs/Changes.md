@@ -2564,3 +2564,33 @@ sleep 15
 
 ---
 
+
+### 增强：Terminal 1 自动初始化测试钱包
+
+**修改**: `scripts/kms-qemu-terminal1.sh`
+
+现在 Terminal 1 启动后会：
+1. ✅ 启动 QEMU（后台运行）
+2. ✅ 等待 API Server 就绪（最多 30 秒）
+3. ✅ 自动初始化 3 个固定测试钱包
+4. ✅ 显示完成状态
+
+**使用方式**（三终端模式）:
+```bash
+# Terminal 3
+./scripts/kms-qemu-terminal3.sh
+
+# Terminal 2
+./scripts/kms-qemu-terminal2-enhanced.sh
+
+# Terminal 1（自动初始化钱包）
+./scripts/kms-qemu-terminal1.sh
+```
+
+**优势**:
+- 不再需要单独运行 `kms-init-dev-wallets.sh`
+- 三终端模式也能自动获得固定测试钱包
+- 重启后钱包自动恢复（地址不变）
+
+---
+
