@@ -426,7 +426,10 @@ impl KmsApiServer {
     }
 
     pub async fn sign_hash(&self, req: SignHashRequest) -> Result<SignHashResponse> {
-        // 支持两种方式: KeyId + DerivationPath 或 Address
+        // 支持三种方式:
+        // 1. Address (优先级最高,从缓存查找)
+        // 2. KeyId + DerivationPath (手动指定路径)
+        // 3. KeyId only (自动使用默认路径)
         let (wallet_uuid, derivation_path) = if let Some(address) = &req.address {
             println!("📝 KMS SignHash API called with Address: {}", address);
 
@@ -438,14 +441,16 @@ impl KmsApiServer {
         } else if let Some(key_id) = &req.key_id {
             println!("📝 KMS SignHash API called with KeyId: {}", key_id);
 
-            let derivation_path = req.derivation_path
-                .ok_or_else(|| anyhow!("DerivationPath is required when using KeyId"))?;
-
-            // 验证密钥存在
+            // 读取 metadata_store 获取默认路径
             let store = self.metadata_store.read().await;
-            if !store.contains_key(key_id) {
-                return Err(anyhow!("Key not found: {}", key_id));
-            }
+            let metadata = store.get(key_id)
+                .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+
+            // 使用提供的路径,或者使用默认路径
+            let derivation_path = req.derivation_path
+                .or_else(|| metadata.derivation_path.clone())
+                .ok_or_else(|| anyhow!("No derivation path available for this key"))?;
+
             drop(store);
 
             (Uuid::parse_str(key_id)?, derivation_path)
