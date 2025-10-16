@@ -2809,3 +2809,39 @@ sleep 15
 
 ---
 
+
+## 2025-10-16 16:37 - KMS v2.1 钱包自动备份系统与可靠部署脚本
+
+### 新增功能
+- ✅ **自动备份系统**: 钱包创建时自动将助记词备份到共享目录
+- ✅ **kms-deploy-clean.sh**: 新增可靠的清理部署脚本，解决交叉编译问题
+- ✅ **备份文件格式 v2.0**: JSON 格式包含 wallet_id, address, mnemonic, derivation_path, backup_time
+
+### 技术改进
+- 🔧 修复 Rust 交叉编译环境配置（CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER）
+- 🔧 正确设置 CC/CXX 环境变量用于 aarch64 交叉编译
+- 🔧 清理增量编译缓存避免缓存导致的部署问题
+- 🔧 使用 `--bin` 参数代替 `-p` 编译特定二进制文件
+
+### 备份位置
+- **Guest VM**: `/root/shared/kms-wallets-backup/`
+- **Docker Host**: `/opt/teaclave/shared/kms-wallets-backup/`
+
+### 部署命令
+```bash
+# 标准部署（增量编译）
+./scripts/kms-deploy-clean.sh
+
+# 完全重新编译（清理所有缓存）
+./scripts/kms-deploy-clean.sh --force
+```
+
+### 已知限制
+- ⚠️ **恢复功能待实现**: 需要修改 TA 代码支持从助记词创建钱包
+- ⚠️ **不使用 --restart-docker**: Docker 重启会导致 rustup 二进制文件损坏
+
+### Git 信息
+- **Commit**: a357e57
+- **Tag**: v2.1-wallet-backup
+- **Branch**: KMS
+
