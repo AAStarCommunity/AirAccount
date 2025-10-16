@@ -95,7 +95,7 @@ for i in $(seq 0 $((WALLET_COUNT - 1))); do
             RESULT=$(curl -s -X POST http://localhost:3000/CreateKey \
               -H "Content-Type: application/json" \
               -H "x-amz-target: TrentService.CreateKey" \
-              -d "{\"Mnemonic\":\"$MNEMONIC\"}")
+              -d "{\"Mnemonic\":\"$MNEMONIC\",\"Description\":\"Restored wallet $WALLET_ID\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\"}")
 
             NEW_ID=$(echo "$RESULT" | jq -r '.KeyMetadata.KeyId // empty')
 
