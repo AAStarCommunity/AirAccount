@@ -2594,3 +2594,42 @@ sleep 15
 
 ---
 
+
+### 改进：三终端启动流程优化
+
+**修改文件**:
+- `scripts/kms-qemu-terminal1.sh` - 恢复为简单版本（不自动初始化钱包）
+- `scripts/kms-qemu-terminal2.sh` - 增强版，自动初始化测试钱包
+
+**新的三终端启动流程**:
+
+```bash
+# Terminal 3: Secure World 日志
+./scripts/kms-qemu-terminal3.sh
+
+# Terminal 2: Guest VM + 自动初始化钱包（增强版）
+./scripts/kms-qemu-terminal2.sh
+# 会自动：
+# 1. 启动 Guest VM 监听器
+# 2. 等待 API Server 启动（最多 60 秒）
+# 3. 自动创建 3 个固定测试钱包
+# 4. 显示测试命令
+
+# Terminal 1: QEMU
+./scripts/kms-qemu-terminal1.sh
+```
+
+**优势**:
+- ✅ Terminal 2 自动初始化钱包（因为它启动 API Server）
+- ✅ Terminal 1 保持简单（只启动 QEMU）
+- ✅ 逻辑更清晰：谁启动 API，谁负责初始化钱包
+- ✅ 重启后钱包自动恢复
+
+**对比**:
+| 启动方式 | 钱包初始化 | 日志查看 | 复杂度 |
+|---------|-----------|---------|--------|
+| `kms-auto-start-with-wallets.sh` | ✅ 自动 | ❌ 无 TA 日志 | 简单 |
+| Terminal 3→2→1 | ✅ 自动（T2） | ✅ CA+TA | 中等 |
+
+---
+
