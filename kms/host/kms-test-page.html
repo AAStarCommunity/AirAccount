@@ -246,30 +246,6 @@
             <span id="statusText">正在检查连接...</span>
         </div>
 
-        <div style="background: #f8f9fa; border-radius: 10px; padding: 20px; margin-bottom: 30px; border-left: 4px solid #667eea;">
-            <h3 style="margin: 0 0 15px 0; color: #2d3748; font-size: 1.1em;">📝 测试钱包信息</h3>
-            <div style="font-family: 'Consolas', 'Monaco', monospace; font-size: 0.85em; line-height: 1.8;">
-                <div style="margin-bottom: 10px;">
-                    <strong>1. dev-wallet-1</strong> (0x35cfbc5170465721118b4798fd7ef25055ebe6e7)<br>
-                    <span style="color: #64748b;">KeyId: 862ae409-843f-456a-83c8-ebd8f884d1e1</span><br>
-                    <span style="color: #64748b; word-break: break-all;">Private: 0x29fec7da916c64ef96ea140f3baec501572f213c304f610875a11fba9affd268</span>
-                </div>
-                <div style="margin-bottom: 10px;">
-                    <strong>2. dev-wallet-2</strong> (0x54ff96c162441cf489598dc6e42da52fea3da3d4)<br>
-                    <span style="color: #64748b;">KeyId: 38f39e59-f2da-4007-a197-a7eeed3352bf</span><br>
-                    <span style="color: #64748b; word-break: break-all;">Private: 0xb186a6cb03115860a62313809f892f4336b26e7888d75e799f34d61e5a9be4ad</span>
-                </div>
-                <div style="margin-bottom: 10px;">
-                    <strong>3. dev-wallet-3</strong> (0x4cb9b4bce794d00b3035d9700a9a5c3e089d4cbe)<br>
-                    <span style="color: #64748b;">KeyId: c4a501d2-2075-488d-98f1-b7c6dfb37ff3</span><br>
-                    <span style="color: #64748b; word-break: break-all;">Private: 0x0b9e79cbc0353ac69235d19d9fced53ce288ae45e8a9e81cac4fb7b5c6b30ad5</span>
-                </div>
-                <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 6px; color: #856404;">
-                    ⚠️ <strong>仅用于开发测试！</strong> 这些是固定的测试钱包,私钥已公开,切勿用于生产环境。
-                </div>
-            </div>
-        </div>
-
         <div class="api-grid">
             <!-- CreateKey - New Wallet -->
             <div class="api-card">
@@ -359,7 +335,7 @@
                     <span class="example-badge">v2.0</span>
                 </div>
                 <div class="endpoint-info">POST /Sign (通过地址)</div>
-                <textarea id="signAddressInput" placeholder='{"Address":"0x35cfbc5170465721118b4798fd7ef25055ebe6e7","Message":"0x68656c6c6f"}'></textarea>
+                <textarea id="signAddressInput" placeholder='{"Address":"0xYourAddressHere","Message":"0x68656c6c6f"}'></textarea>
                 <button onclick="callAPI('Sign', 'signAddressInput')">地址签名</button>
             </div>
 
@@ -383,7 +359,7 @@
                     <span class="example-badge">v2.0 NEW</span>
                 </div>
                 <div class="endpoint-info">POST /SignHash (KeyId-only, 自动路径)</div>
-                <textarea id="signHashKeyIdOnlyInput" placeholder='{"KeyId":"862ae409-843f-456a-83c8-ebd8f884d1e1","Hash":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'></textarea>
+                <textarea id="signHashKeyIdOnlyInput" placeholder='{"KeyId":"your-wallet-id-here","Hash":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'></textarea>
                 <button onclick="callAPI('SignHash', 'signHashKeyIdOnlyInput')">KeyId 简化签名</button>
             </div>
 
@@ -395,7 +371,7 @@
                     <span class="example-badge">v2.0</span>
                 </div>
                 <div class="endpoint-info">POST /SignHash (通过地址)</div>
-                <textarea id="signHashAddressInput" placeholder='{"Address":"0x35cfbc5170465721118b4798fd7ef25055ebe6e7","Hash":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'></textarea>
+                <textarea id="signHashAddressInput" placeholder='{"Address":"0xYourAddressHere","Hash":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'></textarea>
                 <button onclick="callAPI('SignHash', 'signHashAddressInput')">地址哈希签名</button>
             </div>
 
@@ -437,24 +413,24 @@
             }, null, 2);
 
             document.getElementById('describeKeyInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1"
+                "KeyId": "your-wallet-id-here"
             }, null, 2);
 
             document.getElementById('listKeysInput').value = '{}';
 
             document.getElementById('deriveAddressInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "DerivationPath": "m/44'/60'/0'/0/0"
             }, null, 2);
 
             document.getElementById('signMessageInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "DerivationPath": "m/44'/60'/0'/0/0",
                 "Message": "0x68656c6c6f"
             }, null, 2);
 
             document.getElementById('signTxInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "DerivationPath": "m/44'/60'/0'/0/0",
                 "Transaction": {
                     "chain_id": 1,
@@ -468,28 +444,28 @@
             }, null, 2);
 
             document.getElementById('signAddressInput').value = JSON.stringify({
-                "Address": "0x35cfbc5170465721118b4798fd7ef25055ebe6e7",
+                "Address": "0xYourAddressHere",
                 "Message": "0x68656c6c6f"
             }, null, 2);
 
             document.getElementById('signHashInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "DerivationPath": "m/44'/60'/0'/0/0",
                 "Hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             }, null, 2);
 
             document.getElementById('signHashKeyIdOnlyInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "Hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             }, null, 2);
 
             document.getElementById('signHashAddressInput').value = JSON.stringify({
-                "Address": "0x35cfbc5170465721118b4798fd7ef25055ebe6e7",
+                "Address": "0xYourAddressHere",
                 "Hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             }, null, 2);
 
             document.getElementById('deleteKeyInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
+                "KeyId": "your-wallet-id-here",
                 "PendingWindowInDays": 7
             }, null, 2);
 

@@ -61,4 +61,3 @@ echo -e "${RED}⚠️  重要：请妥善保管备份文件，包含明文助记
 echo -e "${RED}⚠️  建议加密存储或删除不需要的备份${NC}"
 echo ""
 echo "查看备份: ls -lh $BACKUP_DIR_TARGET/"
-echo "恢复钱包: ./scripts/kms-restore-wallets.sh $BACKUP_DIR_SOURCE/wallet_<ID>.json"
