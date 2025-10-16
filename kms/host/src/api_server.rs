@@ -25,6 +25,8 @@ use proto;
 pub struct CreateKeyRequest {
     #[serde(rename = "KeyId", skip_serializing_if = "Option::is_none", default)]
     pub key_id: Option<String>,
+    #[serde(rename = "Mnemonic", skip_serializing_if = "Option::is_none", default)]
+    pub mnemonic: Option<String>,
     #[serde(rename = "Description")]
     pub description: String,
     #[serde(rename = "KeyUsage")]
@@ -254,9 +256,9 @@ impl KmsApiServer {
         // 创建密钥元数据
         let key_metadata = KeyMetadata {
             key_id: wallet_id.to_string(),
-            address: Some(address_hex),
+            address: Some(address_hex.clone()),
             public_key: Some(pubkey_hex),
-            derivation_path: Some(derivation_path),
+            derivation_path: Some(derivation_path.clone()),
             arn: format!("arn:aws:kms:region:account:key/{}", wallet_id),
             creation_date: Utc::now(),
             enabled: true,
@@ -269,11 +271,57 @@ impl KmsApiServer {
         // 存储元数据
         let mut store = self.metadata_store.write().await;
         store.insert(wallet_id.to_string(), key_metadata.clone());
+        drop(store);
+
+        // 自动备份到共享目录（如果提供了助记词）
+        let mnemonic_str = if let Some(ref mnemonic) = req.mnemonic {
+            // 用户提供了助记词，保存备份
+            self.save_wallet_backup(&wallet_id, &address_hex, &derivation_path, mnemonic)?;
+            mnemonic.clone()
+        } else {
+            // 未提供助记词，TA 自动生成但不导出（保持安全）
+            "[MNEMONIC_IN_SECURE_WORLD]".to_string()
+        };
 
         Ok(CreateKeyResponse {
             key_metadata,
-            mnemonic: "[MNEMONIC_IN_SECURE_WORLD]".to_string(),
+            mnemonic: mnemonic_str,
         })
+    }
+
+    /// 保存钱包备份到共享目录
+    fn save_wallet_backup(
+        &self,
+        wallet_id: &Uuid,
+        address: &str,
+        derivation_path: &str,
+        mnemonic: &str,
+    ) -> Result<()> {
+        use std::fs;
+        use std::path::Path;
+
+        // 备份目录：/root/shared/kms-wallets-backup/
+        let backup_dir = Path::new("/root/shared/kms-wallets-backup");
+        fs::create_dir_all(backup_dir)?;
+
+        // 备份文件名：wallet_{wallet_id}.json
+        let backup_file = backup_dir.join(format!("wallet_{}.json", wallet_id));
+
+        // 创建备份 JSON
+        let backup_data = serde_json::json!({
+            "wallet_id": wallet_id.to_string(),
+            "address": address,
+            "derivation_path": derivation_path,
+            "mnemonic": mnemonic,
+            "backup_time": Utc::now().to_rfc3339(),
+            "version": "2.0"
+        });
+
+        // 写入文件
+        fs::write(&backup_file, serde_json::to_string_pretty(&backup_data)?)?;
+
+        println!("💾 Wallet backup saved to: {}", backup_file.display());
+        Ok(())
     }
 
     pub async fn describe_key(&self, req: DescribeKeyRequest) -> Result<DescribeKeyResponse> {
