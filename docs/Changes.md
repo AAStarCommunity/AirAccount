@@ -2,6 +2,81 @@
 
 ---
 
+## 🔄 KMS 钱包自动备份系统上线 (2025-10-16 17:30)
+
+### 功能更新
+
+**新增自动备份 Cron 任务系统**，确保钱包数据安全:
+
+1. **安装脚本**: `scripts/kms-install-backup-cron.sh`
+   - 自动添加 cron 任务，每小时备份一次
+   - 智能检测重复任务并提供替换选项
+   - 支持交互式和非交互式模式
+   - 使用绝对路径避免执行错误
+
+2. **卸载脚本**: `scripts/kms-uninstall-backup-cron.sh`
+   - 安全移除 cron 任务
+   - 支持确认提示和强制模式
+   - 保留历史备份文件
+
+3. **完整文档**: `docs/KMS-BACKUP-GUIDE.md`
+   - 安装与管理指南
+   - 备份文件格式说明
+   - 安全建议（加密、异地备份、权限设置）
+   - 故障排查指南
+   - Cron 时间格式参考
+
+### Cron 任务配置
+
+```bash
+# 每小时的第0分钟执行备份
+0 * * * * /path/to/scripts/kms-backup-wallets.sh >> /path/to/logs/kms-backup-cron.log 2>&1
+```
+
+### 备份信息
+
+- **备份位置**: `~/.kms-backup/`
+- **日志位置**: `logs/kms-backup-cron.log`
+- **备份格式**: JSON (包含 wallet_id, address, derivation_path, mnemonic)
+
+### 管理命令
+
+```bash
+# 安装自动备份
+./scripts/kms-install-backup-cron.sh
+
+# 查看 cron 任务
+crontab -l | grep kms-backup
+
+# 查看执行日志
+tail -f logs/kms-backup-cron.log
+
+# 手动执行备份
+./scripts/kms-backup-wallets.sh
+
+# 卸载自动备份
+./scripts/kms-uninstall-backup-cron.sh
+```
+
+### 安全建议
+
+1. 定期检查备份文件完整性
+2. 使用 GPG 加密敏感备份
+3. 配置异地备份到远程服务器
+4. 限制备份目录权限为 700
+
+### 相关文件
+
+- `scripts/kms-install-backup-cron.sh` - Cron 任务安装脚本
+- `scripts/kms-uninstall-backup-cron.sh` - Cron 任务卸载脚本
+- `docs/KMS-BACKUP-GUIDE.md` - 完整备份指南
+
+### Commit
+
+- `ce5450e` - feat: 添加 KMS 钱包自动备份 cron 任务系统
+
+---
+
 ## ✨ SignHash API 增强 - 支持 KeyId-only 模式 (2025-10-16 16:05)
 
 ### 功能更新
