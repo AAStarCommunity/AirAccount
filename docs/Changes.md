@@ -2250,3 +2250,205 @@ curl https://kms.aastar.io/health
 
 ---
 
+
+## KMS 自动启动脚本 v2 - 串口交互模式 (2025-10-16)
+
+### 背景
+
+原 `kms-auto-start.sh` 脚本会自动启动 QEMU 并在 Guest VM 内自动启动 API Server。这导致 Guest VM 的串口控制台被 API Server 占用，无法进行交互式命令操作。
+
+### 解决方案
+
+创建了新版本 `kms-auto-start-v2.sh`，实现：
+
+1. **启动 QEMU 但不自动启动 API Server**
+   - Guest VM 串口（端口 54320）保持可用状态
+   - Secure World 日志端口（54321）正常监听
+   - QEMU 端口转发配置保持不变（3000 端口）
+
+2. **集成 Cloudflare Tunnel 启动**
+   - 自动检测并清理旧的 cloudflared 进程
+   - 启动新的 tunnel 到 kms.aastar.io
+   - 日志输出到 `/tmp/cloudflared.log`
+
+3. **提供交互式管理工具**
+   - 创建 `kms-guest-interactive.sh` 菜单式工具
+   - 支持启动/停止 API Server
+   - 支持执行自定义命令
+   - 支持部署新的 TA 二进制
+   - 支持查看 API Server 状态和钱包列表
+
+### 脚本对比
+
+| 特性 | kms-auto-start.sh (v1) | kms-auto-start-v2.sh (v2) |
+|------|----------------------|-------------------------|
+| QEMU 启动 | ✅ 自动启动 | ✅ 自动启动 |
+| API Server | ✅ 自动启动 | ❌ 需手动启动 |
+| 串口可用性 | ❌ 被占用 | ✅ 可交互 |
+| Cloudflare Tunnel | 需手动启动 | ✅ 自动启动 |
+| 适用场景 | 生产环境快速部署 | 开发调试和监控 |
+
+### 使用方式
+
+```bash
+# 1. 启动 KMS（不启动 API Server）
+./scripts/kms-auto-start-v2.sh
+
+# 2. 使用交互式工具
+./scripts/kms-guest-interactive.sh
+# 选项 3：启动 API Server
+# 选项 4：停止 API Server
+# 选项 7：执行自定义命令
+
+# 3. 监控 CA 日志
+./scripts/kms-qemu-terminal2-enhanced.sh
+
+# 4. 监控 TA 日志
+./scripts/kms-qemu-terminal3.sh
+
+# 5. 直接连接 Guest VM 串口（高级）
+docker exec -it teaclave_dev_env socat STDIN TCP:localhost:54320
+```
+
+### 手动启动 API Server
+
+如果需要启动 API Server：
+
+```bash
+# 方法 1: 使用交互式工具（推荐）
+./scripts/kms-guest-interactive.sh
+# 选择选项 3
+
+# 方法 2: 使用命令行
+echo 'cd /root/shared && nohup ./kms_ca > api.log 2>&1 &' | \
+  docker exec -i teaclave_dev_env socat - TCP:localhost:54320
+
+# 等待 15 秒后测试
+sleep 15
+curl http://localhost:3000/health
+```
+
+### 关键技术点
+
+1. **串口监听器配置**
+   ```bash
+   # 使用简单的 socat 转发，不自动执行命令
+   socat TCP-LISTEN:54320,reuseaddr,fork -,raw,echo=0
+   ```
+
+2. **Cloudflare Tunnel 管理**
+   ```bash
+   # 清理旧进程
+   pkill -f "cloudflared tunnel run kms-tunnel"
+   
+   # 启动新进程
+   cloudflared tunnel run kms-tunnel > /tmp/cloudflared.log 2>&1 &
+   ```
+
+3. **交互式命令执行**
+   ```bash
+   # 发送命令到 Guest VM
+   echo 'COMMAND' | docker exec -i teaclave_dev_env socat - TCP:localhost:54320
+   ```
+
+### 相关文件
+
+- `scripts/kms-auto-start-v2.sh` - 新版启动脚本（保留 v1）
+- `scripts/kms-guest-interactive.sh` - 交互式管理工具
+- `scripts/kms-guest-shell.sh` - 简单 shell 连接工具
+- `scripts/kms-guest-exec.sh` - 单命令执行工具
+- `scripts/kms-guest-shell-api.sh` - API 方式管理工具
+
+### 验证状态
+
+```bash
+# 验证 QEMU 运行
+docker exec teaclave_dev_env pgrep -f qemu-system-aarch64
+
+# 验证端口转发
+docker exec teaclave_dev_env ps aux | grep qemu | grep hostfwd
+
+# 验证 API Server（如已启动）
+curl http://localhost:3000/health
+
+# 验证 Cloudflare Tunnel
+ps aux | grep cloudflared | grep -v grep
+
+# 验证公网访问（如 API Server 已启动）
+curl https://kms.aastar.io/health
+```
+
+---
+
+
+### Bug 修复：移除 lsof 依赖
+
+**问题**：脚本尝试使用 `lsof` 命令清理端口占用进程，但 Docker 容器内未安装此命令，导致错误信息：
+```
+bash: line 1: lsof: command not found
+```
+
+**修复**：移除 `lsof` 依赖，因为之前的 `pkill` 命令已经足够处理进程清理：
+```bash
+# 修复前
+docker exec teaclave_dev_env bash -c "lsof -ti:54320 | xargs -r kill -9 2>/dev/null || true"
+
+# 修复后
+# 使用 fuser 或直接 pkill（容器内可能没有 lsof）
+# 如果端口仍被占用，pkill 已经处理了大部分情况
+sleep 2
+```
+
+**验证**：脚本现在运行无错误，所有服务正常启动。
+
+---
+
+
+### 问题：Terminal 3 端口冲突
+
+**问题**：使用 `kms-auto-start-v2.sh` 后，运行 `kms-qemu-terminal3.sh` 报错：
+```
+2025/10/16 06:07:22 socat[988] E bind(14, {AF=2 0.0.0.0:54321}, 16): Address already in use
+```
+
+**原因**：
+- `kms-auto-start-v2.sh` 会自动启动端口 54321 的监听器（用于 Secure World 日志）
+- 旧的 `kms-qemu-terminal3.sh` 调用 `listen_on_secure_world_log`，尝试再次创建监听器
+- 导致端口冲突
+
+**解决方案**：创建 `kms-qemu-terminal3-v2.sh`，直接连接到已有监听器而不是创建新的：
+
+```bash
+# 旧版本（会冲突）
+docker exec -it teaclave_dev_env bash -l -c "listen_on_secure_world_log"
+# listen_on_secure_world_log 内部执行: socat TCP-LISTEN:54321,reuseaddr,fork -,raw,echo=0
+
+# v2 版本（兼容）
+docker exec -it teaclave_dev_env socat - TCP:localhost:54321
+# 直接连接，不创建新的监听器
+```
+
+**使用方式**：
+```bash
+# 启动 KMS v2
+./scripts/kms-auto-start-v2.sh
+
+# 使用 v2 版本的 terminal3（推荐）
+./scripts/kms-qemu-terminal3-v2.sh
+
+# 或者仍可使用旧版本 terminal3，但需要先不启动 v2 自带的监听器
+```
+
+**脚本对应关系**：
+| 启动脚本 | Terminal 3 脚本 | 说明 |
+|---------|----------------|------|
+| kms-auto-start.sh (v1) | kms-qemu-terminal3.sh | 原版本，自己管理监听器 |
+| kms-auto-start-v2.sh | kms-qemu-terminal3-v2.sh | v2 版本，连接已有监听器 |
+
+**相关文件**：
+- `scripts/kms-qemu-terminal3-v2.sh` - 新创建，适配 v2 启动脚本
+- `scripts/kms-qemu-terminal3.sh` - 保留，适配 v1 或手动启动
+- `/opt/teaclave/bin/listen_on_secure_world_log` - 容器内的原始监听器脚本
+
+---
+
