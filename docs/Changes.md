@@ -2452,3 +2452,115 @@ docker exec -it teaclave_dev_env socat - TCP:localhost:54321
 
 ---
 
+
+## KMS 钱包持久化解决方案 (2025-10-16)
+
+### 问题
+
+QEMU 重启后 OP-TEE Secure Storage 数据丢失，导致：
+- 开发测试时需要重新创建钱包
+- 地址每次都不同，不方便测试
+- 无法保留重要的测试数据
+
+### 解决方案
+
+提供三个工具解决持久化问题：
+
+#### 1. 开发测试钱包（推荐）
+
+**脚本**: `scripts/kms-init-dev-wallets.sh`
+
+使用固定助记词创建测试钱包，重启后地址保持不变：
+
+```bash
+./scripts/kms-auto-start.sh
+sleep 15
+./scripts/kms-init-dev-wallets.sh
+```
+
+固定的测试钱包:
+1. `dev-wallet-1`: `test test test test test test test test test test test junk`
+2. `dev-wallet-2`: `abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about`
+3. `dev-wallet-3`: `zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong`
+
+#### 2. 钱包备份与恢复
+
+**备份**: `scripts/kms-backup-wallets.sh`
+**恢复**: `scripts/kms-restore-wallets.sh`
+
+导出所有钱包到 JSON 文件（包含明文私钥和助记词）：
+
+```bash
+# 备份
+./scripts/kms-backup-wallets.sh
+# 文件: ~/.kms-backup/wallets_backup_YYYYMMDD_HHMMSS.json
+
+# 恢复
+./scripts/kms-restore-wallets.sh ~/.kms-backup/wallets_backup_*.json
+```
+
+⚠️ **安全警告**: 备份文件包含明文私钥，仅用于开发测试！
+
+#### 3. 一键启动 + 自动初始化
+
+**脚本**: `scripts/kms-auto-start-with-wallets.sh`
+
+一条命令启动 KMS 并初始化测试钱包：
+
+```bash
+./scripts/kms-auto-start-with-wallets.sh
+```
+
+自动完成：
+1. ✅ 启动 QEMU + API Server
+2. ✅ 等待 API Server 就绪
+3. ✅ 创建固定的测试钱包
+4. ✅ 启动 Cloudflare Tunnel
+
+### 使用场景
+
+**日常开发测试**（推荐）:
+```bash
+# 一键启动
+./scripts/kms-auto-start-with-wallets.sh
+
+# 开发测试...
+
+# 重启时重复相同命令即可
+```
+
+**保留重要测试数据**:
+```bash
+# 备份
+./scripts/kms-backup-wallets.sh
+
+# 重启后恢复
+./scripts/kms-auto-start.sh && sleep 15
+./scripts/kms-restore-wallets.sh ~/.kms-backup/wallets_backup_latest.json
+```
+
+### 技术细节
+
+- 相同助记词生成相同的 `wallet_id`（从助记词派生）
+- 恢复时使用助记词重新创建钱包，ID 和地址完全一致
+- 备份文件为 JSON 格式，包含 wallet_id、address、private_key、mnemonic
+
+### 生产环境方案
+
+⚠️ 以上方案仅适用于开发测试！
+
+生产环境应使用：
+1. 持久化 Secure Storage（配置 OP-TEE 持久化后端）
+2. 硬件 TEE (Raspberry Pi 5 真实硬件)
+3. 加密备份 + HSM + 多重签名
+
+### 相关文件
+
+- `scripts/kms-init-dev-wallets.sh` - 初始化固定测试钱包
+- `scripts/kms-backup-wallets.sh` - 备份所有钱包
+- `scripts/kms-restore-wallets.sh` - 恢复钱包
+- `scripts/kms-auto-start-with-wallets.sh` - 一键启动 + 初始化
+- `docs/KMS-Wallet-Persistence.md` - 完整文档
+
+---
+
