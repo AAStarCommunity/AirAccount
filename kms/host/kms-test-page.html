@@ -317,17 +317,6 @@
                 <button onclick="callAPI('ListKeys', 'listKeysInput')">列出密钥</button>
             </div>
 
-            <!-- GetPublicKey -->
-            <div class="api-card">
-                <div class="api-title">
-                    <span class="api-icon">🔓</span>
-                    GetPublicKey - 获取公钥
-                </div>
-                <div class="endpoint-info">POST /GetPublicKey</div>
-                <textarea id="getPublicKeyInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864"}'></textarea>
-                <button onclick="callAPI('GetPublicKey', 'getPublicKeyInput')">获取公钥</button>
-            </div>
-
             <!-- DeriveAddress -->
             <div class="api-card">
                 <div class="api-title">
@@ -440,10 +429,6 @@
             }, null, 2);
 
             document.getElementById('listKeysInput').value = '{}';
-
-            document.getElementById('getPublicKeyInput').value = JSON.stringify({
-                "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1"
-            }, null, 2);
 
             document.getElementById('deriveAddressInput').value = JSON.stringify({
                 "KeyId": "862ae409-843f-456a-83c8-ebd8f884d1e1",
@@ -570,7 +555,6 @@
                     'CreateKey': '创建密钥',
                     'DescribeKey': '查询密钥',
                     'ListKeys': '列出密钥',
-                    'GetPublicKey': '获取公钥',
                     'DeriveAddress': '派生地址',
                     'Sign': inputId === 'signMessageInput' ? '签名消息' :
                             inputId === 'signTxInput' ? '签名交易' :
