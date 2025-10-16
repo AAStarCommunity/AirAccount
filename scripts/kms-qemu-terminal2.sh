@@ -8,9 +8,8 @@ echo "🔌 启动 Guest VM 监听器 (端口 54320)..."
 echo "   (会自动登录、挂载、启动 API Server)"
 echo ""
 
-# 在后台启动监听器
-docker exec -it teaclave_dev_env bash -l -c "listen_on_guest_vm_shell" &
-LISTENER_PID=$!
+# 在后台启动监听器（移除 -it，因为后台运行不需要 TTY）
+docker exec -d teaclave_dev_env bash -l -c "listen_on_guest_vm_shell"
 
 echo ""
 echo "⏳ 等待 API Server 启动..."
@@ -57,8 +56,10 @@ else
     echo ""
 fi
 
-echo "按 Ctrl+C 退出"
+echo "💡 提示:"
+echo "  - Guest VM 监听器在后台运行"
+echo "  - 查看日志: docker exec teaclave_dev_env ps aux | grep listen_on_guest_vm_shell"
+echo "  - 停止服务: docker exec teaclave_dev_env pkill -f listen_on_guest_vm_shell"
 echo ""
-
-# 等待监听器进程
-wait $LISTENER_PID
+echo "✅ Terminal 2 初始化完成"
+echo ""
