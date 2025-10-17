@@ -15,128 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-mod cli;
-mod tests;
-mod api;
-
-use optee_teec::{Context, Operation, ParamType, Uuid};
-use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
+use kms::{cli, tests, create_wallet, derive_address, remove_wallet, sign_transaction};
 
 use anyhow::{bail, Result};
 use structopt::StructOpt;
 
-const OUTPUT_MAX_SIZE: usize = 1024;
-
-fn invoke_command(command: proto::Command, input: &[u8]) -> optee_teec::Result<Vec<u8>> {
-    let mut ctx = Context::new()?;
-    let uuid = Uuid::parse_str(proto::UUID)
-        .map_err(|_| optee_teec::Error::new(optee_teec::ErrorKind::ItemNotFound))?;
-    let mut session = ctx.open_session(uuid)?;
-
-    println!("CA: command: {:?}", command);
-    // input buffer
-    let p0 = ParamTmpRef::new_input(input);
-    // output buffer
-    let mut output = vec![0u8; OUTPUT_MAX_SIZE];
-    let p1 = ParamTmpRef::new_output(output.as_mut_slice());
-    // output buffer size
-    let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
-
-    let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
-    match session.invoke_command(command as u32, &mut operation) {
-        Ok(()) => {
-            println!("CA: invoke_command success");
-            let output_len = operation.parameters().2.a() as usize;
-            Ok(output[..output_len].to_vec())
-        }
-        Err(e) => {
-            let output_len = operation.parameters().2.a() as usize;
-            let err_message = String::from_utf8_lossy(&output[..output_len]);
-            println!("CA: invoke_command failed: {:?}", err_message);
-            Err(e)
-        }
-    }
-}
-
-pub fn create_wallet() -> Result<uuid::Uuid> {
-    let serialized_output = invoke_command(proto::Command::CreateWallet, &[])?;
-    let output: proto::CreateWalletOutput = bincode::deserialize(&serialized_output)?;
-    Ok(output.wallet_id)
-}
-
-pub fn remove_wallet(wallet_id: uuid::Uuid) -> Result<()> {
-    let input = proto::RemoveWalletInput { wallet_id };
-    let _output = invoke_command(proto::Command::RemoveWallet, &bincode::serialize(&input)?)?;
-    Ok(())
-}
-
-pub fn derive_address(wallet_id: uuid::Uuid, hd_path: &str) -> Result<[u8; 20]> {
-    let input = proto::DeriveAddressInput {
-        wallet_id,
-        hd_path: hd_path.to_string(),
-    };
-    let serialized_output =
-        invoke_command(proto::Command::DeriveAddress, &bincode::serialize(&input)?)?;
-    let output: proto::DeriveAddressOutput = bincode::deserialize(&serialized_output)?;
-    Ok(output.address)
-}
-
-pub fn sign_transaction(
-    wallet_id: uuid::Uuid,
-    hd_path: &str,
-    chain_id: u64,
-    nonce: u128,
-    to: [u8; 20],
-    value: u128,
-    gas_price: u128,
-    gas: u128,
-) -> Result<Vec<u8>> {
-    let transaction = proto::EthTransaction {
-        chain_id,
-        nonce,
-        to: Some(to),
-        value,
-        gas_price,
-        gas,
-        data: vec![],
-    };
-    let input = proto::SignTransactionInput {
-        wallet_id,
-        hd_path: hd_path.to_string(),
-        transaction,
-    };
-    let serialized_output = invoke_command(
-        proto::Command::SignTransaction,
-        &bincode::serialize(&input)?,
-    )?;
-    let output: proto::SignTransactionOutput = bincode::deserialize(&serialized_output)?;
-    Ok(output.signature)
-}
-
-pub fn hello_world(name: &str) -> Result<String> {
-    let input = proto::HelloWorldInput {
-        name: name.to_string(),
-    };
-    let serialized_output = invoke_command(
-        proto::Command::HelloWorld,
-        &bincode::serialize(&input)?,
-    )?;
-    let output: proto::HelloWorldOutput = bincode::deserialize(&serialized_output)?;
-    Ok(output.message)
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 检查是否启动KMS API服务器
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "--kms-server" {
-        env_logger::init();
-        println!("🚀 启动基于 eth_wallet TA 的 KMS API 服务器");
-        api::start_kms_server().await?;
-        return Ok(());
-    }
-
-    // 原有CLI模式
+fn main() -> Result<()> {
     let args = cli::Opt::from_args();
     match args.command {
         cli::Command::CreateWallet(_opt) => {
@@ -163,10 +47,6 @@ async fn main() -> Result<()> {
                 opt.gas,
             )?;
             println!("Signature: {}", hex::encode(&signature));
-        }
-        cli::Command::HelloWorld(opt) => {
-            let message = hello_world(&opt.name)?;
-            println!("{}", message);
         }
         cli::Command::Test => {
             tests::tests::test_workflow();

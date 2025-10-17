@@ -28,7 +28,10 @@ pub enum Command {
     RemoveWallet,
     DeriveAddress,
     SignTransaction,
-    HelloWorld,
+    SignMessage,
+    SignHash,
+    DeriveAddressAuto,
+    ExportPrivateKey,
     #[default]
     Unknown,
 }

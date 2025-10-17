@@ -138,3 +138,11 @@ sbom.txt
 
 # Cargo advisory database
 ~/.cargo/advisory-db/
+# Passkey 工作文档（临时）
+PASSKEY-WORK-SUMMARY.md
+
+# 容器内路径的符号链接（开发时创建）
+/crates
+/optee-teec
+/optee-utee
+/rust

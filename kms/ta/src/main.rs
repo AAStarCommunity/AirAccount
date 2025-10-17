@@ -1,4 +1,3 @@
-#![feature(restricted_std)]
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -15,6 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 #![no_main]
 
 mod hash;
@@ -121,17 +121,93 @@ fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTr
     Ok(proto::SignTransactionOutput { signature })
 }
 
-fn hello_world(input: &proto::HelloWorldInput) -> Result<proto::HelloWorldOutput> {
-    dbg_println!("[+] Hello world called with name: {}", input.name);
+fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Sign message: error: wallet not found: {:?}", e))?;
+    dbg_println!("[+] Sign message: wallet loaded");
 
-    let message = format!(
-        "Hello, {}! This message is from TEE (Trusted Execution Environment).",
-        input.name
-    );
+    let signature = wallet.sign_message(&input.hd_path, &input.message)?;
+    dbg_println!("[+] Sign message: signature: {:?}", signature);
 
-    dbg_println!("[+] Hello world response: {}", message);
+    Ok(proto::SignMessageOutput { signature })
+}
 
-    Ok(proto::HelloWorldOutput { message })
+fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Sign hash: error: wallet not found: {:?}", e))?;
+    dbg_println!("[+] Sign hash: wallet loaded");
+
+    let signature = wallet.sign_hash(&input.hd_path, &input.hash)?;
+    dbg_println!("[+] Sign hash: signature: {:?}", signature);
+
+    Ok(proto::SignHashOutput { signature })
+}
+
+fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::DeriveAddressAutoOutput> {
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+
+    let (wallet_id, wallet, address_index) = if let Some(existing_id) = input.wallet_id {
+        // Use existing wallet and increment address index
+        dbg_println!("[+] Loading existing wallet: {:?}", existing_id);
+        let mut wallet = db_client
+            .get::<Wallet>(&existing_id)
+            .map_err(|e| anyhow!("[+] Derive address auto: wallet not found: {:?}", e))?;
+
+        let index = wallet.increment_address_index()?;
+        dbg_println!("[+] Incremented address index to: {}", index);
+
+        (existing_id, wallet, index)
+    } else {
+        // Create new wallet
+        dbg_println!("[+] Creating new wallet");
+        let mut wallet = Wallet::new()?;
+        let wallet_id = wallet.get_id();
+        dbg_println!("[+] New wallet ID: {:?}", wallet_id);
+
+        // First address uses index 0, then increment for next time
+        let index = wallet.increment_address_index()?;
+        dbg_println!("[+] First address index: {}", index);
+
+        (wallet_id, wallet, index)
+    };
+
+    // Derive address with auto-incremented path
+    let derivation_path = format!("m/44'/60'/0'/0/{}", address_index);
+    dbg_println!("[+] Derivation path: {}", derivation_path);
+
+    let (address, public_key) = wallet.derive_address(&derivation_path)?;
+    dbg_println!("[+] Derived address: {:?}", address);
+
+    // Save wallet (with updated counter)
+    db_client.put(&wallet)?;
+    dbg_println!("[+] Wallet saved");
+
+    Ok(proto::DeriveAddressAutoOutput {
+        wallet_id,
+        address,
+        public_key,
+        derivation_path,
+    })
+}
+
+fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::ExportPrivateKeyOutput> {
+    dbg_println!("[+] Export private key for wallet: {:?}, path: {}", input.wallet_id, input.derivation_path);
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("[+] Export private key: wallet not found: {:?}", e))?;
+
+    let private_key = wallet.export_private_key(&input.derivation_path)?;
+    dbg_println!("[+] Private key exported (length: {} bytes)", private_key.len());
+
+    Ok(proto::ExportPrivateKeyOutput {
+        private_key,
+    })
 }
 
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
@@ -150,7 +226,10 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RemoveWallet => process(serialized_input, remove_wallet),
         Command::DeriveAddress => process(serialized_input, derive_address),
         Command::SignTransaction => process(serialized_input, sign_transaction),
-        Command::HelloWorld => process(serialized_input, hello_world),
+        Command::SignMessage => process(serialized_input, sign_message),
+        Command::SignHash => process(serialized_input, sign_hash),
+        Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
+        Command::ExportPrivateKey => process(serialized_input, export_private_key),
         _ => bail!("Unsupported command"),
     }
 }

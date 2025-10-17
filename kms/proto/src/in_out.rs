@@ -71,11 +71,49 @@ pub struct SignTransactionOutput {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HelloWorldInput {
-    pub name: String,
+pub struct SignMessageInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub message: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HelloWorldOutput {
-    pub message: String,
+pub struct SignMessageOutput {
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub hash: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignHashOutput {
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeriveAddressAutoInput {
+    pub wallet_id: Option<Uuid>,  // None = create new wallet, Some = use existing
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeriveAddressAutoOutput {
+    pub wallet_id: Uuid,
+    pub address: [u8; 20],
+    pub public_key: Vec<u8>,
+    pub derivation_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyInput {
+    pub wallet_id: Uuid,
+    pub derivation_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportPrivateKeyOutput {
+    pub private_key: Vec<u8>,  // 32 bytes
 }
