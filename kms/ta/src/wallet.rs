@@ -31,6 +31,8 @@ use secure_db::Storable;
 pub struct Wallet {
     id: Uuid,
     entropy: Vec<u8>,
+    next_address_index: u32,
+    next_account_index: u32,
 }
 
 impl Storable for Wallet {
@@ -55,7 +57,32 @@ impl Wallet {
         )
         .into_uuid();
 
-        Ok(Self { id: uuid, entropy })
+        Ok(Self {
+            id: uuid,
+            entropy,
+            next_address_index: 0,
+            next_account_index: 0,
+        })
+    }
+
+    pub fn get_next_address_index(&self) -> u32 {
+        self.next_address_index
+    }
+
+    pub fn increment_address_index(&mut self) -> Result<u32> {
+        const MAX_ADDRESSES_PER_WALLET: u32 = 100;
+
+        if self.next_address_index >= MAX_ADDRESSES_PER_WALLET {
+            return Err(anyhow!(
+                "Wallet address limit reached ({}/{})",
+                self.next_address_index,
+                MAX_ADDRESSES_PER_WALLET
+            ));
+        }
+
+        let current = self.next_address_index;
+        self.next_address_index += 1;
+        Ok(current)
     }
 
     pub fn get_id(&self) -> Uuid {
@@ -122,6 +149,61 @@ impl Wallet {
         })?;
         let signature = legacy_transaction.sign(&ecdsa);
         Ok(signature)
+    }
+
+    pub fn sign_message(&self, hd_path: &str, message: &[u8]) -> Result<Vec<u8>> {
+        let xprv = self.derive_prv_key(hd_path)?;
+
+        // Hash the message using Keccak256
+        let message_hash = keccak_hash_to_bytes(message);
+
+        // Sign the hash using secp256k1
+        let secret_key = secp256k1::SecretKey::from_slice(&xprv[..32])?;
+        let secp = secp256k1::Secp256k1::new();
+
+        // Create Message from 32-byte hash
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&message_hash[..32]);
+        let message_obj = secp256k1::Message::from_slice(&hash_array)?;
+
+        let sig = secp.sign_ecdsa_recoverable(&message_obj, &secret_key);
+        let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+        // Combine signature with recovery id (v = recovery_id + 27 for Ethereum)
+        let mut signature = Vec::with_capacity(65);
+        signature.extend_from_slice(&sig_bytes);
+        signature.push(recovery_id.to_i32() as u8 + 27);
+
+        Ok(signature)
+    }
+
+    pub fn sign_hash(&self, hd_path: &str, hash: &[u8; 32]) -> Result<Vec<u8>> {
+        let xprv = self.derive_prv_key(hd_path)?;
+
+        // Sign the hash directly using secp256k1 (no additional hashing)
+        let secret_key = secp256k1::SecretKey::from_slice(&xprv[..32])?;
+        let secp = secp256k1::Secp256k1::new();
+
+        // Use the provided hash directly
+        let message_obj = secp256k1::Message::from_slice(hash)?;
+
+        let sig = secp.sign_ecdsa_recoverable(&message_obj, &secret_key);
+        let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+        // Combine signature with recovery id (v = recovery_id + 27 for Ethereum)
+        let mut signature = Vec::with_capacity(65);
+        signature.extend_from_slice(&sig_bytes);
+        signature.push(recovery_id.to_i32() as u8 + 27);
+
+        Ok(signature)
+    }
+
+    /// Export private key for a given derivation path
+    /// WARNING: This should only be used for debugging/verification purposes
+    pub fn export_private_key(&self, hd_path: &str) -> Result<Vec<u8>> {
+        let xprv = self.derive_prv_key(hd_path)?;
+        // Return the 32-byte private key
+        Ok(xprv[..32].to_vec())
     }
 }
 

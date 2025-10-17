@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔐 AirAccount KMS API 测试工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            text-align: center;
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .status-bar {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 15px 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 1.1em;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        .status-bar.offline {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .status-icon {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            margin-right: 10px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .api-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .api-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .api-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        }
+
+        .api-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .api-icon {
+            font-size: 1.4em;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            resize: vertical;
+            margin-bottom: 15px;
+            transition: border-color 0.2s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #cbd5e0;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .output-section {
+            background: #1a202c;
+            color: #e2e8f0;
+            border-radius: 15px;
+            padding: 25px;
+            margin-top: 30px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .output-header {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .output-content {
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .output-item {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .output-label {
+            color: #10b981;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .output-error {
+            color: #ef4444;
+        }
+
+        .output-success {
+            color: #10b981;
+        }
+
+        .timestamp {
+            color: #94a3b8;
+            font-size: 0.85em;
+            margin-top: 10px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .endpoint-info {
+            background: #f7fafc;
+            padding: 10px 15px;
+            border-radius: 6px;
+            font-size: 0.85em;
+            color: #64748b;
+            margin-bottom: 10px;
+        }
+
+        .clear-btn {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            margin-top: 15px;
+        }
+
+        .example-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            font-size: 0.7em;
+            padding: 3px 8px;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 AirAccount KMS API 测试工具</h1>
+
+        <div class="status-bar" id="statusBar">
+            <span class="status-icon"></span>
+            <span id="statusText">正在检查连接...</span>
+        </div>
+
+        <div class="api-grid">
+            <!-- CreateKey -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">🔑</span>
+                    CreateKey - 创建密钥
+                </div>
+                <div class="endpoint-info">POST /CreateKey</div>
+                <textarea id="createKeyInput" placeholder='{"Description":"test-wallet","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'></textarea>
+                <button onclick="callAPI('CreateKey', 'createKeyInput')">创建密钥</button>
+            </div>
+
+            <!-- DescribeKey -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">📋</span>
+                    DescribeKey - 查询密钥
+                </div>
+                <div class="endpoint-info">POST /DescribeKey</div>
+                <textarea id="describeKeyInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864"}'></textarea>
+                <button onclick="callAPI('DescribeKey', 'describeKeyInput')">查询密钥</button>
+            </div>
+
+            <!-- ListKeys -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">📂</span>
+                    ListKeys - 列出所有密钥
+                </div>
+                <div class="endpoint-info">POST /ListKeys</div>
+                <textarea id="listKeysInput" placeholder='{}'></textarea>
+                <button onclick="callAPI('ListKeys', 'listKeysInput')">列出密钥</button>
+            </div>
+
+            <!-- GetPublicKey -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">🔓</span>
+                    GetPublicKey - 获取公钥
+                </div>
+                <div class="endpoint-info">POST /GetPublicKey</div>
+                <textarea id="getPublicKeyInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864"}'></textarea>
+                <button onclick="callAPI('GetPublicKey', 'getPublicKeyInput')">获取公钥</button>
+            </div>
+
+            <!-- DeriveAddress -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">🏦</span>
+                    DeriveAddress - 派生地址
+                </div>
+                <div class="endpoint-info">POST /DeriveAddress</div>
+                <textarea id="deriveAddressInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864","DerivationPath":"m/44'"'"'/60'"'"'/0'"'"'/0/0"}'></textarea>
+                <button onclick="callAPI('DeriveAddress', 'deriveAddressInput')">派生地址</button>
+            </div>
+
+            <!-- Sign -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">✍️</span>
+                    Sign - 数字签名
+                </div>
+                <div class="endpoint-info">POST /Sign</div>
+                <textarea id="signInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864","Message":"SGVsbG8gV29ybGQ=","SigningAlgorithm":"ECDSA_SHA_256"}'></textarea>
+                <button onclick="callAPI('Sign', 'signInput')">数字签名</button>
+            </div>
+
+            <!-- SignTransaction -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">💸</span>
+                    SignTransaction - 签名交易
+                    <span class="example-badge">扩展</span>
+                </div>
+                <div class="endpoint-info">POST /SignTransaction</div>
+                <textarea id="signTxInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864","DerivationPath":"m/44'"'"'/60'"'"'/0'"'"'/0/0","Transaction":{"chain_id":1,"nonce":0,"to":"0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb","value":"0x0","gas_price":"0x3b9aca00","gas":21000,"data":""}}'></textarea>
+                <button onclick="callAPI('SignTransaction', 'signTxInput')">签名交易</button>
+            </div>
+
+            <!-- DeleteKey -->
+            <div class="api-card">
+                <div class="api-title">
+                    <span class="api-icon">🗑️</span>
+                    ScheduleKeyDeletion - 删除密钥
+                </div>
+                <div class="endpoint-info">POST /DeleteKey</div>
+                <textarea id="deleteKeyInput" placeholder='{"KeyId":"64aec7d4-cde8-4e60-8437-37579292f864","PendingWindowInDays":7}'></textarea>
+                <button onclick="callAPI('DeleteKey', 'deleteKeyInput')">删除密钥</button>
+            </div>
+        </div>
+
+        <div class="output-section">
+            <div class="output-header">
+                <span>📊</span>
+                <span>API 响应</span>
+            </div>
+            <div id="output" class="output-content">
+                等待 API 调用...
+            </div>
+            <button class="clear-btn" onclick="clearOutput()">清空输出</button>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'https://kms.aastar.io';
+        let outputHistory = [];
+
+        // 初始化默认值
+        window.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('createKeyInput').value = JSON.stringify({
+                "Description": "test-wallet",
+                "KeyUsage": "SIGN_VERIFY",
+                "KeySpec": "ECC_SECG_P256K1",
+                "Origin": "AWS_KMS"
+            }, null, 2);
+
+            document.getElementById('describeKeyInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864"
+            }, null, 2);
+
+            document.getElementById('listKeysInput').value = '{}';
+
+            document.getElementById('getPublicKeyInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864"
+            }, null, 2);
+
+            document.getElementById('deriveAddressInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864",
+                "DerivationPath": "m/44'/60'/0'/0/0"
+            }, null, 2);
+
+            document.getElementById('signInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864",
+                "Message": "SGVsbG8gV29ybGQ=",
+                "SigningAlgorithm": "ECDSA_SHA_256"
+            }, null, 2);
+
+            document.getElementById('signTxInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864",
+                "DerivationPath": "m/44'/60'/0'/0/0",
+                "Transaction": {
+                    "chain_id": 1,
+                    "nonce": 0,
+                    "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+                    "value": "0x0",
+                    "gas_price": "0x3b9aca00",
+                    "gas": 21000,
+                    "data": ""
+                }
+            }, null, 2);
+
+            document.getElementById('deleteKeyInput').value = JSON.stringify({
+                "KeyId": "64aec7d4-cde8-4e60-8437-37579292f864",
+                "PendingWindowInDays": 7
+            }, null, 2);
+
+            // 检查健康状态
+            checkHealth();
+        });
+
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+
+                const statusBar = document.getElementById('statusBar');
+                const statusText = document.getElementById('statusText');
+
+                if (response.ok && data.status === 'healthy') {
+                    statusBar.className = 'status-bar';
+                    const endpoints = data.endpoints.POST.join(', ');
+                    statusText.innerHTML = `✅ 连接状态: <strong>${API_BASE}</strong> 在线 | 支持 ${data.endpoints.POST.length} 个 AWS KMS 兼容 API 端点`;
+                } else {
+                    throw new Error('Service unhealthy');
+                }
+            } catch (error) {
+                const statusBar = document.getElementById('statusBar');
+                const statusText = document.getElementById('statusText');
+                statusBar.className = 'status-bar offline';
+                statusText.innerHTML = `❌ 连接状态: <strong>${API_BASE}</strong> 离线`;
+            }
+        }
+
+        async function callAPI(endpoint, inputId) {
+            const inputElement = document.getElementById(inputId);
+            const button = event.target;
+
+            try {
+                // 解析输入
+                const payload = JSON.parse(inputElement.value);
+
+                // 禁用按钮
+                button.disabled = true;
+                button.innerHTML = '<span class="loading"></span> 请求中...';
+
+                // 调用 API
+                const startTime = Date.now();
+                const response = await fetch(`${API_BASE}/${endpoint}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Amz-Target': `TrentService.${endpoint}`
+                    },
+                    body: JSON.stringify(payload)
+                });
+                const duration = Date.now() - startTime;
+
+                const data = await response.json();
+
+                // 显示结果
+                addOutput({
+                    endpoint,
+                    success: response.ok,
+                    status: response.status,
+                    duration,
+                    request: payload,
+                    response: data
+                });
+
+            } catch (error) {
+                addOutput({
+                    endpoint,
+                    success: false,
+                    error: error.message
+                });
+            } finally {
+                // 恢复按钮
+                button.disabled = false;
+                button.textContent = button.textContent.replace('请求中...', '').trim();
+
+                // 恢复原始文本
+                const buttonTexts = {
+                    'CreateKey': '创建密钥',
+                    'DescribeKey': '查询密钥',
+                    'ListKeys': '列出密钥',
+                    'GetPublicKey': '获取公钥',
+                    'DeriveAddress': '派生地址',
+                    'Sign': '数字签名',
+                    'SignTransaction': '签名交易',
+                    'DeleteKey': '删除密钥'
+                };
+                button.textContent = buttonTexts[endpoint];
+            }
+        }
+
+        function addOutput(result) {
+            outputHistory.unshift(result);
+            if (outputHistory.length > 10) outputHistory.pop();
+
+            const outputDiv = document.getElementById('output');
+            const timestamp = new Date().toLocaleString('zh-CN');
+
+            let html = '';
+            outputHistory.forEach((item, index) => {
+                const statusClass = item.success ? 'output-success' : 'output-error';
+                const statusIcon = item.success ? '✅' : '❌';
+
+                html += `
+                    <div class="output-item">
+                        <div class="output-label ${statusClass}">
+                            ${statusIcon} ${item.endpoint} ${item.success ? '调用成功' : '调用失败'}
+                        </div>
+                        ${item.request ? `
+                        <div style="margin-top: 10px;">
+                            <strong>📤 请求:</strong>
+                            <pre style="margin-top: 5px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow-x: auto;">${JSON.stringify(item.request, null, 2)}</pre>
+                        </div>
+                        ` : ''}
+                        ${item.status ? `<div style="margin-top: 10px;"><strong>HTTP Status:</strong> ${item.status}</div>` : ''}
+                        ${item.duration ? `<div><strong>⏱️ 响应时间:</strong> ${item.duration}ms</div>` : ''}
+                        ${item.response ? `
+                        <div style="margin-top: 10px;">
+                            <strong>📥 响应 (${item.status}):</strong>
+                            <pre style="margin-top: 5px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow-x: auto;">${JSON.stringify(item.response, null, 2)}</pre>
+                        </div>
+                        ` : ''}
+                        ${item.error ? `<div style="margin-top: 10px;" class="output-error"><strong>错误:</strong> ${item.error}</div>` : ''}
+                        <div class="timestamp">🕐 时间: ${timestamp}</div>
+                    </div>
+                `;
+            });
+
+            outputDiv.innerHTML = html || '等待 API 调用...';
+        }
+
+        function clearOutput() {
+            outputHistory = [];
+            document.getElementById('output').textContent = '等待 API 调用...';
+        }
+
+        // 每30秒检查一次健康状态
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 mod api;
+mod eth_wallet;
 
 use api::start_kms_server;
 

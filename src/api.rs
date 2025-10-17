@@ -203,64 +203,11 @@ pub struct DeleteKeyResponse {
 }
 
 // ========================================
-// eth_wallet TA 接口 (模拟)
+// eth_wallet TA 接口 (真实实现)
 // ========================================
 
-pub struct EthWalletTA {
-    // 这里将集成真实的 eth_wallet TA 调用
-    // 当前为了 API 开发，使用模拟实现
-}
-
-impl EthWalletTA {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    /// 调用 TA CreateWallet 命令
-    pub async fn create_wallet(&self) -> Result<(String, String)> {
-        // TODO: 替换为真实的 TA 调用
-        // let result = eth_wallet::create_wallet()?;
-
-        // 模拟 TA 响应
-        let wallet_id = Uuid::new_v4().to_string();
-        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
-
-        Ok((wallet_id, mnemonic))
-    }
-
-    /// 调用 TA RemoveWallet 命令
-    pub async fn remove_wallet(&self, wallet_id: &str) -> Result<()> {
-        // TODO: 替换为真实的 TA 调用
-        // eth_wallet::remove_wallet(wallet_id)?;
-
-        println!("TA: 删除钱包 {}", wallet_id);
-        Ok(())
-    }
-
-    /// 调用 TA DeriveAddress 命令
-    pub async fn derive_address(&self, wallet_id: &str, path: &str) -> Result<(String, String)> {
-        // TODO: 替换为真实的 TA 调用
-        // let result = eth_wallet::derive_address(wallet_id, path)?;
-
-        // 模拟 TA 响应
-        let address = "0x742d35Cc6634C0532925a3b8D4C8C8C3bfBb1234".to_string();
-        let public_key = "0x04...mock_public_key".to_string();
-
-        Ok((address, public_key))
-    }
-
-    /// 调用 TA SignTransaction 命令
-    pub async fn sign_transaction(&self, wallet_id: &str, path: &str, tx: &EthereumTransaction) -> Result<(String, String)> {
-        // TODO: 替换为真实的 TA 调用
-        // let result = eth_wallet::sign_transaction(wallet_id, path, tx)?;
-
-        // 模拟 TA 响应
-        let signature = "0x1b2c3d...mock_signature".to_string();
-        let tx_hash = "0xabcdef...mock_hash".to_string();
-
-        Ok((signature, tx_hash))
-    }
-}
+// 直接使用真实的TA实现
+pub use crate::eth_wallet::RealEthWalletTA as EthWalletTA;
 
 // ========================================
 // KMS API 服务器
