@@ -6,7 +6,7 @@
 set -e
 
 # 配置
-BASE_URL="${1:-https://atom-become-ireland-travels.trycloudflare.com}"
+BASE_URL="${1:-https://kms.aastar.io}"
 TEMP_DIR="/tmp/kms-test-$$"
 mkdir -p "$TEMP_DIR"
 
