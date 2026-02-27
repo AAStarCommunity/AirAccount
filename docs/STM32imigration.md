@@ -78,16 +78,16 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
    ```bash
    cd ~/AirAccount/kms/ta
    
-   # 【关键解答：如何找到板子上的 TA_DEV_KIT_DIR？】
-   # 这个目录的核心特征是包含 `mk/ta_dev_kit.mk` 这个构建文件。
-   # 如果您不确定路径在哪，直接在开发板终端跑下面这行搜索命令：
-   # find / -type f -name "ta_dev_kit.mk" 2>/dev/null
-   # 比如它若是输出 /usr/lib/optee_armtz/export-user_ta/mk/ta_dev_kit.mk
-   # 那您的 DIR 就是去掉末尾 /mk/ta_dev_kit.mk 之后的部分：
-   export TA_DEV_KIT_DIR=/usr/lib/optee_armtz/export-user_ta 
+   # 【关键解答：为什么 find 找不到 ta_dev_kit.mk？】
+   # 因为 TA Dev Kit (包含 Makefile 和头文件) 是“编译期依赖”，而不是“运行时依赖”。
+   # 官方的 Linux 镜像烧录进 SD 卡时，只带了运行所需的 `libteec.so` 和 `tee-supplicant`。
+   # 如果您非要在板子上直接 Make 编译 TA，您必须先在您的原开发环境中（比如 Ubuntu 或 Mac 编译 OP-TEE OS 时产生的 `export-ta_arm32` 目录），通过 SCP 命令把它整个文件夹拷贝到板子上来，比如放到 `/usr/include/optee_armtz/`。
+   # 只有拷贝过来之后，您才能在板子上 export TA_DEV_KIT_DIR 指向它并进行 Make。
+   export TA_DEV_KIT_DIR=/usr/include/optee_armtz/export-ta_arm32 
    
    make
    ```
+   **郑重建议**：既然板子上默认没有 Dev Kit，说明硬核的底层开发界默认大家都是在强大的 PC 宿主机上完成交叉编译（Path B），然后再把编好的 `.ta` 二进制文件扔到板子上跑的。如果拷来拷去觉得麻烦，强烈推荐您直接转战下方的 **【路径 B】**！
 3. **在板上编译 CA/Host (`kms/host`)**：
     由于是直接在目标板的 Linux 系统上编译：
     ```bash
