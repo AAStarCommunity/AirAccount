@@ -77,8 +77,15 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
    因为是在 ARMv7 开发板本尊上直接编译给自己用，所以**不需要**设置 `CROSS_COMPILE`，使用的是板上的原生 GCC！
    ```bash
    cd ~/AirAccount/kms/ta
-   # 指向开发板上预装的 TA dev kit，通常在：
-   export TA_DEV_KIT_DIR=/usr/lib/optee_armtz  # (具体路径以板上实际安装为准)
+   
+   # 【关键解答：如何找到板子上的 TA_DEV_KIT_DIR？】
+   # 这个目录的核心特征是包含 `mk/ta_dev_kit.mk` 这个构建文件。
+   # 如果您不确定路径在哪，直接在开发板终端跑下面这行搜索命令：
+   # find / -type f -name "ta_dev_kit.mk" 2>/dev/null
+   # 比如它若是输出 /usr/lib/optee_armtz/export-user_ta/mk/ta_dev_kit.mk
+   # 那您的 DIR 就是去掉末尾 /mk/ta_dev_kit.mk 之后的部分：
+   export TA_DEV_KIT_DIR=/usr/lib/optee_armtz/export-user_ta 
+   
    make
    ```
 3. **在板上编译 CA/Host (`kms/host`)**：
