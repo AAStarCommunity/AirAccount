@@ -1,222 +1,216 @@
-# STM32MP157 TEE 迁移与部署规划专题报告 (STM32imigration)
+# STM32MP157F-DK2 迁移部署终极执行手册
 
-## 0. TODO 列表 (项目需求规划)
-根据最新需求，未来项目需要完成以下任务：
+## 0. TODO 列表
 1. **启动KMS 服务，对外提供API服务**：`KMS.aastar.io`
-2. **增加 passkey 签名验证** 和 **BLS 签名验证**。
-3. **增加社交恢复的迁入、迁出功能**，包括：页面生成、签名收集和签名验证。
+2. **增加 passkey 签名验证** 和 **BLS 签名验证**
+3. **增加社交恢复的迁入、迁出功能**：页面生成、签名收集和签名验证
 
 ---
 
-## 一、 关于 CA (KMS API / 也可以叫 Host) 与 TA 的概念及物理部署位置澄清
+## 一、现状确认（基于代码审计的客观事实）
 
-您的理解**完全正确**。
-*   **KMS API 服务所在的程序 (`kms/host`)，就是通常 OP-TEE 语境下所说的 CA (Client Application)。**
-    *   通过我刚刚深入代码 `kms/host/src/api_server.rs` 和 `kms/host/src/ta_client.rs` 的核查，这个 Rust 写的 HTTP 服务，接收到诸如 `CreateKey` 或 `Sign` 等外部网络请求后，会在内部组装请求参数。
-    *   接着，封装好的参数会传递给底层基于 `optee_teec` 库封装的 `TaClient`。
-    *   `TaClient` 会通过 TEE 驱动发起 **SMC (Secure Monitor Call)** 指令，实质上就是一种跨 CPU 安全状态的上下文切换调用，将包含指令 ID (`proto::Command`) 和 Payload 的内存指针传入到底层系统。
-    *   **它的部署位置：** 理所应当运行在 STM32 的 **普通 Linux 操作系统 (Rich Execution Environment, REE)** 上。
+### 1.1 当前编译架构
 
-*   **TA (Trusted Application, `kms/ta`)**
-    *   负责真正的 ECDSA/BLS/Passkey 等高敏感度的密码学运算，并管理位于硬件加解密区的安全存储 (Secure Storage)。
-    *   **它的部署位置：** 运行在 STM32 内部隔离的 **OP-TEE 操作系统 (Secure World)** 环境中。
+当前 Docker 镜像 `teaclave/teaclave-trustzone-emulator-std-optee-4.5.0-expand-memory` 是一个 **aarch64 (ARMv8, 64位)** 的 QEMU OP-TEE 仿真环境。
 
-**总结：物理形态上，它们确实是两个编译出来的二进制实体。但业务逻辑上，它们组成了一个不可分割的完整 KMS 服务系统。**
-
----
-
-## 二、 核心答疑：关于 "必须重新编译" 的事实依据与详细解释
-
-非常抱歉之前的表述方式让您感到了困扰或猜测的意味。您说得对，我应该从代码和配置本身出发，给出确凿的依据，而不是主观推断。
-
-我刚刚重新仔细审阅了仓库中的关键编译配置，特别是 `kms/Makefile` 和 `kms/ta/Makefile`，我们来探讨一下为什么代码确实一行都不用改，但**依然必须进行交叉编译**才能在 STM32MP157 板子上运行。
-
-**事实 1：QEMU 测试环境的真实情况**
-您完全正确！您目前使用的 QEMU 环境确实是**真正的 OP-TEE TA**，而不是 Mock。
-我查阅了 `docs/deploy-arm-kms.md`，文档明确说明 QEMU OP-TEE 环境提供了真实的 TEE 隔离，仅仅在最初期的算法验证阶段（Phase 1）才使用了 `mock_tee`。既然您已经在 QEMU 内跑通，意味着 `kms/ta` 的 Rust/C 业务代码逻辑已经是完美适配 OP-TEE Core API (`libutee`) 的，因此**底层逻辑代码（C/Rust）确实一行都不需要改**。
-
-**事实 2：为什么要重新编译？（基于 `kms/Makefile` 的硬证据）**
-我查阅了您的项目根别 `kms/Makefile` 文件（第 20-23 行）：
+`kms/Makefile` (第 20-23 行) 硬编码了目标架构：
 ```makefile
 CROSS_COMPILE_HOST ?= aarch64-linux-gnu-
-CROSS_COMPILE_TA ?= aarch64-linux-gnu-
-TARGET_HOST ?= aarch64-unknown-linux-gnu
-TARGET_TA ?= aarch64-unknown-linux-gnu
+CROSS_COMPILE_TA   ?= aarch64-linux-gnu-
+TARGET_HOST        ?= aarch64-unknown-linux-gnu
+TARGET_TA          ?= aarch64-unknown-linux-gnu
 ```
 
-这四行代码是决定生死的关键所在：
-1.  **指令集架构冲突**：上述配置表明，您目前能在 QEMU 跑通的编译产物，其目标架构被硬编码或默认指向了 **`aarch64`（64位 ARMv8 架构）**。QEMU 模拟的正是 64 位的 Cortex-A53 或类似核心。
-2.  **STM32MP157F-DK2 的硬件客观限制**：这款真正物理芯片的核心是双核 **Cortex-A7**。Cortex-A7 只有 **32位（ARMv7-A 架构）**。
-3.  **结论**：如果您把现有的、能在 QEMU 里跑的 64 位 `.ta` 固件和 `kms-host` 二进制文件直接原封不动拷到只有 32 位物理 CPU 的 STM32 板子上执行，Linux 是绝不可能执行它的（必然引发 `Exec format error` 操作系统级报错）。
+`kms/ta/Makefile` 和 `kms/host/Makefile` 也各自默认 `aarch64`。
 
-**事实 3：TA 签名的加密机制约束**
-在 `kms/ta/Makefile` 的第 45 行定义了签名流程：
-```makefile
-@$(SIGN) --uuid $(UUID) --key $(TA_SIGN_KEY) --in $(OUT_DIR)/stripped_ta --out $(OUT_DIR)/$(UUID).ta
-```
-打包 `.ta` 文件的脚本极其依赖 `TA_DEV_KIT_DIR`。即便抛开架构 32位不谈，OP-TEE 官方强制要求每个物理硬件平台的 TA 编译，都必须链接对应那块板子系统构建出来的特定的导出套件（Export Kit）。如果用 QEMU 的 Dev Kit 打出的签名，STM32 硬件底层 OP-TEE OS 在加载时验签会不认，也无法分配对应的硬件内存页。
+### 1.2 目标硬件
 
-**这就是为什么我说 "必须彻底重新编译" 的根源：逻辑代码完全不变，但目标机器码的架构必须从 64位转换成 32位，且签名材料必须换成 STM32 专属的体系。**
+**STM32MP157F-DK2** = 双核 Cortex-A7 = **ARMv7-A (32位)**。
+
+### 1.3 结论
+
+- **代码逻辑一行不改**（C/Rust 业务代码完全兼容 OP-TEE Core API）
+- **必须重新交叉编译**：64位 aarch64 的二进制在 32位 ARMv7 板子上会直接报 `Exec format error`
+- TA 签名的 `TA_DEV_KIT_DIR` 必须换成 STM32 平台专属的 Export Kit
 
 ---
 
-## 三、 STM32MP157 编译、部署与持续测试完整标准流程（Migration Plan）
-
-通过仔细研读您提供的 [STM32MP157F-DK2 官方开发文档](https://github.com/jhfnetboy/STM32MP157F-DK2)，针对 AirAccount KMS 结合该硬件的具体情况，我为您规划了以下详尽的开发与部署路径。
-
-官方文档其实为您提供了**两条完全不同的开发路径**，这是之前我们没有涉及到的盲区：
-
-### 路径 A：Mac 用户推荐工作流（板上直接编译 —— 最省事、防错率高）
-
-如果您是通过 Mac 进行开发，官方**强烈建议**直接在开发板上进行本地编译，完美避开 Mac 交叉编译环境配置的巨坑。
-
-1. **环境准备与代码同步**：
-   *   Mac 通过 SSH/VNC 连接到装好初始系统（集成了 OP-TEE 和 gcc等工具链）的 STM32MP157 开发板 (`root@<board-ip>`)。
-   *   在板子上直接 Clone 代码：`git clone https://github.com/AAStarCommunity/AirAccount.git`，并切换到 `KMS-stm32` 分支。
-2. **在板上直接编译 TA (`kms/ta`)**：
-   因为是在 ARMv7 开发板本尊上直接编译给自己用，所以**不需要**设置 `CROSS_COMPILE`，使用的是板上的原生 GCC！
-   ```bash
-   cd ~/AirAccount/kms/ta
-   
-   # 【关键解答：为什么 find 找不到 ta_dev_kit.mk？】
-   # 因为 TA Dev Kit (包含 Makefile 和头文件) 是“编译期依赖”，而不是“运行时依赖”。
-   # 官方的 Linux 镜像烧录进 SD 卡时，只带了运行所需的 `libteec.so` 和 `tee-supplicant`。
-   # 如果您非要在板子上直接 Make 编译 TA，您必须先在您的原开发环境中（比如 Ubuntu 或 Mac 编译 OP-TEE OS 时产生的 `export-ta_arm32` 目录），通过 SCP 命令把它整个文件夹拷贝到板子上来，比如放到 `/usr/include/optee_armtz/`。
-   # 只有拷贝过来之后，您才能在板子上 export TA_DEV_KIT_DIR 指向它并进行 Make。
-   export TA_DEV_KIT_DIR=/usr/include/optee_armtz/export-ta_arm32 
-   
-   make
-   ```
-   **郑重建议**：既然板子上默认没有 Dev Kit，说明硬核的底层开发界默认大家都是在强大的 PC 宿主机上完成交叉编译（Path B），然后再把编好的 `.ta` 二进制文件扔到板子上跑的。如果拷来拷去觉得麻烦，强烈推荐您直接转战下方的 **【路径 B】**！
-3. **在板上编译 CA/Host (`kms/host`)**：
-    由于是直接在目标板的 Linux 系统上编译：
-    ```bash
-    cd ~/AirAccount/kms/host
-    cargo build --release  # 无需设置 --target 交叉编译目标
-    ```
-4. **原地部署部署与测试**：
-    ```bash
-    cp ~/AirAccount/kms/ta/*.ta /lib/optee_armtz/
-    cp ~/AirAccount/kms/host/target/release/kms-server /usr/local/bin/
-    ```
-
-### 路径 B：Ubuntu 分布式开发工作流（宿主机交叉编译 —— 适合重度开发）
+## 二、执行方案（Mac + Docker + STM32 唯一最优路径）
 
 > [!IMPORTANT]
-> **千万不要把 ST 的官方 SDK 下载到 STM32 开发板里！**
-> 那两个带着 `x86_64` 或 `aarch64` 字眼的 `tar.gz` SDK 压缩包，是专门给您的**外部电脑（宿主机 PC，比如 Ubuntu 虚拟机或云服务器）**准备的。它们的作用是在强大的 PC 上"跨架构"搭建用来编译出给板子跑的代码环境（这就叫交叉编译）。
-> 如果您采用的是**【路径 A】**（直接 SSH 连进 STM32 板子），板卡的出厂 Linux 系统内部**已经内置了原生的 ARMv7 GCC 和对应的 TA Dev Kit**（如 `/usr/lib/optee_armtz`），您**完全不需要**下载这俩巨型 SDK！
+> 您当前只有 Mac，没有 Ubuntu 主机。STM32 板子上自身**没有预装 TA Dev Kit**（已验证 `find / -name "ta_dev_kit.mk"` 返回空）。
+> 因此唯一可行方案是：**在 Mac 上用 Docker 跑 Ubuntu 容器做交叉编译，编译产物 SCP 推送到板子**。
 
-如果您在 Ubuntu 或 Linux 虚拟机上进行重度开发，编译速度更快的方式是传统的交叉编译，这也是大部分底层嵌入式工程师采用的做法：
+### Step 1: 在 Mac 上搭建 Docker 编译环境
 
-1. **使用官方脚本一键部署基础交叉工具链**：
-   在 Ubuntu 宿主机上，拉取并运行您仓库中的一键环境脚本，这会配置好 `arm-linux-gnueabihf-gcc` 及 Yocto 依赖：
-   ```bash
-   git clone https://github.com/jhfnetboy/STM32MP157F-DK2.git
-   cd STM32MP157F-DK2
-   ./scripts/setup-ubuntu-dev-env.sh
-   ```
-2. **安装 STM32 MPU 官方 Developer Package SDK (获取 `TA_DEV_KIT_DIR`)**：
-   *这一步是为了获取编译 TA 必须用到的特定板子的签名秘钥和头文件环境 (`TA_DEV_KIT_DIR`)*
-   *   前往 ST 官网下载对应的 SDK 压缩包 (例如: `SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v26.02.18.tar.gz`)。
-   *   解压并执行里边的 `.sh` 安装脚本，指定安装目标路径：
-       ```bash
-       tar xvf SDK-x86_64-stm32mp1-openstlinux-*.tar.gz
-       chmod +x stm32mp1-openstlinux-*/sdk/st-image-weston-openstlinux-*.sh
-       ./stm32mp1-openstlinux-*/sdk/st-image-weston-openstlinux-*.sh -d ~/STM32MPU_workspace/Developer-Package/SDK
-       ```
-   *   每次打开新终端准备编译前，**必须 source 这个环境变量**：
-       ```bash
-       cd ~/STM32MPU_workspace/Developer-Package
-       source SDK/environment-setup-cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
-       ```
-       *此时系统已装载交叉编译器。而您编译 TA 苦苦寻找的 `TA_DEV_KIT_DIR`，它就位于您刚刚解压出来的 SDK 根目录下的 sysroots 目标设备架构文件夹内！*
-       通常路径格式为：`export TA_DEV_KIT_DIR=$OECORE_TARGET_SYSROOT/usr/include/optee/export-user_ta` 或类似位置。您可以通过 `find ~/STM32MPU_workspace/Developer-Package/SDK/sysroots -name "export-ta_arm32"` 精确找寻。
-
-3. **在宿主机交叉编译 TA 与 CA**：
-   与我们在"核心答疑"中讨论的一致：
-   ```bash
-   # 编译 TA
-   cd AirAccount/kms/ta
-   export CROSS_COMPILE=arm-ostl-linux-gnueabi-
-   make
-   
-   # 编译 CA
-   cd ../host
-   rustup target add armv7-unknown-linux-gnueabihf
-   cargo build --target armv7-unknown-linux-gnueabihf --release
-   ```
-4. **通过 SCP 推送到开发板**：
-   将生成的 `.ta` 和 `kms-server` 推送到板子的 `/lib/optee_armtz/` 和 `/usr/bin/` 中。
-
-### 路径 C：Mac 用户的终极折中方案（使用 Docker 模拟 Ubuntu 交叉编译）
-
-如果您**只有一台 Mac，没有独立的 Ubuntu 服务器，而且嫌直接在开发板上编译（路径A）太慢 或 缺少 `TA_DEV_KIT`**，业界最完美的解决方案是：**在 Mac 里跑一个 Ubuntu Docker 容器专门用来当“编译机”**。
-
-1. **Mac 上启动 Ubuntu 容器并挂载代码**：
-   在您的 Mac 终端里，跑到存放源代码的目录：
-   ```bash
-   cd ~/Dev/mycelium/my-exploration/projects/AirAccount
-   # 启动一个包含 Rust 和基础工具的 Ubuntu 镜像，并将 Mac 的当前代码目录映射进去
-   docker run -it --name stm32-builder -v $(pwd):/workspace -w /workspace ubuntu:22.04 /bin/bash
-   ```
-2. **在 Docker 内一键安装交叉工具链**：
-   现在您已经“进入”了一个干净的 Ubuntu 环境。在 Docker 终端里执行刚才我们借用的官方脚本：
-   ```bash
-   apt update && apt install -y git sudo curl
-   git clone https://github.com/jhfnetboy/STM32MP157F-DK2.git
-   cd STM32MP157F-DK2
-   ./scripts/setup-ubuntu-dev-env.sh
-   ```
-3. **在 Docker 内下载官方 SDK**：
-   按照【路径 B】的第 2 步，下载 ST 官方的那个巨大的 `tar.gz` SDK，并且 `./st-image-weston-openstlinux...sh` 把它装进这个 Docker 环境的某个路径里。
-4. **在 Docker 里秒级编译！**
-   设置好 `TA_DEV_KIT_DIR` (从刚装的 SDK 中指向 sysroots) 并在 Docker 内敲击 `make` 和 `cargo build`。
-5. **在 Mac 上收获果实并 SCP 传给开发板**：
-   因为第一步用了 `-v $(pwd):/workspace`。此时您在 Docker 内部生成的二进制文件，会**直接实时出现在您 Mac 本地**的 `AirAccount` 文件夹里。
-   您只需要在 Mac 的另一个终端里，输入一条命令将它们发给开发板即可：
-   ```bash
-   scp kms/ta/*.ta root@<stm32-ip>:/lib/optee_armtz/
-   ```
-
----
-
-### Phase 3: 黑盒连通性与高可用性测试 (Execution & Availability)
-
-代码的 SMC 通道能否正常工作取决于硬件 TEE 驱动的支持状态，无论采用哪条路径，最终部署后的验证环节都是一致的：
-
-**Step 3.1: 基础驱动存活测试**
-在 STM32 的终端中执行：
 ```bash
-# 验证 tee-supplicant 守护进程是否在后台运行 (它是 TA 访问普通世界存储的关键)
+# 在 Mac 终端执行，进入代码目录
+cd ~/Dev/mycelium/my-exploration/projects/AirAccount
+
+# 启动 Ubuntu 22.04 容器，将代码挂载进去
+docker run -it \
+  --name stm32-builder \
+  --platform linux/amd64 \
+  -v $(pwd):/workspace \
+  -w /workspace \
+  ubuntu:22.04 /bin/bash
+```
+
+> `--platform linux/amd64` 确保在 M 芯片 Mac 上也能正确跑 x86 Ubuntu（ST 的 SDK 只提供 x86 和 arm64 两个版本，用 x86 兼容性最好）。
+
+### Step 2: 在 Docker 内安装交叉编译工具链
+
+进入 Docker 容器后，执行以下命令：
+```bash
+apt update && apt install -y \
+  build-essential git curl wget \
+  gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+  binutils-arm-linux-gnueabihf \
+  python3 python3-pip python3-pycryptodome \
+  pkg-config libssl-dev
+
+# 验证交叉编译器
+arm-linux-gnueabihf-gcc --version
+# 应显示 gcc (Ubuntu ...) 11.x / 12.x 等
+```
+
+### Step 3: 在 Docker 内安装 Rust 及 ARMv7 目标
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+
+# 安装 xargo (TA 编译需要)
+cargo install xargo
+
+# 安装 ARM32 编译目标
+rustup target add armv7-unknown-linux-gnueabihf
+
+# 安装 nightly (xargo 可能需要)
+rustup install nightly
+rustup component add rust-src --toolchain nightly
+```
+
+### Step 4: 在 Docker 内安装 ST 官方 SDK（获取 TA_DEV_KIT_DIR）
+
+这一步是**核心中的核心**：获取 STM32 平台专属的 OP-TEE TA 编译套件。
+
+```bash
+cd /opt
+
+# 方案 A：从 ST 官网下载 Developer Package SDK（推荐）
+# 在 Mac 浏览器下载 SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v26.02.18.tar.gz
+# 然后把它放到 AirAccount 目录下（因为挂载了所以 Docker 里也能看到）
+# 在 Docker 内执行:
+tar xvf /workspace/SDK-x86_64-stm32mp1-openstlinux-*.tar.gz -C /opt/
+chmod +x /opt/stm32mp1-openstlinux-*/sdk/st-image-weston-*.sh
+/opt/stm32mp1-openstlinux-*/sdk/st-image-weston-*.sh -d /opt/STM32MP1-SDK
+
+# 激活 SDK 环境 (每次新开终端都要执行)
+source /opt/STM32MP1-SDK/environment-setup-cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
+
+# 验证环境
+echo $ARCH        # 应输出: arm
+echo $CROSS_COMPILE  # 应输出: arm-ostl-linux-gnueabi-
+
+# 定位 TA_DEV_KIT_DIR（在 SDK sysroots 内搜索）
+find /opt/STM32MP1-SDK/sysroots -name "ta_dev_kit.mk" -o -name "export-ta_arm32" 2>/dev/null
+# 假设输出:  /opt/STM32MP1-SDK/sysroots/cortexa7t2hf-.../usr/include/optee/export-user_ta/mk/ta_dev_kit.mk
+# 则 TA_DEV_KIT_DIR 等于去掉末尾 /mk/ta_dev_kit.mk 的部分
+export TA_DEV_KIT_DIR=<find 命令输出的路径去掉末尾 /mk/ta_dev_kit.mk>
+```
+
+> **方案 B（如果 SDK 下不到或太大）**：从您的 STM32MP157F-DK2 仓库中找到已编译好的 optee_os 产物 `export-ta_arm32` 目录，拷贝进 Docker。
+
+### Step 5: 交叉编译 TA
+
+```bash
+cd /workspace/kms/ta
+
+# 设置环境变量 (如果没有 source SDK，则手动设置)
+export CROSS_COMPILE=arm-linux-gnueabihf-
+export TARGET=armv7-unknown-linux-gnueabihf
+export TA_DEV_KIT_DIR=<Step 4 中 find 到的路径>
+
+# 编译 TA
+make clean
+make TARGET=$TARGET CROSS_COMPILE=$CROSS_COMPILE
+
+# 验证产物
+file kms/ta/target/armv7-unknown-linux-gnueabihf/release/*.ta 2>/dev/null || echo "检查 ta 输出目录"
+ls -la target/*/release/
+```
+
+### Step 6: 交叉编译 CA (Host/API Server)
+
+```bash
+cd /workspace/kms/host
+
+# 配置 Cargo 链接器
+mkdir -p /workspace/.cargo
+cat > /workspace/.cargo/config.toml << 'EOF'
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+EOF
+
+# 编译 Host
+export TARGET_HOST=armv7-unknown-linux-gnueabihf
+cargo build --target armv7-unknown-linux-gnueabihf --release
+
+# 验证产物
+file target/armv7-unknown-linux-gnueabihf/release/kms-api-server
+# 应显示: ELF 32-bit LSB ..., ARM, ...
+```
+
+### Step 7: 部署到 STM32 开发板
+
+回到 **Mac 终端**（不是 Docker 内）：
+
+```bash
+cd ~/Dev/mycelium/my-exploration/projects/AirAccount
+BOARD_IP=<你的板子 IP>
+
+# 部署 TA
+scp kms/ta/target/*/release/*.ta root@$BOARD_IP:/lib/optee_armtz/
+
+# 部署 CA
+scp kms/host/target/armv7-unknown-linux-gnueabihf/release/kms-api-server root@$BOARD_IP:/usr/local/bin/kms-server
+
+# 设置权限
+ssh root@$BOARD_IP "chmod 444 /lib/optee_armtz/*.ta && chmod +x /usr/local/bin/kms-server"
+```
+
+### Step 8: 在开发板上验证
+
+SSH 到板子执行：
+
+```bash
+ssh root@$BOARD_IP
+
+# 8.1 检查 TEE 驱动
+ls -la /dev/tee0 /dev/teepriv0
 ps aux | grep tee-supplicant
 
-# 验证内核驱动是否暴露了安全的硬件字符设备
-ls -la /dev/tee0
-ls -la /dev/teepriv0
-```
+# 8.2 手动启动服务测试
+kms-server --port 8080 &
 
-**Step 3.2: 本地 API 集成存活测试**
-开启一个前台终端运行服务，观察启动日志：
-```bash
-kms-server --port 8080
-```
-另开一个 SSH 会话进行全量端到端验证（这步至关重要，代表了 CA -> SMC -> TA 的全链路打通）：
-```bash
-# 1. 探针测活
+# 8.3 端到端验证 (CA -> SMC -> TA 全链路)
 curl -s http://127.0.0.1:8080/health
 
-# 2. 发起重度交互（穿透到真实硬件晶圆生成 ECDSA）
 curl -X POST http://127.0.0.1:8080/ \
   -H "Content-Type: application/json" \
   -H "X-Amz-Target: TrentService.CreateKey" \
   -d '{"KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1"}'
+
+# 8.4 如果成功，停掉前台进程
+kill %1
 ```
 
-**Step 3.3: 7x24 小时无人值守部署 (Production Daemon)**
-当上述手动测试无误后，必须配置 Systemd 以实现程序的异常崩溃拉起和随终端断电开机自启。
-1. `nano /etc/systemd/system/kms.service`
-```ini
+### Step 9: 配置 7×24 自动运行
+
+```bash
+# 在板子上创建 systemd 服务
+cat > /etc/systemd/system/kms.service << 'EOF'
 [Unit]
 Description=AirAccount KMS API & TEE Gateway
 After=network.target tee-supplicant.service
@@ -226,18 +220,34 @@ Type=simple
 ExecStart=/usr/local/bin/kms-server --port 8080
 Restart=on-failure
 RestartSec=5
-# 确保以具有 /dev/tee0 读写权限的用户组启动 (如果是非 root 跑，需把用户加入 tee 用户组)
-User=root 
+User=root
 
 [Install]
 WantedBy=multi-user.target
-```
-2. 执行激活：
-```bash
+EOF
+
 systemctl daemon-reload
 systemctl enable kms.service
 systemctl start kms.service
 systemctl status kms.service
 ```
 
-通过这一套流程设计，我们就能安全、稳定地将 AirAccount KMS 在这块支持 TrustZone 的 STM32MP1 开发板上完成真实的工业级硬件落地。
+---
+
+## 三、日常开发迭代工作流
+
+完成首次部署后，日常的代码修改→编译→部署循环如下：
+
+```
+Mac 上修改 kms/ 下的 Rust 代码
+    ↓
+docker start -i stm32-builder   # 重新进入之前的容器
+    ↓
+cd /workspace/kms && make TARGET=armv7-unknown-linux-gnueabihf CROSS_COMPILE=arm-linux-gnueabihf-
+    ↓
+回到 Mac，scp 新产物到板子
+    ↓
+ssh root@板子 "systemctl restart kms"
+```
+
+> **提示**：Docker 容器用 `docker start -i stm32-builder` 重新进入，无需每次重装工具链。
