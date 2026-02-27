@@ -138,8 +138,7 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
    ```bash
    # 编译 TA
    cd AirAccount/kms/ta
-   export CROSS_COMPILE=arm-linux-gnueabihf-
-   export TA_DEV_KIT_DIR=~/optee-stm32mp1/optee_os/out/arm-plat-stm32mp1/export-ta_arm32  # 示例路径
+   export CROSS_COMPILE=arm-ostl-linux-gnueabi-
    make
    
    # 编译 CA
@@ -147,8 +146,38 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
    rustup target add armv7-unknown-linux-gnueabihf
    cargo build --target armv7-unknown-linux-gnueabihf --release
    ```
-3. **通过 SCP 推送到开发板**：
+4. **通过 SCP 推送到开发板**：
    将生成的 `.ta` 和 `kms-server` 推送到板子的 `/lib/optee_armtz/` 和 `/usr/bin/` 中。
+
+### 路径 C：Mac 用户的终极折中方案（使用 Docker 模拟 Ubuntu 交叉编译）
+
+如果您**只有一台 Mac，没有独立的 Ubuntu 服务器，而且嫌直接在开发板上编译（路径A）太慢 或 缺少 `TA_DEV_KIT`**，业界最完美的解决方案是：**在 Mac 里跑一个 Ubuntu Docker 容器专门用来当“编译机”**。
+
+1. **Mac 上启动 Ubuntu 容器并挂载代码**：
+   在您的 Mac 终端里，跑到存放源代码的目录：
+   ```bash
+   cd ~/Dev/mycelium/my-exploration/projects/AirAccount
+   # 启动一个包含 Rust 和基础工具的 Ubuntu 镜像，并将 Mac 的当前代码目录映射进去
+   docker run -it --name stm32-builder -v $(pwd):/workspace -w /workspace ubuntu:22.04 /bin/bash
+   ```
+2. **在 Docker 内一键安装交叉工具链**：
+   现在您已经“进入”了一个干净的 Ubuntu 环境。在 Docker 终端里执行刚才我们借用的官方脚本：
+   ```bash
+   apt update && apt install -y git sudo curl
+   git clone https://github.com/jhfnetboy/STM32MP157F-DK2.git
+   cd STM32MP157F-DK2
+   ./scripts/setup-ubuntu-dev-env.sh
+   ```
+3. **在 Docker 内下载官方 SDK**：
+   按照【路径 B】的第 2 步，下载 ST 官方的那个巨大的 `tar.gz` SDK，并且 `./st-image-weston-openstlinux...sh` 把它装进这个 Docker 环境的某个路径里。
+4. **在 Docker 里秒级编译！**
+   设置好 `TA_DEV_KIT_DIR` (从刚装的 SDK 中指向 sysroots) 并在 Docker 内敲击 `make` 和 `cargo build`。
+5. **在 Mac 上收获果实并 SCP 传给开发板**：
+   因为第一步用了 `-v $(pwd):/workspace`。此时您在 Docker 内部生成的二进制文件，会**直接实时出现在您 Mac 本地**的 `AirAccount` 文件夹里。
+   您只需要在 Mac 的另一个终端里，输入一条命令将它们发给开发板即可：
+   ```bash
+   scp kms/ta/*.ta root@<stm32-ip>:/lib/optee_armtz/
+   ```
 
 ---
 
