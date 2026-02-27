@@ -164,11 +164,13 @@ file target/armv7-unknown-linux-gnueabihf/release/kms-api-server
 
 ### Step 7: 部署到 STM32 开发板
 
+> **提示**：根据您的网络架构，您的 Mac Mini (IP: `192.168.7.3`) 与 STM32 开发板 (IP: `192.168.7.2`) 通过网线直连，可直接 SSH 通信。
+
 回到 **Mac 终端**（不是 Docker 内）：
 
 ```bash
 cd ~/Dev/mycelium/my-exploration/projects/AirAccount
-BOARD_IP=<你的板子 IP>
+BOARD_IP="192.168.7.2"
 
 # 部署 TA
 scp kms/ta/target/*/release/*.ta root@$BOARD_IP:/lib/optee_armtz/
