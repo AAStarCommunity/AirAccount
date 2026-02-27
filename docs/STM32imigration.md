@@ -62,74 +62,102 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
 
 ## 三、 STM32MP157 编译、部署与持续测试完整标准流程（Migration Plan）
 
-### Phase 1: 准备交叉编译上下文与产物构建
+通过仔细研读您提供的 [STM32MP157F-DK2 官方开发文档](https://github.com/jhfnetboy/STM32MP157F-DK2)，针对 AirAccount KMS 结合该硬件的具体情况，我为您规划了以下详尽的开发与部署路径。
 
-1.  **获取对应环境的库与 Dev Kit**:
-    确保拥有针对 STM32 架构编译好的 OP-TEE Client 库 (`libteec.so`) 以及 OP-TEE OS 给 TA 用的 `export-ta_arm32` 目录。
-2.  **编译 TA (`kms/ta`)**:
+官方文档其实为您提供了**两条完全不同的开发路径**，这是之前我们没有涉及到的盲区：
+
+### 路径 A：Mac 用户推荐工作流（板上直接编译 —— 最省事、防错率高）
+
+如果您是通过 Mac 进行开发，官方**强烈建议**直接在开发板上进行本地编译，完美避开 Mac 交叉编译环境配置的巨坑。
+
+1. **环境准备与代码同步**：
+   *   Mac 通过 SSH/VNC 连接到装好初始系统（集成了 OP-TEE 和 gcc等工具链）的 STM32MP157 开发板 (`root@<board-ip>`)。
+   *   在板子上直接 Clone 代码：`git clone https://github.com/AAStarCommunity/AirAccount.git`，并切换到 `KMS-stm32` 分支。
+2. **在板上直接编译 TA (`kms/ta`)**：
+   因为是在 ARMv7 开发板本尊上直接编译给自己用，所以**不需要**设置 `CROSS_COMPILE`，使用的是板上的原生 GCC！
+   ```bash
+   cd ~/AirAccount/kms/ta
+   # 指向开发板上预装的 TA dev kit，通常在：
+   export TA_DEV_KIT_DIR=/usr/lib/optee_armtz  # (具体路径以板上实际安装为准)
+   make
+   ```
+3. **在板上编译 CA/Host (`kms/host`)**：
+    由于是直接在目标板的 Linux 系统上编译：
     ```bash
-    cd kms/ta
-    # 指向 STM32 的交叉编译器
-    export CROSS_COMPILE=arm-none-linux-gnueabihf-
-    # 指向 STM32 平台编译出来的 TA dev kit
-    export TA_DEV_KIT_DIR=/path/to/stm32/optee_os/out/arm-plat-stm32mp1/export-ta_arm32
-    make
+    cd ~/AirAccount/kms/host
+    cargo build --release  # 无需设置 --target 交叉编译目标
     ```
-    *产物验证*：输出一个带有类似 `4319f351-0b24-4097-b659-80ee4f824cdd.ta` 的文件。可通过 `file [UUID].ta` 验证是否为 32-bit ARM 数据格式。
-3.  **编译 CA/Host API (`kms/host`)**:
-    在 Rust 环境中安装对应 target：
+4. **原地部署部署与测试**：
     ```bash
-    rustup target add armv7-unknown-linux-gnueabihf
-    # 在 ~/.cargo/config 中配置对应架构的链接器，指向 STM32 的 GCC 工具链
-    cd kms/host
-    cargo build --target armv7-unknown-linux-gnueabihf --release 
+    cp ~/AirAccount/kms/ta/*.ta /lib/optee_armtz/
+    cp ~/AirAccount/kms/host/target/release/kms-server /usr/local/bin/
     ```
-    *产物验证*：生成可执行文件 `target/armv7-unknown-linux-gnueabihf/release/kms-server`。
 
-### Phase 2: 实施文件转移与硬件部署
+### 路径 B：Ubuntu 分布式开发工作流（宿主机交叉编译 —— 适合重度开发）
 
-将板卡连接上网络或通过 UART/SCP，将两个编译好的产物推送入 STM32 的 Linux (Yocto/Buildroot/Debian系统)：
-1.  **部署 TA**:
-    将生成的 `.ta` 文件拷贝至物理板的标准查找位置：`/lib/optee_armtz/` 或 `/usr/lib/optee_armtz/`。
-2.  **部署 CA**:
-    将 `kms-server` 拷贝至 `/usr/local/bin/`，赋予 `chmod +x`。
+如果您在 Ubuntu 或 Linux 虚拟机上进行重度开发，编译速度更快的方式是传统的交叉编译，这也是大部分底层嵌入式工程师采用的做法：
 
-*(前提假设是您当前的 STM32MP157 硬件的 SD 卡底层固件中已经成功集成了 TF-A, OP-TEE OS 及 Linux Kernel 中的 tee 驱动，并且后台驻留了进程 `tee-supplicant`。)*
+1. **使用官方脚本一键部署工具链**：
+   在 Ubuntu 宿主机上，拉取并运行您仓库中的一键环境脚本：
+   ```bash
+   git clone https://github.com/jhfnetboy/STM32MP157F-DK2.git
+   cd STM32MP157F-DK2
+   ./scripts/setup-ubuntu-dev-env.sh
+   # 这会帮您自动下载并配置 arm-linux-gnueabihf-gcc 体系
+   ```
+2. **在宿主机交叉编译 TA 与 CA**：
+   与我们在"核心答疑"中讨论的一致：
+   ```bash
+   # 编译 TA
+   cd AirAccount/kms/ta
+   export CROSS_COMPILE=arm-linux-gnueabihf-
+   export TA_DEV_KIT_DIR=~/optee-stm32mp1/optee_os/out/arm-plat-stm32mp1/export-ta_arm32  # 示例路径
+   make
+   
+   # 编译 CA
+   cd ../host
+   rustup target add armv7-unknown-linux-gnueabihf
+   cargo build --target armv7-unknown-linux-gnueabihf --release
+   ```
+3. **通过 SCP 推送到开发板**：
+   将生成的 `.ta` 和 `kms-server` 推送到板子的 `/lib/optee_armtz/` 和 `/usr/bin/` 中。
+
+---
 
 ### Phase 3: 黑盒连通性与高可用性测试 (Execution & Availability)
 
-代码的 SMC 通道能否正常工作取决于硬件 TEE 驱动的支持状态，部署后的测试流程应当如下：
+代码的 SMC 通道能否正常工作取决于硬件 TEE 驱动的支持状态，无论采用哪条路径，最终部署后的验证环节都是一致的：
 
 **Step 3.1: 基础驱动存活测试**
 在 STM32 的终端中执行：
 ```bash
-# 验证 tee-supplicant 进程是否存在
+# 验证 tee-supplicant 守护进程是否在后台运行 (它是 TA 访问普通世界存储的关键)
 ps aux | grep tee-supplicant
 
-# 验证内核驱动是否暴露了安全的字符设备
+# 验证内核驱动是否暴露了安全的硬件字符设备
 ls -la /dev/tee0
 ls -la /dev/teepriv0
 ```
 
 **Step 3.2: 本地 API 集成存活测试**
-开启一个前台终端运行服务看输出（不要关终端）：
+开启一个前台终端运行服务，观察启动日志：
 ```bash
-./kms-server --port 8080
+kms-server --port 8080
 ```
-另开一个 SSH 会话进行全量端到端验证（这步至关重要，它验证了 Linux CA 通过物理内核态 TEE Client 驱动呼叫处于芯片内存隔离区里面的 TA 的能力）：
+另开一个 SSH 会话进行全量端到端验证（这步至关重要，代表了 CA -> SMC -> TA 的全链路打通）：
 ```bash
-# 1. 查询健康度（不调TA）
+# 1. 探针测活
 curl -s http://127.0.0.1:8080/health
 
-# 2. 发起重度交互（穿透到TA生成 ECDSA）
+# 2. 发起重度交互（穿透到真实硬件晶圆生成 ECDSA）
 curl -X POST http://127.0.0.1:8080/ \
   -H "Content-Type: application/json" \
   -H "X-Amz-Target: TrentService.CreateKey" \
   -d '{"KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1"}'
 ```
 
-**Step 3.3: 7x24 小时无人值守部署 (Systemd 托管模式)**
-当上述测试无误后，立刻终止前台进程。为服务编写 Linux `systemd` 配置以实现异常崩溃拉起、随开机自动启动，这是确保长期无故障调用的根本机制：
+**Step 3.3: 7x24 小时无人值守部署 (Production Daemon)**
+当上述手动测试无误后，必须配置 Systemd 以实现程序的异常崩溃拉起和随终端断电开机自启。
 1. `nano /etc/systemd/system/kms.service`
 ```ini
 [Unit]
@@ -141,13 +169,13 @@ Type=simple
 ExecStart=/usr/local/bin/kms-server --port 8080
 Restart=on-failure
 RestartSec=5
-# 确保以具有 /dev/tee0 读写权限的用户组启动
+# 确保以具有 /dev/tee0 读写权限的用户组启动 (如果是非 root 跑，需把用户加入 tee 用户组)
 User=root 
 
 [Install]
 WantedBy=multi-user.target
 ```
-2. 执行激活并检查：
+2. 执行激活：
 ```bash
 systemctl daemon-reload
 systemctl enable kms.service
@@ -155,4 +183,4 @@ systemctl start kms.service
 systemctl status kms.service
 ```
 
-通过这一套包含重新针对 STM32v7 进行架构交叉编译、正确放缩文件层级并在硬件层面进行进程监控的方案，您之前在 QEMU 模拟环境中稳定运行的 `kms/host` 和 `kms/ta` 可在真机层面获得企业级的部署稳定性和服务生命周期保障。
+通过这一套流程设计，我们就能安全、稳定地将 AirAccount KMS 在这块支持 TrustZone 的 STM32MP1 开发板上完成真实的工业级硬件落地。
