@@ -97,15 +97,31 @@ TARGET_TA ?= aarch64-unknown-linux-gnu
 
 如果您在 Ubuntu 或 Linux 虚拟机上进行重度开发，编译速度更快的方式是传统的交叉编译，这也是大部分底层嵌入式工程师采用的做法：
 
-1. **使用官方脚本一键部署工具链**：
-   在 Ubuntu 宿主机上，拉取并运行您仓库中的一键环境脚本：
+1. **使用官方脚本一键部署基础交叉工具链**：
+   在 Ubuntu 宿主机上，拉取并运行您仓库中的一键环境脚本，这会配置好 `arm-linux-gnueabihf-gcc` 及 Yocto 依赖：
    ```bash
    git clone https://github.com/jhfnetboy/STM32MP157F-DK2.git
    cd STM32MP157F-DK2
    ./scripts/setup-ubuntu-dev-env.sh
-   # 这会帮您自动下载并配置 arm-linux-gnueabihf-gcc 体系
    ```
-2. **在宿主机交叉编译 TA 与 CA**：
+2. **安装 STM32 MPU 官方 Developer Package SDK (获取 `TA_DEV_KIT_DIR`)**：
+   *这一步是为了获取编译 TA 必须用到的特定板子的签名秘钥和头文件环境 (`TA_DEV_KIT_DIR`)*
+   *   前往 ST 官网下载对应的 SDK 压缩包 (例如: `SDK-x86_64-stm32mp1-openstlinux-6.6-yocto-scarthgap-mpu-v26.02.18.tar.gz`)。
+   *   解压并执行里边的 `.sh` 安装脚本，指定安装目标路径：
+       ```bash
+       tar xvf SDK-x86_64-stm32mp1-openstlinux-*.tar.gz
+       chmod +x stm32mp1-openstlinux-*/sdk/st-image-weston-openstlinux-*.sh
+       ./stm32mp1-openstlinux-*/sdk/st-image-weston-openstlinux-*.sh -d ~/STM32MPU_workspace/Developer-Package/SDK
+       ```
+   *   每次打开新终端准备编译前，**必须 source 这个环境变量**：
+       ```bash
+       cd ~/STM32MPU_workspace/Developer-Package
+       source SDK/environment-setup-cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
+       ```
+       *此时系统已装载交叉编译器。而您编译 TA 苦苦寻找的 `TA_DEV_KIT_DIR`，它就位于您刚刚解压出来的 SDK 根目录下的 sysroots 目标设备架构文件夹内！*
+       通常路径格式为：`export TA_DEV_KIT_DIR=$OECORE_TARGET_SYSROOT/usr/include/optee/export-user_ta` 或类似位置。您可以通过 `find ~/STM32MPU_workspace/Developer-Package/SDK/sysroots -name "export-ta_arm32"` 精确找寻。
+
+3. **在宿主机交叉编译 TA 与 CA**：
    与我们在"核心答疑"中讨论的一致：
    ```bash
    # 编译 TA
