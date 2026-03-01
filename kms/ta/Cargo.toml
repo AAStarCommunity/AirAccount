@@ -38,6 +38,10 @@ hex = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0.197", features = ["derive"] }
 sha3 = "0.10.6"
 secp256k1 = "0.27.0"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "0.10", default-features = false }
+# Pin transitive deps to versions compatible with nightly-2024-05-15 (no edition2024)
+base64ct = "=1.6.0"
 ethereum-tx-sign = "6.1.3"
 bincode = "1.3.3"
 

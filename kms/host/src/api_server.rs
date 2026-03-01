@@ -143,6 +143,9 @@ pub struct SignRequest {
     pub message: Option<String>,
     #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
     pub signing_algorithm: Option<String>,
+    /// Optional PassKey assertion for user verification
+    #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
+    pub passkey: Option<PasskeyAssertion>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -165,6 +168,9 @@ pub struct SignHashRequest {
     pub hash: String,
     #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
     pub signing_algorithm: Option<String>,
+    /// Optional PassKey assertion for user verification
+    #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
+    pub passkey: Option<PasskeyAssertion>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -242,6 +248,78 @@ pub struct QueueStatusResponse {
     pub estimated_wait_seconds: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterPasskeyRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    /// P-256 public key in uncompressed hex (0x04...)
+    #[serde(rename = "PasskeyPublicKey")]
+    pub passkey_public_key: String,
+    /// Optional credential ID from WebAuthn
+    #[serde(rename = "CredentialId", skip_serializing_if = "Option::is_none", default)]
+    pub credential_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterPasskeyResponse {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    #[serde(rename = "Registered")]
+    pub registered: bool,
+}
+
+/// WebAuthn assertion data attached to Sign/SignHash requests
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PasskeyAssertion {
+    /// authenticatorData in hex
+    #[serde(rename = "AuthenticatorData")]
+    pub authenticator_data: String,
+    /// SHA-256(clientDataJSON) in hex
+    #[serde(rename = "ClientDataHash")]
+    pub client_data_hash: String,
+    /// ECDSA signature in hex (DER or r||s 64 bytes)
+    #[serde(rename = "Signature")]
+    pub signature: String,
+}
+
+/// Parse DER-encoded ECDSA signature into (r, s) 32-byte arrays
+fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
+    if der.len() < 8 || der[0] != 0x30 {
+        return Err(anyhow!("Invalid DER signature"));
+    }
+    let mut pos = 2; // skip 0x30 + total_len
+    if der[pos] != 0x02 {
+        return Err(anyhow!("Expected INTEGER tag for r"));
+    }
+    pos += 1;
+    let r_len = der[pos] as usize;
+    pos += 1;
+    let r_raw = &der[pos..pos + r_len];
+    pos += r_len;
+    if der[pos] != 0x02 {
+        return Err(anyhow!("Expected INTEGER tag for s"));
+    }
+    pos += 1;
+    let s_len = der[pos] as usize;
+    pos += 1;
+    let s_raw = &der[pos..pos + s_len];
+
+    // Pad/trim to 32 bytes (DER integers may have leading zero for sign)
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    if r_raw.len() > 32 {
+        r.copy_from_slice(&r_raw[r_raw.len() - 32..]);
+    } else {
+        r[32 - r_raw.len()..].copy_from_slice(r_raw);
+    }
+    if s_raw.len() > 32 {
+        s.copy_from_slice(&s_raw[s_raw.len() - 32..]);
+    } else {
+        s[32 - s_raw.len()..].copy_from_slice(s_raw);
+    }
+    Ok((r, s))
+}
+
 enum SignPayload {
     Transaction(proto::EthTransaction),
     Message(Vec<u8>),
@@ -257,6 +335,8 @@ pub struct KmsApiServer {
     pending_tasks: Arc<AtomicUsize>,
     /// Track key derivation status: key_id -> "deriving" | "ready" | "error:msg"
     key_status: Arc<RwLock<HashMap<String, String>>>,
+    /// PassKey public keys: key_id -> passkey_pubkey_bytes (uncompressed P-256, 65 bytes)
+    passkey_store: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 /// RAII guard that decrements pending_tasks on drop
@@ -274,6 +354,7 @@ impl KmsApiServer {
             tee_semaphore: Arc::new(Semaphore::new(TEE_MAX_CONCURRENCY)),
             pending_tasks: Arc::new(AtomicUsize::new(0)),
             key_status: Arc::new(RwLock::new(HashMap::new())),
+            passkey_store: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -443,6 +524,106 @@ impl KmsApiServer {
         }
     }
 
+    pub async fn register_passkey(&self, req: RegisterPasskeyRequest) -> Result<RegisterPasskeyResponse> {
+        println!("📝 KMS RegisterPasskey API called for key: {}", req.key_id);
+
+        // Verify key exists
+        let store = self.metadata_store.read().await;
+        if !store.contains_key(&req.key_id) {
+            return Err(anyhow!("Key not found: {}", req.key_id));
+        }
+        drop(store);
+
+        // Decode public key from hex
+        let pubkey_hex = req.passkey_public_key.trim_start_matches("0x");
+        let pubkey_bytes = hex::decode(pubkey_hex)
+            .map_err(|e| anyhow!("Invalid passkey public key hex: {}", e))?;
+
+        if pubkey_bytes.len() != 65 || pubkey_bytes[0] != 0x04 {
+            return Err(anyhow!(
+                "PassKey public key must be 65 bytes uncompressed (0x04 || x || y), got {} bytes",
+                pubkey_bytes.len()
+            ));
+        }
+
+        let mut pk_store = self.passkey_store.write().await;
+        pk_store.insert(req.key_id.clone(), pubkey_bytes);
+
+        Ok(RegisterPasskeyResponse {
+            key_id: req.key_id,
+            registered: true,
+        })
+    }
+
+    /// Verify passkey assertion in TEE before allowing sign operations.
+    /// Returns Ok(()) if no passkey registered (backward compatible) or verification passes.
+    async fn verify_passkey_guard(
+        &self,
+        key_id: &str,
+        wallet_uuid: uuid::Uuid,
+        passkey: Option<&PasskeyAssertion>,
+    ) -> Result<()> {
+        let pk_store = self.passkey_store.read().await;
+        let pubkey_bytes = pk_store.get(key_id).cloned();
+        drop(pk_store);
+
+        // No passkey registered: skip verification (backward compatible)
+        let pubkey = match pubkey_bytes {
+            Some(pk) => pk,
+            None => return Ok(()),
+        };
+
+        // Passkey registered but no assertion provided: reject
+        let assertion = passkey.ok_or_else(|| anyhow!(
+            "This key requires PassKey verification. Provide Passkey assertion in request."
+        ))?;
+
+        // Parse assertion fields
+        let auth_data = hex::decode(assertion.authenticator_data.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid authenticator_data hex: {}", e))?;
+        let cdh_bytes = hex::decode(assertion.client_data_hash.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid client_data_hash hex: {}", e))?;
+        if cdh_bytes.len() != 32 {
+            return Err(anyhow!("client_data_hash must be 32 bytes"));
+        }
+        let mut client_data_hash = [0u8; 32];
+        client_data_hash.copy_from_slice(&cdh_bytes);
+
+        // Parse signature: try raw r||s (64 bytes) first, then DER
+        let sig_bytes = hex::decode(assertion.signature.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid signature hex: {}", e))?;
+
+        let (sig_r, sig_s) = if sig_bytes.len() == 64 {
+            // Raw r || s format
+            let mut r = [0u8; 32];
+            let mut s = [0u8; 32];
+            r.copy_from_slice(&sig_bytes[..32]);
+            s.copy_from_slice(&sig_bytes[32..]);
+            (r, s)
+        } else {
+            // DER format: 0x30 len 0x02 r_len r 0x02 s_len s
+            parse_der_signature(&sig_bytes)?
+        };
+
+        // Verify in TEE
+        let sem = self.tee_semaphore.clone();
+        let _permit = sem.acquire().await.map_err(|_| anyhow!("TEE semaphore closed"))?;
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut ta_client = TaClient::new()?;
+            let valid = ta_client.verify_passkey(
+                wallet_uuid, &pubkey, &auth_data, &client_data_hash, &sig_r, &sig_s,
+            )?;
+            if !valid {
+                return Err(anyhow!("PassKey verification failed"));
+            }
+            Ok(())
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+
+        Ok(())
+    }
+
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
         println!("📝 KMS DeriveAddress API called for key: {}", req.key_id);
 
@@ -503,6 +684,11 @@ impl KmsApiServer {
                 "Must provide either Address or (KeyId + DerivationPath)"
             ));
         };
+
+        // PassKey verification guard (if registered for this key)
+        self.verify_passkey_guard(
+            &wallet_uuid.to_string(), wallet_uuid, req.passkey.as_ref(),
+        ).await?;
 
         self.pending_tasks.fetch_add(1, Ordering::SeqCst);
         let _guard = PendingGuard(self.pending_tasks.clone());
@@ -601,6 +787,11 @@ impl KmsApiServer {
             return Err(anyhow!("Either KeyId or Address must be provided"));
         };
 
+        // PassKey verification guard (if registered for this key)
+        self.verify_passkey_guard(
+            &wallet_uuid.to_string(), wallet_uuid, req.passkey.as_ref(),
+        ).await?;
+
         self.pending_tasks.fetch_add(1, Ordering::SeqCst);
         let _guard = PendingGuard(self.pending_tasks.clone());
 
@@ -697,7 +888,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": "0.1.0",
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey"],
+            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey", "/RegisterPasskey"],
             "GET": ["/health", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
         }
     })))
@@ -802,6 +993,19 @@ async fn handle_delete_key(
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("ScheduleKeyDeletion error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_register_passkey(
+    body: RegisterPasskeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.register_passkey(body).await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("RegisterPasskey error: {}", e);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -939,6 +1143,14 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
+    // RegisterPasskey API
+    let server_rp = server.clone();
+    let register_passkey = warp::path("RegisterPasskey")
+        .and(warp::post())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_rp.clone()))
+        .and_then(handle_register_passkey);
+
     // Clone server for each route
     let server1 = server.clone();
     let server2 = server.clone();
@@ -1018,6 +1230,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(health)
         .or(key_status)
         .or(queue_status)
+        .or(register_passkey)
         .or(create_key)
         .or(describe_key)
         .or(list_keys)
@@ -1040,6 +1253,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
     println!("   POST /DeleteKey     - Schedule key deletion");
+    println!("   POST /RegisterPasskey - Register PassKey public key");
     println!("   GET  /KeyStatus     - Key derivation status (polling)");
     println!("   GET  /QueueStatus   - TEE queue depth");
     println!("   GET  /health        - Health check");

@@ -179,6 +179,32 @@ impl TaClient {
             .context("Failed to deserialize DeriveAddressAutoOutput")?;
         Ok((output.wallet_id, output.address, output.public_key, output.derivation_path))
     }
+
+    /// Verify a WebAuthn PassKey (P-256/secp256r1) signature inside TEE
+    pub fn verify_passkey(
+        &mut self,
+        wallet_id: uuid::Uuid,
+        public_key: &[u8],
+        authenticator_data: &[u8],
+        client_data_hash: &[u8; 32],
+        signature_r: &[u8; 32],
+        signature_s: &[u8; 32],
+    ) -> Result<bool> {
+        let input = proto::VerifyPasskeyInput {
+            wallet_id,
+            public_key: public_key.to_vec(),
+            authenticator_data: authenticator_data.to_vec(),
+            client_data_hash: *client_data_hash,
+            signature_r: *signature_r,
+            signature_s: *signature_s,
+        };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize VerifyPasskeyInput")?;
+        let serialized_output = self.invoke_command(proto::Command::VerifyPasskey, &serialized_input)?;
+        let output: proto::VerifyPasskeyOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize VerifyPasskeyOutput")?;
+        Ok(output.valid)
+    }
 }
 
 /// Convenience functions for one-off calls (creates new client each time)

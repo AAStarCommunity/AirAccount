@@ -210,6 +210,44 @@ fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::Exp
     })
 }
 
+fn verify_passkey(input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPasskeyOutput> {
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use p256::EncodedPoint;
+    use sha2::{Sha256, Digest};
+
+    dbg_println!("[+] Verify passkey for wallet: {:?}", input.wallet_id);
+
+    // Parse the P-256 public key from uncompressed format (65 bytes: 0x04 || x || y)
+    let encoded_point = EncodedPoint::from_bytes(&input.public_key)
+        .map_err(|e| anyhow!("Invalid P-256 public key: {:?}", e))?;
+    let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)
+        .map_err(|e| anyhow!("Failed to parse P-256 verifying key: {:?}", e))?;
+
+    // Reconstruct the signed message: SHA-256(authenticatorData || clientDataHash)
+    // This is the WebAuthn signature verification procedure per spec
+    let mut hasher = Sha256::new();
+    hasher.update(&input.authenticator_data);
+    hasher.update(&input.client_data_hash);
+    let signed_message: [u8; 32] = hasher.finalize().into();
+
+    // Reconstruct ECDSA signature from r, s components
+    let signature = Signature::from_scalars(input.signature_r, input.signature_s)
+        .map_err(|e| anyhow!("Invalid ECDSA signature: {:?}", e))?;
+
+    // Verify the signature
+    let valid = verifying_key
+        .verify(&signed_message, &signature)
+        .is_ok();
+
+    dbg_println!("[+] Passkey verification result: {}", valid);
+
+    if !valid {
+        bail!("Passkey verification failed: invalid signature");
+    }
+
+    Ok(proto::VerifyPasskeyOutput { valid })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -230,6 +268,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignHash => process(serialized_input, sign_hash),
         Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
         Command::ExportPrivateKey => process(serialized_input, export_private_key),
+        Command::VerifyPasskey => process(serialized_input, verify_passkey),
         _ => bail!("Unsupported command"),
     }
 }

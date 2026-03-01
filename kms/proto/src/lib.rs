@@ -32,6 +32,7 @@ pub enum Command {
     SignHash,
     DeriveAddressAuto,
     ExportPrivateKey,
+    VerifyPasskey,
     #[default]
     Unknown,
 }
