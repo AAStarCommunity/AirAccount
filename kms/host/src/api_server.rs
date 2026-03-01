@@ -7,15 +7,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use anyhow::{Result, anyhow};
 use warp::Filter;
 use hex;
 
 // Import from kms library and proto
 use kms::ta_client::TaClient;
-use kms::address_cache::{update_address_entry, lookup_address};
+use kms::address_cache::lookup_address;
 use proto;
+
+/// Max concurrent TEE operations (STM32 is single-core, TEE is single-threaded)
+const TEE_MAX_CONCURRENCY: usize = 1;
 
 // ========================================
 // AWS KMS 兼容的数据结构
@@ -214,49 +217,47 @@ pub struct EthereumTransaction {
     pub data: String,
 }
 
+enum SignPayload {
+    Transaction(proto::EthTransaction),
+    Message(Vec<u8>),
+}
+
 // ========================================
 // KMS API Server
 // ========================================
 
 pub struct KmsApiServer {
     metadata_store: Arc<RwLock<HashMap<String, KeyMetadata>>>,
+    tee_semaphore: Arc<Semaphore>,
 }
 
 impl KmsApiServer {
     pub fn new() -> Self {
         Self {
             metadata_store: Arc::new(RwLock::new(HashMap::new())),
+            tee_semaphore: Arc::new(Semaphore::new(TEE_MAX_CONCURRENCY)),
         }
     }
 
     pub async fn create_key(&self, req: CreateKeyRequest) -> Result<CreateKeyResponse> {
         println!("📝 KMS CreateKey API called");
 
-        // Parse optional wallet_id
-        let wallet_id_opt = if let Some(ref key_id_str) = req.key_id {
-            Some(uuid::Uuid::parse_str(key_id_str)
-                .map_err(|e| anyhow!("Invalid KeyId format: {}", e))?)
-        } else {
-            None
-        };
+        let _permit = self.tee_semaphore.acquire().await
+            .map_err(|_| anyhow!("TEE semaphore closed"))?;
 
-        // Call TA to derive address with auto-increment
-        let mut ta_client = TaClient::new()?;
-        let (wallet_id, address, public_key, derivation_path) = ta_client.derive_address_auto(wallet_id_opt)?;
+        // Only create wallet (fast: entropy generation only).
+        // Address derivation is done separately via /DeriveAddress.
+        let wallet_id = tokio::task::spawn_blocking(move || -> Result<uuid::Uuid> {
+            let mut ta_client = TaClient::new()?;
+            Ok(ta_client.create_wallet()?)
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
 
-        // Convert to hex strings
-        let address_hex = format!("0x{}", hex::encode(&address));
-        let pubkey_hex = format!("0x{}", hex::encode(&public_key));
-
-        // Update address cache
-        update_address_entry(&address_hex, wallet_id, &derivation_path, &pubkey_hex)?;
-
-        // 创建密钥元数据
         let key_metadata = KeyMetadata {
             key_id: wallet_id.to_string(),
-            address: Some(address_hex.clone()),
-            public_key: Some(pubkey_hex),
-            derivation_path: Some(derivation_path.clone()),
+            address: None,
+            public_key: None,
+            derivation_path: None,
             arn: format!("arn:aws:kms:region:account:key/{}", wallet_id),
             creation_date: Utc::now(),
             enabled: true,
@@ -266,18 +267,13 @@ impl KmsApiServer {
             origin: req.origin,
         };
 
-        // 存储元数据
         let mut store = self.metadata_store.write().await;
         store.insert(wallet_id.to_string(), key_metadata.clone());
         drop(store);
 
-        // 助记词始终返回占位符（安全考虑）
-        // 真实助记词仅存储在 TA Secure World 中，不通过 API 暴露
-        let mnemonic_str = "[MNEMONIC_IN_SECURE_WORLD]".to_string();
-
         Ok(CreateKeyResponse {
             key_metadata,
-            mnemonic: mnemonic_str,
+            mnemonic: "[MNEMONIC_IN_SECURE_WORLD]".to_string(),
         })
     }
 
@@ -309,17 +305,23 @@ impl KmsApiServer {
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
         println!("📝 KMS DeriveAddress API called for key: {}", req.key_id);
 
-        // 验证密钥存在
         let store = self.metadata_store.read().await;
         if !store.contains_key(&req.key_id) {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
-        drop(store); // 释放读锁
+        drop(store);
 
-        // 调用 TaClient DeriveAddress
+        let _permit = self.tee_semaphore.acquire().await
+            .map_err(|_| anyhow!("TEE semaphore closed"))?;
+
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let mut ta_client = TaClient::new()?;
-        let address_bytes = ta_client.derive_address(wallet_uuid, &req.derivation_path)?;
+        let derivation_path = req.derivation_path.clone();
+        let address_bytes = tokio::task::spawn_blocking(move || -> Result<[u8; 20]> {
+            let mut ta_client = TaClient::new()?;
+            Ok(ta_client.derive_address(wallet_uuid, &derivation_path)?)
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+
         let address = format!("0x{}", hex::encode(&address_bytes));
 
         Ok(DeriveAddressResponse {
@@ -331,7 +333,6 @@ impl KmsApiServer {
     pub async fn sign(&self, req: SignRequest) -> Result<SignResponse> {
         // Resolve wallet_id and derivation_path (support both Address and KeyId modes)
         let (wallet_uuid, derivation_path) = if let Some(ref address) = req.address {
-            // Mode 1: Address-based lookup (new)
             println!("📝 KMS Sign API called with Address: {}", address);
 
             let metadata = lookup_address(address)?
@@ -342,36 +343,25 @@ impl KmsApiServer {
                     address
                 ))?;
 
-            let wallet_uuid = metadata.wallet_id;
-            let derivation_path = metadata.derivation_path.clone();
-
-            // Note: Cache consistency is assumed. Use kms-recovery-cli verify-cache to check integrity.
-            // Verification on every sign would be too expensive (requires TA derivation call).
-
-            (wallet_uuid, derivation_path)
+            (metadata.wallet_id, metadata.derivation_path.clone())
         } else if let (Some(ref key_id), Some(ref path)) = (req.key_id.as_ref(), req.derivation_path.as_ref()) {
-            // Mode 2: KeyId + DerivationPath (backward compatibility)
             println!("📝 KMS Sign API called with KeyId: {}, Path: {}", key_id, path);
 
-            // 验证密钥存在
             let store = self.metadata_store.read().await;
             if !store.contains_key(&key_id.to_string()) {
                 return Err(anyhow!("Key not found: {}", key_id));
             }
             drop(store);
 
-            let wallet_uuid = Uuid::parse_str(key_id)?;
-            (wallet_uuid, path.to_string())
+            (Uuid::parse_str(key_id)?, path.to_string())
         } else {
             return Err(anyhow!(
                 "Must provide either Address or (KeyId + DerivationPath)"
             ));
         };
-        let mut ta_client = TaClient::new()?;
 
-        // 根据请求类型选择签名模式
-        let signature = if let Some(transaction) = req.transaction {
-            // Transaction signing mode (original)
+        // Prepare sign payload before acquiring TEE permit
+        let sign_payload = if let Some(transaction) = req.transaction {
             println!("  📝 Transaction signing mode");
             let to_bytes = if transaction.to.starts_with("0x") {
                 hex::decode(&transaction.to[2..])
@@ -381,7 +371,6 @@ impl KmsApiServer {
             let mut to_array = [0u8; 20];
             to_array.copy_from_slice(&to_bytes[..20]);
 
-            // 构造 EthTransaction
             let data = if transaction.data.is_empty() {
                 vec![]
             } else {
@@ -397,32 +386,34 @@ impl KmsApiServer {
                 gas: transaction.gas as u128,
                 data,
             };
-
-            ta_client.sign_transaction(
-                wallet_uuid,
-                &derivation_path,
-                eth_transaction,
-            )?
+            SignPayload::Transaction(eth_transaction)
         } else if let Some(message) = req.message {
-            // Message signing mode (new)
             println!("  📝 Message signing mode");
-
-            // Decode message (base64 or hex)
             let message_bytes = if message.starts_with("0x") {
                 hex::decode(&message[2..])?
             } else {
-                // Try base64 first
                 base64::decode(&message).unwrap_or_else(|_| message.as_bytes().to_vec())
             };
-
-            ta_client.sign_message(
-                wallet_uuid,
-                &derivation_path,
-                &message_bytes,
-            )?
+            SignPayload::Message(message_bytes)
         } else {
             return Err(anyhow!("Either Transaction or Message must be provided"));
         };
+
+        let _permit = self.tee_semaphore.acquire().await
+            .map_err(|_| anyhow!("TEE semaphore closed"))?;
+
+        let signature = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let mut ta_client = TaClient::new()?;
+            match sign_payload {
+                SignPayload::Transaction(eth_tx) => {
+                    Ok(ta_client.sign_transaction(wallet_uuid, &derivation_path, eth_tx)?)
+                }
+                SignPayload::Message(msg) => {
+                    Ok(ta_client.sign_message(wallet_uuid, &derivation_path, &msg)?)
+                }
+            }
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
 
         Ok(SignResponse {
             signature: hex::encode(&signature),
@@ -463,7 +454,6 @@ impl KmsApiServer {
             return Err(anyhow!("Either KeyId or Address must be provided"));
         };
 
-        // Decode hash (must be exactly 32 bytes)
         let hash_bytes = if req.hash.starts_with("0x") {
             hex::decode(&req.hash[2..])?
         } else {
@@ -477,13 +467,14 @@ impl KmsApiServer {
         let mut hash_array = [0u8; 32];
         hash_array.copy_from_slice(&hash_bytes);
 
-        // 调用 TaClient SignHash
-        let mut ta_client = TaClient::new()?;
-        let signature = ta_client.sign_hash(
-            wallet_uuid,
-            &derivation_path,
-            &hash_array,
-        )?;
+        let _permit = self.tee_semaphore.acquire().await
+            .map_err(|_| anyhow!("TEE semaphore closed"))?;
+
+        let signature = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let mut ta_client = TaClient::new()?;
+            Ok(ta_client.sign_hash(wallet_uuid, &derivation_path, &hash_array)?)
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
 
         Ok(SignHashResponse {
             signature: hex::encode(&signature),
@@ -517,16 +508,21 @@ impl KmsApiServer {
     pub async fn delete_key(&self, req: DeleteKeyRequest) -> Result<DeleteKeyResponse> {
         println!("📝 KMS ScheduleKeyDeletion API called for key: {}", req.key_id);
 
-        // 调用 TaClient RemoveWallet
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let mut ta_client = TaClient::new()?;
-        ta_client.remove_wallet(wallet_uuid)?;
 
-        // 从元数据存储中删除
+        let _permit = self.tee_semaphore.acquire().await
+            .map_err(|_| anyhow!("TEE semaphore closed"))?;
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut ta_client = TaClient::new()?;
+            ta_client.remove_wallet(wallet_uuid)?;
+            Ok(())
+        }).await
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+
         let mut store = self.metadata_store.write().await;
         store.remove(&req.key_id);
 
-        // 计算删除日期 (pending_window默认7天)
         let days = req.pending_window_in_days.unwrap_or(7);
         let deletion_date = Utc::now() + chrono::Duration::days(days as i64);
 
