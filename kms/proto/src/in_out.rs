@@ -117,3 +117,26 @@ pub struct ExportPrivateKeyInput {
 pub struct ExportPrivateKeyOutput {
     pub private_key: Vec<u8>,  // 32 bytes
 }
+
+/// WebAuthn PassKey (P-256/secp256r1) ECDSA verification
+/// TA verifies the passkey signature before allowing private key operations
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VerifyPasskeyInput {
+    /// The wallet being accessed (for audit logging)
+    pub wallet_id: Uuid,
+    /// P-256 public key in uncompressed format (65 bytes: 0x04 || x || y)
+    pub public_key: Vec<u8>,
+    /// authenticatorData from WebAuthn assertion
+    pub authenticator_data: Vec<u8>,
+    /// SHA-256(clientDataJSON) - 32 bytes
+    pub client_data_hash: [u8; 32],
+    /// ECDSA signature r component (32 bytes)
+    pub signature_r: [u8; 32],
+    /// ECDSA signature s component (32 bytes)
+    pub signature_s: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VerifyPasskeyOutput {
+    pub valid: bool,
+}
