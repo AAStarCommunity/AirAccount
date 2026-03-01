@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use tokio::sync::{RwLock, Semaphore};
@@ -14,11 +15,13 @@ use hex;
 
 // Import from kms library and proto
 use kms::ta_client::TaClient;
-use kms::address_cache::lookup_address;
+use kms::address_cache::{update_address_entry, lookup_address};
 use proto;
 
 /// Max concurrent TEE operations (STM32 is single-core, TEE is single-threaded)
 const TEE_MAX_CONCURRENCY: usize = 1;
+/// Estimated seconds per TEE derivation operation on Cortex-A7 (PBKDF2+BIP32+secp256k1)
+const TEE_OP_ESTIMATE_SECS: u64 = 120;
 
 // ========================================
 // AWS KMS 兼容的数据结构
@@ -217,6 +220,28 @@ pub struct EthereumTransaction {
     pub data: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeyStatusResponse {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    #[serde(rename = "Status")]
+    pub status: String,  // "creating" | "deriving" | "ready" | "error"
+    #[serde(rename = "Address", skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(rename = "PublicKey", skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none")]
+    pub derivation_path: Option<String>,
+    #[serde(rename = "Error", skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueueStatusResponse {
+    pub queue_depth: usize,
+    pub estimated_wait_seconds: u64,
+}
+
 enum SignPayload {
     Transaction(proto::EthTransaction),
     Message(Vec<u8>),
@@ -229,6 +254,17 @@ enum SignPayload {
 pub struct KmsApiServer {
     metadata_store: Arc<RwLock<HashMap<String, KeyMetadata>>>,
     tee_semaphore: Arc<Semaphore>,
+    pending_tasks: Arc<AtomicUsize>,
+    /// Track key derivation status: key_id -> "deriving" | "ready" | "error:msg"
+    key_status: Arc<RwLock<HashMap<String, String>>>,
+}
+
+/// RAII guard that decrements pending_tasks on drop
+struct PendingGuard(Arc<AtomicUsize>);
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl KmsApiServer {
@@ -236,17 +272,20 @@ impl KmsApiServer {
         Self {
             metadata_store: Arc::new(RwLock::new(HashMap::new())),
             tee_semaphore: Arc::new(Semaphore::new(TEE_MAX_CONCURRENCY)),
+            pending_tasks: Arc::new(AtomicUsize::new(0)),
+            key_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub async fn create_key(&self, req: CreateKeyRequest) -> Result<CreateKeyResponse> {
         println!("📝 KMS CreateKey API called");
 
+        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
+        let _guard = PendingGuard(self.pending_tasks.clone());
+
         let _permit = self.tee_semaphore.acquire().await
             .map_err(|_| anyhow!("TEE semaphore closed"))?;
 
-        // Only create wallet (fast: entropy generation only).
-        // Address derivation is done separately via /DeriveAddress.
         let wallet_id = tokio::task::spawn_blocking(move || -> Result<uuid::Uuid> {
             let mut ta_client = TaClient::new()?;
             Ok(ta_client.create_wallet()?)
@@ -270,6 +309,58 @@ impl KmsApiServer {
         let mut store = self.metadata_store.write().await;
         store.insert(wallet_id.to_string(), key_metadata.clone());
         drop(store);
+
+        // Mark as deriving and spawn background address derivation via derive_address_auto
+        {
+            let mut status = self.key_status.write().await;
+            status.insert(wallet_id.to_string(), "deriving".to_string());
+        }
+        let metadata_store = self.metadata_store.clone();
+        let key_status = self.key_status.clone();
+        let tee_semaphore = self.tee_semaphore.clone();
+        let pending_tasks = self.pending_tasks.clone();
+        tokio::spawn(async move {
+            pending_tasks.fetch_add(1, Ordering::SeqCst);
+            let _guard = PendingGuard(pending_tasks);
+
+            let _permit = tee_semaphore.acquire().await;
+            let result = tokio::task::spawn_blocking(move || -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
+                let mut ta_client = TaClient::new()?;
+                Ok(ta_client.derive_address_auto(Some(wallet_id))?)
+            }).await;
+
+            let derivation_result = match result {
+                Ok(Ok(tuple)) => Ok(tuple),
+                Ok(Err(e)) => Err(format!("{}", e)),
+                Err(e) => Err(format!("{}", e)),
+            };
+
+            match derivation_result {
+                Ok((_wid, address_bytes, public_key, derivation_path)) => {
+                    let address_hex = format!("0x{}", hex::encode(&address_bytes));
+                    let pubkey_hex = format!("0x{}", hex::encode(&public_key));
+                    println!("✅ Background derivation done for {}: {}", wallet_id, address_hex);
+
+                    let mut store = metadata_store.write().await;
+                    if let Some(meta) = store.get_mut(&wallet_id.to_string()) {
+                        meta.address = Some(address_hex.clone());
+                        meta.public_key = Some(pubkey_hex.clone());
+                        meta.derivation_path = Some(derivation_path.clone());
+                    }
+                    drop(store);
+
+                    let _ = update_address_entry(&address_hex, wallet_id, &derivation_path, &pubkey_hex);
+
+                    let mut status = key_status.write().await;
+                    status.insert(wallet_id.to_string(), "ready".to_string());
+                }
+                Err(err_msg) => {
+                    eprintln!("❌ Background derivation failed for {}: {}", wallet_id, err_msg);
+                    let mut status = key_status.write().await;
+                    status.insert(wallet_id.to_string(), format!("error:{}", err_msg));
+                }
+            }
+        });
 
         Ok(CreateKeyResponse {
             key_metadata,
@@ -302,6 +393,56 @@ impl KmsApiServer {
         Ok(ListKeysResponse { keys })
     }
 
+    pub async fn key_status(&self, key_id: &str) -> Result<KeyStatusResponse> {
+        let status_store = self.key_status.read().await;
+        let status_str = status_store.get(key_id).cloned();
+        drop(status_store);
+
+        let store = self.metadata_store.read().await;
+        let metadata = store.get(key_id).cloned();
+        drop(store);
+
+        let metadata = metadata.ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+
+        let (status, address, public_key, derivation_path, error) = match status_str.as_deref() {
+            Some("ready") => (
+                "ready",
+                metadata.address.clone(),
+                metadata.public_key.clone(),
+                metadata.derivation_path.clone(),
+                None,
+            ),
+            Some(s) if s.starts_with("error:") => (
+                "error", None, None, None, Some(s[6..].to_string()),
+            ),
+            Some("deriving") => ("deriving", None, None, None, None),
+            _ => {
+                if metadata.address.is_some() {
+                    ("ready", metadata.address.clone(), metadata.public_key.clone(), metadata.derivation_path.clone(), None)
+                } else {
+                    ("creating", None, None, None, None)
+                }
+            }
+        };
+
+        Ok(KeyStatusResponse {
+            key_id: key_id.to_string(),
+            status: status.to_string(),
+            address,
+            public_key,
+            derivation_path,
+            error,
+        })
+    }
+
+    pub fn queue_status(&self) -> QueueStatusResponse {
+        let depth = self.pending_tasks.load(Ordering::SeqCst);
+        QueueStatusResponse {
+            queue_depth: depth,
+            estimated_wait_seconds: depth as u64 * TEE_OP_ESTIMATE_SECS,
+        }
+    }
+
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
         println!("📝 KMS DeriveAddress API called for key: {}", req.key_id);
 
@@ -310,6 +451,9 @@ impl KmsApiServer {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
         drop(store);
+
+        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
+        let _guard = PendingGuard(self.pending_tasks.clone());
 
         let _permit = self.tee_semaphore.acquire().await
             .map_err(|_| anyhow!("TEE semaphore closed"))?;
@@ -359,6 +503,9 @@ impl KmsApiServer {
                 "Must provide either Address or (KeyId + DerivationPath)"
             ));
         };
+
+        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
+        let _guard = PendingGuard(self.pending_tasks.clone());
 
         // Prepare sign payload before acquiring TEE permit
         let sign_payload = if let Some(transaction) = req.transaction {
@@ -454,6 +601,9 @@ impl KmsApiServer {
             return Err(anyhow!("Either KeyId or Address must be provided"));
         };
 
+        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
+        let _guard = PendingGuard(self.pending_tasks.clone());
+
         let hash_bytes = if req.hash.starts_with("0x") {
             hex::decode(&req.hash[2..])?
         } else {
@@ -508,6 +658,9 @@ impl KmsApiServer {
     pub async fn delete_key(&self, req: DeleteKeyRequest) -> Result<DeleteKeyResponse> {
         println!("📝 KMS ScheduleKeyDeletion API called for key: {}", req.key_id);
 
+        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
+        let _guard = PendingGuard(self.pending_tasks.clone());
+
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
 
         let _permit = self.tee_semaphore.acquire().await
@@ -545,7 +698,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "ta_mode": "real",
         "endpoints": {
             "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey"],
-            "GET": ["/health"]
+            "GET": ["/health", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
         }
     })))
 }
@@ -654,6 +807,25 @@ async fn handle_delete_key(
     }
 }
 
+async fn handle_key_status(
+    key_id: String,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.key_status(&key_id).await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("KeyStatus error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_queue_status(
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::json(&server.queue_status()))
+}
+
 #[derive(Debug)]
 struct ApiError(String);
 
@@ -741,6 +913,32 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::get())
         .and_then(health_check);
 
+    // KeyStatus - GET /KeyStatus?KeyId=xxx
+    let server_ks = server.clone();
+    let key_status = warp::path("KeyStatus")
+        .and(warp::get())
+        .and(warp::query::raw().map(|q: String| {
+            // Parse KeyId from query string
+            q.split('&')
+                .find_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    match (parts.next(), parts.next()) {
+                        (Some("KeyId"), Some(v)) => Some(v.to_string()),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_default()
+        }))
+        .and(warp::any().map(move || server_ks.clone()))
+        .and_then(handle_key_status);
+
+    // QueueStatus - GET /QueueStatus
+    let server_qs = server.clone();
+    let queue_status = warp::path("QueueStatus")
+        .and(warp::get())
+        .and(warp::any().map(move || server_qs.clone()))
+        .and_then(handle_queue_status);
+
     // Clone server for each route
     let server1 = server.clone();
     let server2 = server.clone();
@@ -818,6 +1016,8 @@ pub async fn start_kms_server() -> Result<()> {
     let routes = index
         .or(test_ui)
         .or(health)
+        .or(key_status)
+        .or(queue_status)
         .or(create_key)
         .or(describe_key)
         .or(list_keys)
@@ -840,6 +1040,8 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
     println!("   POST /DeleteKey     - Schedule key deletion");
+    println!("   GET  /KeyStatus     - Key derivation status (polling)");
+    println!("   GET  /QueueStatus   - TEE queue depth");
     println!("   GET  /health        - Health check");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
