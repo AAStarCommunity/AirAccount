@@ -40,6 +40,8 @@ pub struct Wallet {
     /// Cached m/44'/60'/0' extended key (97 bytes) — skips 3 hardened derivation levels
     #[serde(default)]
     cached_account_root: Option<Vec<u8>>,
+    /// P-256 passkey public key (65 bytes uncompressed: 0x04 || x || y)
+    passkey_pubkey: Option<Vec<u8>>,
 }
 
 impl Storable for Wallet {
@@ -71,6 +73,7 @@ impl Wallet {
             next_account_index: 0,
             cached_seed: None,
             cached_account_root: None,
+            passkey_pubkey: None,
         })
     }
 
@@ -236,6 +239,18 @@ impl Wallet {
         let derived = self.derive_key(hd_path)?;
         Ok(derived.private_key.to_vec())
     }
+
+    pub fn set_passkey(&mut self, pubkey: Vec<u8>) {
+        self.passkey_pubkey = Some(pubkey);
+    }
+
+    pub fn get_passkey(&self) -> Option<&[u8]> {
+        self.passkey_pubkey.as_deref()
+    }
+
+    pub fn has_passkey(&self) -> bool {
+        self.passkey_pubkey.is_some()
+    }
 }
 
 impl TryFrom<Wallet> for Vec<u8> {
@@ -250,7 +265,8 @@ impl TryFrom<Vec<u8>> for Wallet {
     type Error = anyhow::Error;
 
     fn try_from(data: Vec<u8>) -> Result<Wallet> {
-        bincode::deserialize(&data).map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))
+        bincode::deserialize::<Wallet>(&data)
+            .map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))
     }
 }
 
@@ -262,6 +278,9 @@ impl Drop for Wallet {
         }
         if let Some(ref mut root) = self.cached_account_root {
             root.iter_mut().for_each(|x| *x = 0);
+        }
+        if let Some(ref mut pk) = self.passkey_pubkey {
+            pk.iter_mut().for_each(|x| *x = 0);
         }
     }
 }

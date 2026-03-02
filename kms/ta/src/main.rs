@@ -104,6 +104,7 @@ impl WalletLruCache {
         });
     }
 
+    #[allow(dead_code)]
     fn remove(&mut self, id: &Uuid) {
         self.entries.retain(|e| &e.id != id);
     }
@@ -127,9 +128,9 @@ fn cache_put(wallet: &Wallet) {
     WALLET_CACHE.with(|c| c.borrow_mut().put(wallet));
 }
 
-fn cache_remove(wallet_id: &Uuid) {
-    WALLET_CACHE.with(|c| c.borrow_mut().remove(wallet_id));
-}
+// cache_remove disabled: OP-TEE secure storage writes corrupt TLS,
+// and remove_wallet does db.delete before this would be called.
+// Let cache entries expire naturally via LRU eviction.
 
 fn cache_len() -> usize {
     WALLET_CACHE.with(|c| c.borrow().len())
@@ -137,8 +138,10 @@ fn cache_len() -> usize {
 
 /// Save wallet to secure storage AND update cache.
 fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
-    db.put(wallet)?;
+    // Cache MUST come before db.put: OP-TEE secure storage syscall corrupts TLS,
+    // causing thread_local WALLET_CACHE access to panic if called after db.put.
     cache_put(wallet);
+    db.put(wallet)?;
     Ok(())
 }
 
@@ -202,15 +205,56 @@ macro_rules! dbg_println {
     ($($arg:tt)*) => {};
 }
 
-fn create_wallet(_input: &proto::CreateWalletInput) -> Result<proto::CreateWalletOutput> {
-    let wallet = Wallet::new()?;
+/// Verify passkey assertion against wallet's bound passkey.
+/// All wallets MUST have passkey bound — rejects if missing.
+/// Rejects if assertion is not provided or verification fails.
+fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyAssertion>) -> Result<()> {
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use p256::EncodedPoint;
+    use sha2::{Sha256, Digest};
+
+    let pubkey = match wallet.get_passkey() {
+        Some(pk) => pk,
+        None => return Err(anyhow!("Wallet has no PassKey bound. Cannot verify.")),
+    };
+
+    let assertion = assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
+
+    let encoded_point = EncodedPoint::from_bytes(pubkey)
+        .map_err(|e| anyhow!("Invalid stored passkey public key: {:?}", e))?;
+    let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)
+        .map_err(|e| anyhow!("Failed to parse passkey verifying key: {:?}", e))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&assertion.authenticator_data);
+    hasher.update(&assertion.client_data_hash);
+    let signed_message: [u8; 32] = hasher.finalize().into();
+
+    let signature = Signature::from_scalars(assertion.signature_r, assertion.signature_s)
+        .map_err(|e| anyhow!("Invalid passkey signature: {:?}", e))?;
+
+    verifying_key.verify(&signed_message, &signature)
+        .map_err(|_| anyhow!("PassKey verification failed"))?;
+
+    Ok(())
+}
+
+fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWalletOutput> {
+    // Validate passkey public key (mandatory)
+    if input.passkey_pubkey.len() != 65 || input.passkey_pubkey[0] != 0x04 {
+        return Err(anyhow!("PassKey pubkey must be 65 bytes uncompressed (0x04||x||y), got {} bytes", input.passkey_pubkey.len()));
+    }
+
+    let mut wallet = Wallet::new()?;
+    wallet.set_passkey(input.passkey_pubkey.clone());
     let wallet_id = wallet.get_id();
     let mnemonic = wallet.get_mnemonic()?;
+
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
     save_wallet(&db_client, &wallet)?;
-    dbg_println!("[+] Wallet saved in secure storage");
+    dbg_println!("[+] Wallet saved in secure storage (passkey bound)");
 
     Ok(proto::CreateWalletOutput {
         wallet_id,
@@ -222,37 +266,45 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     trace_println!("[+] Removing wallet: {:?}", input.wallet_id);
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
+
+    // Load from DB (not cache) — read op doesn't corrupt TLS
+    let wallet = db_client.get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
+
+    // Mandatory passkey verification
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
     db_client.delete_entry::<Wallet>(&input.wallet_id)?;
-    // NOTE: cache_remove() intentionally skipped — calling RefCell::borrow_mut()
-    // from this function triggers TEE_ERROR_TARGET_DEAD on STM32 OP-TEE (compiler/
-    // code layout bug with nightly-2024-05-15 arm-unknown-optee). Stale cache
-    // entries are harmless: LRU eviction handles cleanup, and load_wallet_cached
-    // will fail on storage read for deleted wallets.
-    trace_println!("[+] Wallet removed from secure storage");
+    // No cache_remove — borrow_mut panic risk after secure storage write
+    trace_println!("[+] Wallet removed from secure storage (passkey verified)");
 
     Ok(proto::RemoveWalletOutput {})
 }
 
 fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddressOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let (address, public_key) = wallet.derive_address(&input.hd_path)?;
     Ok(proto::DeriveAddressOutput { address, public_key })
 }
 
 fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTransactionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let signature = wallet.sign_transaction(&input.hd_path, &input.transaction)?;
     Ok(proto::SignTransactionOutput { signature })
 }
 
 fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let signature = wallet.sign_message(&input.hd_path, &input.message)?;
     Ok(proto::SignMessageOutput { signature })
 }
 
 fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let signature = wallet.sign_hash(&input.hd_path, &input.hash)?;
     Ok(proto::SignHashOutput { signature })
 }
@@ -260,33 +312,23 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
 fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::DeriveAddressAutoOutput> {
     let db_client = SecureStorageClient::open(DB_NAME)?;
 
-    let (wallet_id, mut wallet, address_index) = if let Some(existing_id) = input.wallet_id {
-        dbg_println!("[+] Loading existing wallet: {:?}", existing_id);
-        let mut wallet = match cache_get(&existing_id) {
-            Some(w) => w,
-            None => db_client.get::<Wallet>(&existing_id)
-                .map_err(|e| anyhow!("wallet not found: {:?}", e))?,
-        };
-
-        let index = wallet.increment_address_index()?;
-        (existing_id, wallet, index)
-    } else {
-        let mut wallet = Wallet::new()?;
-        let wallet_id = wallet.get_id();
-        let index = wallet.increment_address_index()?;
-        (wallet_id, wallet, index)
+    dbg_println!("[+] DeriveAddressAuto for wallet: {:?}", input.wallet_id);
+    let mut wallet = match cache_get(&input.wallet_id) {
+        Some(w) => w,
+        None => db_client.get::<Wallet>(&input.wallet_id)
+            .map_err(|e| anyhow!("wallet not found: {:?}", e))?,
     };
 
+    let address_index = wallet.increment_address_index()?;
     wallet.ensure_seed_cached()?;
 
     let derivation_path = format!("m/44'/60'/0'/0/{}", address_index);
     let (address, public_key) = wallet.derive_address(&derivation_path)?;
 
-    // Always save: address index was incremented
     save_wallet(&db_client, &wallet)?;
 
     Ok(proto::DeriveAddressAutoOutput {
-        wallet_id,
+        wallet_id: input.wallet_id,
         address,
         public_key,
         derivation_path,
@@ -297,6 +339,7 @@ fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::Exp
     dbg_println!("[+] Export private key for wallet: {:?}, path: {}", input.wallet_id, input.derivation_path);
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let private_key = wallet.export_private_key(&input.derivation_path)?;
 
     Ok(proto::ExportPrivateKeyOutput { private_key })
@@ -340,6 +383,26 @@ fn verify_passkey(input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPass
     Ok(proto::VerifyPasskeyOutput { valid })
 }
 
+fn register_passkey_ta(input: &proto::RegisterPasskeyTaInput) -> Result<proto::RegisterPasskeyTaOutput> {
+    trace_println!("[+] Registering passkey for wallet: {:?}", input.wallet_id);
+
+    if input.passkey_pubkey.len() != 65 || input.passkey_pubkey[0] != 0x04 {
+        bail!("PassKey public key must be 65 bytes uncompressed (0x04 || x || y), got {} bytes",
+            input.passkey_pubkey.len());
+    }
+
+    let mut wallet = load_wallet_cached(&input.wallet_id)?;
+    // Verify current passkey before allowing change
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    wallet.set_passkey(input.passkey_pubkey.clone());
+
+    let db = SecureStorageClient::open(DB_NAME)?;
+    save_wallet(&db, &wallet)?;
+    trace_println!("[+] PassKey registered and wallet saved");
+
+    Ok(proto::RegisterPasskeyTaOutput { registered: true })
+}
+
 fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOutput> {
     dbg_println!("[+] Warmup cache for wallet: {:?}", input.wallet_id);
     let _wallet = load_wallet_cached(&input.wallet_id)?;
@@ -371,6 +434,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::ExportPrivateKey => process(serialized_input, export_private_key),
         Command::VerifyPasskey => process(serialized_input, verify_passkey),
         Command::WarmupCache => process(serialized_input, warmup_cache),
+        Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
         _ => bail!("Unsupported command"),
     }
 }

@@ -34,6 +34,7 @@ pub enum Command {
     ExportPrivateKey,
     VerifyPasskey,
     WarmupCache,
+    RegisterPasskeyTa,
     #[default]
     Unknown,
 }
@@ -70,13 +71,14 @@ mod tests {
         assert_eq!(u32::from(Command::ExportPrivateKey), 7);
         assert_eq!(u32::from(Command::VerifyPasskey), 8);
         assert_eq!(u32::from(Command::WarmupCache), 9);
+        assert_eq!(u32::from(Command::RegisterPasskeyTa), 10);
     }
 
     #[test]
     fn u32_to_command() {
         assert!(matches!(Command::from(0u32), Command::CreateWallet));
         assert!(matches!(Command::from(5u32), Command::SignHash));
-        assert!(matches!(Command::from(9u32), Command::WarmupCache));
+        assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
     }
 
     #[test]
@@ -87,7 +89,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=9u32 {
+        for i in 0..=10u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -114,7 +116,9 @@ mod tests {
 
     #[test]
     fn create_wallet_input_roundtrip() {
-        bincode_roundtrip(&CreateWalletInput {});
+        bincode_roundtrip(&CreateWalletInput {
+            passkey_pubkey: vec![0x04; 65],
+        });
     }
 
     #[test]
@@ -130,7 +134,7 @@ mod tests {
 
     #[test]
     fn remove_wallet_roundtrip() {
-        bincode_roundtrip(&RemoveWalletInput { wallet_id: test_uuid() });
+        bincode_roundtrip(&RemoveWalletInput { wallet_id: test_uuid(), passkey_assertion: None });
         bincode_roundtrip(&RemoveWalletOutput {});
     }
 
@@ -141,6 +145,7 @@ mod tests {
         bincode_roundtrip(&DeriveAddressInput {
             wallet_id: test_uuid(),
             hd_path: "m/44'/60'/0'/0/0".into(),
+            passkey_assertion: None,
         });
     }
 
@@ -212,6 +217,7 @@ mod tests {
                 gas: 21_000,
                 data: vec![],
             },
+            passkey_assertion: None,
         };
         bincode_roundtrip(&input);
         bincode_roundtrip(&SignTransactionOutput { signature: vec![0u8; 65] });
@@ -225,6 +231,7 @@ mod tests {
             wallet_id: test_uuid(),
             hd_path: "m/44'/60'/0'/0/0".into(),
             message: b"hello world".to_vec(),
+            passkey_assertion: None,
         });
         bincode_roundtrip(&SignMessageOutput { signature: vec![0u8; 65] });
     }
@@ -237,6 +244,7 @@ mod tests {
             wallet_id: test_uuid(),
             hd_path: "m/44'/60'/0'/0/0".into(),
             hash: [0xaa; 32],
+            passkey_assertion: None,
         });
         bincode_roundtrip(&SignHashOutput { signature: vec![0u8; 65] });
     }
@@ -245,10 +253,7 @@ mod tests {
 
     #[test]
     fn derive_address_auto_roundtrip() {
-        // with existing wallet
-        bincode_roundtrip(&DeriveAddressAutoInput { wallet_id: Some(test_uuid()) });
-        // create new wallet
-        bincode_roundtrip(&DeriveAddressAutoInput { wallet_id: None });
+        bincode_roundtrip(&DeriveAddressAutoInput { wallet_id: test_uuid() });
 
         bincode_roundtrip(&DeriveAddressAutoOutput {
             wallet_id: test_uuid(),
@@ -265,6 +270,7 @@ mod tests {
         bincode_roundtrip(&ExportPrivateKeyInput {
             wallet_id: test_uuid(),
             derivation_path: "m/44'/60'/0'/0/0".into(),
+            passkey_assertion: None,
         });
         bincode_roundtrip(&ExportPrivateKeyOutput { private_key: vec![0u8; 32] });
     }
@@ -337,11 +343,54 @@ mod tests {
             wallet_id: id,
             hd_path: "m/44'/60'/0'/0/1".into(),
             hash,
+            passkey_assertion: None,
         };
         let bytes = bincode::serialize(&input).unwrap();
         let decoded: SignHashInput = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded.wallet_id, id);
         assert_eq!(decoded.hd_path, "m/44'/60'/0'/0/1");
         assert_eq!(decoded.hash, hash);
+    }
+
+    // ── PasskeyAssertion ──
+
+    #[test]
+    fn passkey_assertion_roundtrip() {
+        bincode_roundtrip(&PasskeyAssertion {
+            authenticator_data: vec![0u8; 37],
+            client_data_hash: [0xbb; 32],
+            signature_r: [0x11; 32],
+            signature_s: [0x22; 32],
+        });
+    }
+
+    // ── RegisterPasskeyTa ──
+
+    #[test]
+    fn register_passkey_ta_roundtrip() {
+        bincode_roundtrip(&RegisterPasskeyTaInput {
+            wallet_id: test_uuid(),
+            passkey_pubkey: vec![0x04; 65],
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&RegisterPasskeyTaOutput { registered: true });
+    }
+
+    // ── Sign with passkey assertion ──
+
+    #[test]
+    fn sign_hash_with_passkey_roundtrip() {
+        let assertion = PasskeyAssertion {
+            authenticator_data: vec![0u8; 37],
+            client_data_hash: [0xcc; 32],
+            signature_r: [0xaa; 32],
+            signature_s: [0xbb; 32],
+        };
+        bincode_roundtrip(&SignHashInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            hash: [0xff; 32],
+            passkey_assertion: Some(assertion),
+        });
     }
 }

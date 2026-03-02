@@ -40,12 +40,6 @@ pub fn decode_str_to_uuid(s: &str) -> Result<uuid::Uuid> {
 pub struct CreateWalletOpt {}
 
 #[derive(Debug, StructOpt)]
-pub struct RemoveWalletOpt {
-    #[structopt(short, long, required = true)]
-    pub wallet_id: uuid::Uuid,
-}
-
-#[derive(Debug, StructOpt)]
 pub struct DeriveAddressOpt {
     #[structopt(short, long, required = true)]
     pub wallet_id: uuid::Uuid,
@@ -78,9 +72,6 @@ pub enum Command {
     /// Create a new wallet.
     #[structopt(name = "create-wallet")]
     CreateWallet(CreateWalletOpt),
-    /// Remove a wallet.
-    #[structopt(name = "remove-wallet")]
-    RemoveWallet(RemoveWalletOpt),
     /// Derive an address from a wallet.
     #[structopt(name = "derive-address")]
     DeriveAddress(DeriveAddressOpt),
