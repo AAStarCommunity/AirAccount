@@ -11,7 +11,6 @@ use warp::Filter;
 use hex;
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use p256::EncodedPoint;
-use sha2::{Sha256, Digest};
 
 // Import from kms library and proto
 use kms::ta_client::TeeHandle;
@@ -608,6 +607,9 @@ impl KmsApiServer {
     /// CA-side passkey pre-verification (mirrors TA logic).
     /// If pubkey_hex and assertion are both present, verify ECDSA P-256 signature
     /// before forwarding to TA queue. Returns Ok(()) on success or missing data.
+    ///
+    /// Verification: ECDSA_verify(pubkey, SHA256(auth_data || cdh), signature)
+    /// Uses Verifier::verify(msg, sig) which internally hashes msg with SHA-256.
     fn verify_passkey_ca(pubkey_hex: &str, assertion: &proto::PasskeyAssertion) -> Result<()> {
         let pk_hex = pubkey_hex.trim_start_matches("0x");
         let pk_bytes = hex::decode(pk_hex)
@@ -618,15 +620,17 @@ impl KmsApiServer {
         let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)
             .map_err(|e| anyhow!("Failed to parse passkey verifying key: {:?}", e))?;
 
-        let mut hasher = Sha256::new();
-        hasher.update(&assertion.authenticator_data);
-        hasher.update(&assertion.client_data_hash);
-        let signed_message: [u8; 32] = hasher.finalize().into();
+        // Concatenate raw message: auth_data || client_data_hash
+        // Verifier::verify() internally computes SHA-256(msg) before ECDSA math,
+        // matching TA's verify_digest(SHA256(auth_data || cdh), sig).
+        let mut msg = Vec::with_capacity(assertion.authenticator_data.len() + 32);
+        msg.extend_from_slice(&assertion.authenticator_data);
+        msg.extend_from_slice(&assertion.client_data_hash);
 
         let signature = Signature::from_scalars(assertion.signature_r, assertion.signature_s)
             .map_err(|e| anyhow!("Invalid passkey signature: {:?}", e))?;
 
-        verifying_key.verify(&signed_message, &signature)
+        verifying_key.verify(&msg, &signature)
             .map_err(|_| anyhow!("PassKey verification failed (CA pre-check)"))?;
 
         Ok(())

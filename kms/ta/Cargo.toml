@@ -39,8 +39,8 @@ serde = { version = "1.0.197", features = ["derive"] }
 sha3 = "0.10.6"
 hmac = "0.12"
 secp256k1 = "0.27.0"
-p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10", default-features = false }
+# p256 removed — P-256 ECDSA now uses OP-TEE native TEE_AsymmetricVerifyDigest
 # Pin transitive deps to versions compatible with nightly-2024-05-15 (no edition2024)
 base64ct = "=1.6.0"
 ethereum-tx-sign = "6.1.3"

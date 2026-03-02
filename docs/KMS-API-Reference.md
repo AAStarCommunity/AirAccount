@@ -1,6 +1,6 @@
 # KMS API Reference (STM32 DK2)
 
-> Last updated: 2026-03-02 22:31 +07
+> Last updated: 2026-03-02 23:16 +07
 
 Base URL: `https://kms1.aastar.io` (production) / `http://192.168.7.2:3000` (local DK2)
 
@@ -1126,21 +1126,54 @@ Signature 支持两种格式：
 
 ## 13. Performance Notes
 
-STM32MP157F-DK2, Cortex-A7 @ 650MHz
+STM32MP157F-DK2, Cortex-A7 @ 650MHz, measured 2026-03-02
 
-| Operation | First time (PBKDF2) | Hot path (cache hit) |
-|-----------|---------------------|----------------------|
-| CreateKey | ~3.5s | ~3.5s |
-| Address derivation (background) | ~60-75s | ~7s |
-| SignHash | ~60s (queued) | **0.83~1.12s** |
-| WarmupCache (internal) | N/A | **~0.23s** |
-| ChangePasskey | instant | instant |
-| PassKey verify (P-256) | <1s | <1s |
-| KeyStatus / QueueStatus | instant | instant |
+### 13.1 Full API Benchmark (with PassKey P-256 verification)
 
-**瓶颈**: PBKDF2-HMAC-SHA512 (2048 rounds) ~55s on 32-bit ARM。Seed 缓存后跳过。
+| Operation | Time | Notes |
+|-----------|------|-------|
+| GET /health | **3.6ms** | HTTP round-trip only |
+| GET /QueueStatus | **~23ms** | CA-only |
+| POST /CreateKey | **~6.1s** | PBKDF2 + wallet + secure storage write |
+| Background derivation (poll KeyStatus) | **~90s** | HD key derivation, PBKDF2 if cold |
+| POST /DescribeKey | **~23ms** | CA-only (in-memory metadata) |
+| POST /ListKeys | **~22ms** | CA-only |
+| POST /SignHash (cold) | **~3.0s** | P-256 verify + secp256k1 sign |
+| POST /SignHash (hot, 2nd) | **~3.0s** | Same — P-256 verify dominates |
+| POST /SignHash (hot, 3rd) | **~3.0s** | Consistent |
+| POST /Sign (message) | **~3.1s** | EIP-191 message sign |
+| POST /Sign (transaction) | **~3.8s** | TX RLP encode + sign |
+| POST /GetPublicKey | **~23ms** | CA-only (no TA call needed) |
+| POST /DeriveAddress (new path) | **~2.9s** | TA HD derivation + P-256 verify |
+| POST /DeleteKey | **~4.1s** | Secure storage delete |
 
-**TEE 单线程**: 所有 TA 操作排队执行。检查 `/QueueStatus` 估算等待时间。
+### 13.2 Performance Breakdown
+
+| Component | Cost |
+|-----------|------|
+| P-256 ECDSA verify (Cortex-A7) | **~2s** |
+| secp256k1 sign (cached seed) | **~1s** |
+| Transaction RLP encode + sign | **~1.8s** |
+| PBKDF2-HMAC-SHA512 (2048 rounds) | **~55s** |
+| Secure storage write | **~0.5-1s** |
+| HTTP round-trip (CA-only) | **~20-25ms** |
+
+### 13.3 Historical Comparison
+
+| Metric | Before PassKey (v0.1) | With PassKey (current) |
+|--------|----------------------|----------------------|
+| SignHash (hot) | **0.83~1.12s** | **~3.0s** |
+| Sign (message) | ~1s | **~3.1s** |
+| CreateKey | ~3.5s | **~6.1s** |
+
+PassKey P-256 ECDSA 验证在 Cortex-A7 上增加约 **2s** 开销。这是安全性与性能的 tradeoff。
+
+### 13.4 Notes
+
+- **PBKDF2 瓶颈**: 2048 rounds SHA-512 在 32-bit ARM 耗时 ~55s。Seed 缓存后跳过。
+- **TEE 单线程**: 所有 TA 操作排队执行。检查 `/QueueStatus` 估算等待时间。
+- **Address cache**: Sign by Address 依赖 CA 内存缓存，新建 wallet 需等 background derivation 完成或手动 rebuild-cache。
+- **CA-side pre-verification**: 新版 CA 代码在 CA 层做 P-256 预验证，无效 assertion 不进 TA 队列（节省 ~3s TA 占用时间）。
 
 ---
 
