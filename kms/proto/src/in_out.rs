@@ -18,36 +18,36 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateWalletInput {}
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateWalletOutput {
     pub wallet_id: Uuid,
     pub mnemonic: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RemoveWalletInput {
     pub wallet_id: Uuid,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RemoveWalletOutput {}
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressOutput {
     pub address: [u8; 20],
     pub public_key: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EthTransaction {
     pub chain_id: u64,
     pub nonce: u128,
@@ -58,48 +58,48 @@ pub struct EthTransaction {
     pub data: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignTransactionInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub transaction: EthTransaction,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignTransactionOutput {
     pub signature: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignMessageInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub message: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignMessageOutput {
     pub signature: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignHashInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub hash: [u8; 32],
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignHashOutput {
     pub signature: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressAutoInput {
     pub wallet_id: Option<Uuid>,  // None = create new wallet, Some = use existing
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressAutoOutput {
     pub wallet_id: Uuid,
     pub address: [u8; 20],
@@ -107,20 +107,20 @@ pub struct DeriveAddressAutoOutput {
     pub derivation_path: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ExportPrivateKeyInput {
     pub wallet_id: Uuid,
     pub derivation_path: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ExportPrivateKeyOutput {
     pub private_key: Vec<u8>,  // 32 bytes
 }
 
 /// WebAuthn PassKey (P-256/secp256r1) ECDSA verification
 /// TA verifies the passkey signature before allowing private key operations
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VerifyPasskeyInput {
     /// The wallet being accessed (for audit logging)
     pub wallet_id: Uuid,
@@ -136,18 +136,18 @@ pub struct VerifyPasskeyInput {
     pub signature_s: [u8; 32],
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VerifyPasskeyOutput {
     pub valid: bool,
 }
 
 /// Pre-load wallet into TA memory cache (no crypto, just storage read + seed cache).
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WarmupCacheInput {
     pub wallet_id: Uuid,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WarmupCacheOutput {
     pub cached: bool,
     pub cache_size: u32,

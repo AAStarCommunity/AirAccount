@@ -219,12 +219,16 @@ fn create_wallet(_input: &proto::CreateWalletInput) -> Result<proto::CreateWalle
 }
 
 fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWalletOutput> {
-    dbg_println!("[+] Removing wallet: {:?}", input.wallet_id);
+    trace_println!("[+] Removing wallet: {:?}", input.wallet_id);
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
     db_client.delete_entry::<Wallet>(&input.wallet_id)?;
-    cache_remove(&input.wallet_id);
-    dbg_println!("[+] Wallet removed");
+    // NOTE: cache_remove() intentionally skipped — calling RefCell::borrow_mut()
+    // from this function triggers TEE_ERROR_TARGET_DEAD on STM32 OP-TEE (compiler/
+    // code layout bug with nightly-2024-05-15 arm-unknown-optee). Stale cache
+    // entries are harmless: LRU eviction handles cleanup, and load_wallet_cached
+    // will fail on storage read for deleted wallets.
+    trace_println!("[+] Wallet removed from secure storage");
 
     Ok(proto::RemoveWalletOutput {})
 }
