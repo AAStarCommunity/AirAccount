@@ -37,9 +37,13 @@ path = "src/api_server.rs"
 name = "export_key"
 path = "src/bin/export_key.rs"
 
+[features]
+default = ["tee"]
+tee = ["optee-teec"]
+
 [dependencies]
 proto = { path = "../proto" }
-optee-teec = { path = "../../../../optee-teec" }
+optee-teec = { path = "../../../../optee-teec", optional = true }
 
 # CLI dependencies
 structopt = "0.3"

@@ -19,10 +19,13 @@
 //! Shared modules for CLI and API server
 
 pub mod cli;
+#[cfg(feature = "tee")]
 pub mod ta_client;
+#[cfg(feature = "tee")]
 pub mod tests;
 pub mod address_cache;
 
 // Re-export commonly used items
+#[cfg(feature = "tee")]
 pub use ta_client::{TaClient, TeeHandle, create_wallet, derive_address, remove_wallet, sign_transaction};
 pub use address_cache::{AddressMetadata, AddressMap, load_address_map, save_address_map, update_address_entry, lookup_address};
