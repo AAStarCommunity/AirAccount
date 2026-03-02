@@ -69,18 +69,23 @@ impl TaClient {
         }
     }
 
-    /// Create a new wallet in the TA
+    /// Create a new wallet in the TA with mandatory passkey binding
     /// Returns the wallet UUID
-    pub fn create_wallet(&mut self) -> Result<uuid::Uuid> {
-        let serialized_output = self.invoke_command(proto::Command::CreateWallet, &[])?;
+    pub fn create_wallet(&mut self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
+        let input = proto::CreateWalletInput {
+            passkey_pubkey: passkey_pubkey.to_vec(),
+        };
+        let serialized_input = bincode::serialize(&input)
+            .context("Failed to serialize CreateWalletInput")?;
+        let serialized_output = self.invoke_command(proto::Command::CreateWallet, &serialized_input)?;
         let output: proto::CreateWalletOutput = bincode::deserialize(&serialized_output)
             .context("Failed to deserialize CreateWalletOutput")?;
         Ok(output.wallet_id)
     }
 
     /// Remove a wallet from the TA
-    pub fn remove_wallet(&mut self, wallet_id: uuid::Uuid) -> Result<()> {
-        let input = proto::RemoveWalletInput { wallet_id };
+    pub fn remove_wallet(&mut self, wallet_id: uuid::Uuid, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<()> {
+        let input = proto::RemoveWalletInput { wallet_id, passkey_assertion };
         let serialized_input = bincode::serialize(&input)
             .context("Failed to serialize RemoveWalletInput")?;
         self.invoke_command(proto::Command::RemoveWallet, &serialized_input)?;
@@ -89,10 +94,11 @@ impl TaClient {
 
     /// Derive an Ethereum address from the wallet using HD path
     /// Returns 20-byte Ethereum address
-    pub fn derive_address(&mut self, wallet_id: uuid::Uuid, hd_path: &str) -> Result<[u8; 20]> {
+    pub fn derive_address(&mut self, wallet_id: uuid::Uuid, hd_path: &str, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<[u8; 20]> {
         let input = proto::DeriveAddressInput {
             wallet_id,
             hd_path: hd_path.to_string(),
+            passkey_assertion,
         };
         let serialized_input = bincode::serialize(&input)
             .context("Failed to serialize DeriveAddressInput")?;
@@ -109,11 +115,13 @@ impl TaClient {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         transaction: proto::EthTransaction,
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = proto::SignTransactionInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             transaction,
+            passkey_assertion,
         };
         let serialized_input = bincode::serialize(&input)
             .context("Failed to serialize SignTransactionInput")?;
@@ -130,11 +138,13 @@ impl TaClient {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         message: &[u8],
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = proto::SignMessageInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             message: message.to_vec(),
+            passkey_assertion,
         };
         let serialized_input = bincode::serialize(&input)
             .context("Failed to serialize SignMessageInput")?;
@@ -151,11 +161,13 @@ impl TaClient {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         hash: &[u8; 32],
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = proto::SignHashInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             hash: *hash,
+            passkey_assertion,
         };
         let serialized_input = bincode::serialize(&input)
             .context("Failed to serialize SignHashInput")?;
@@ -165,13 +177,11 @@ impl TaClient {
         Ok(output.signature)
     }
 
-    /// Automatically derive address with incremented index
-    /// If wallet_id is None, creates new wallet
-    /// If wallet_id is Some, uses existing wallet and increments address index
+    /// Automatically derive address with incremented index for an existing wallet.
     /// Returns (wallet_id, address, public_key, derivation_path)
     pub fn derive_address_auto(
         &mut self,
-        wallet_id: Option<uuid::Uuid>,
+        wallet_id: uuid::Uuid,
     ) -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
         let input = proto::DeriveAddressAutoInput { wallet_id };
         let serialized_input = bincode::serialize(&input)
@@ -212,19 +222,14 @@ impl TaClient {
 /// Convenience functions for one-off calls (creates new client each time)
 /// For better performance in API server, reuse TaClient instance
 
-pub fn create_wallet() -> Result<uuid::Uuid> {
+pub fn create_wallet(passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
     let mut client = TaClient::new()?;
-    client.create_wallet()
+    client.create_wallet(passkey_pubkey)
 }
 
-pub fn remove_wallet(wallet_id: uuid::Uuid) -> Result<()> {
+pub fn derive_address(wallet_id: uuid::Uuid, hd_path: &str, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<[u8; 20]> {
     let mut client = TaClient::new()?;
-    client.remove_wallet(wallet_id)
-}
-
-pub fn derive_address(wallet_id: uuid::Uuid, hd_path: &str) -> Result<[u8; 20]> {
-    let mut client = TaClient::new()?;
-    client.derive_address(wallet_id, hd_path)
+    client.derive_address(wallet_id, hd_path, passkey_assertion)
 }
 
 pub fn sign_transaction(
@@ -247,16 +252,17 @@ pub fn sign_transaction(
         data: vec![],
     };
     let mut client = TaClient::new()?;
-    client.sign_transaction(wallet_id, hd_path, transaction)
+    client.sign_transaction(wallet_id, hd_path, transaction, None)
 }
 
 impl TaClient {
     /// Export private key for a given wallet and derivation path
     /// WARNING: This should only be used for debugging/verification purposes
-    pub fn export_private_key(&mut self, wallet_id: uuid::Uuid, derivation_path: &str) -> Result<Vec<u8>> {
+    pub fn export_private_key(&mut self, wallet_id: uuid::Uuid, derivation_path: &str, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<Vec<u8>> {
         let input = proto::ExportPrivateKeyInput {
             wallet_id,
             derivation_path: derivation_path.to_string(),
+            passkey_assertion,
         };
 
         let serialized_input = bincode::serialize(&input)?;
@@ -322,24 +328,28 @@ impl TeeHandle {
         result
     }
 
-    pub async fn create_wallet(&self) -> Result<uuid::Uuid> {
-        let out = self.call(proto::Command::CreateWallet, vec![]).await?;
+    pub async fn create_wallet(&self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
+        let input = bincode::serialize(&proto::CreateWalletInput {
+            passkey_pubkey: passkey_pubkey.to_vec(),
+        }).context("Failed to serialize CreateWalletInput")?;
+        let out = self.call(proto::Command::CreateWallet, input).await?;
         let output: proto::CreateWalletOutput = bincode::deserialize(&out)
             .context("Failed to deserialize CreateWalletOutput")?;
         Ok(output.wallet_id)
     }
 
-    pub async fn remove_wallet(&self, wallet_id: uuid::Uuid) -> Result<()> {
-        let input = bincode::serialize(&proto::RemoveWalletInput { wallet_id })
+    pub async fn remove_wallet(&self, wallet_id: uuid::Uuid, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<()> {
+        let input = bincode::serialize(&proto::RemoveWalletInput { wallet_id, passkey_assertion })
             .context("Failed to serialize RemoveWalletInput")?;
         self.call(proto::Command::RemoveWallet, input).await?;
         Ok(())
     }
 
-    pub async fn derive_address(&self, wallet_id: uuid::Uuid, hd_path: &str) -> Result<[u8; 20]> {
+    pub async fn derive_address(&self, wallet_id: uuid::Uuid, hd_path: &str, passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<[u8; 20]> {
         let input = bincode::serialize(&proto::DeriveAddressInput {
             wallet_id,
             hd_path: hd_path.to_string(),
+            passkey_assertion,
         }).context("Failed to serialize DeriveAddressInput")?;
         let out = self.call(proto::Command::DeriveAddress, input).await?;
         let output: proto::DeriveAddressOutput = bincode::deserialize(&out)
@@ -352,11 +362,13 @@ impl TeeHandle {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         transaction: proto::EthTransaction,
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::SignTransactionInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             transaction,
+            passkey_assertion,
         }).context("Failed to serialize SignTransactionInput")?;
         let out = self.call(proto::Command::SignTransaction, input).await?;
         let output: proto::SignTransactionOutput = bincode::deserialize(&out)
@@ -369,11 +381,13 @@ impl TeeHandle {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         message: &[u8],
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::SignMessageInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             message: message.to_vec(),
+            passkey_assertion,
         }).context("Failed to serialize SignMessageInput")?;
         let out = self.call(proto::Command::SignMessage, input).await?;
         let output: proto::SignMessageOutput = bincode::deserialize(&out)
@@ -386,11 +400,13 @@ impl TeeHandle {
         wallet_id: uuid::Uuid,
         hd_path: &str,
         hash: &[u8; 32],
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::SignHashInput {
             wallet_id,
             hd_path: hd_path.to_string(),
             hash: *hash,
+            passkey_assertion,
         }).context("Failed to serialize SignHashInput")?;
         let out = self.call(proto::Command::SignHash, input).await?;
         let output: proto::SignHashOutput = bincode::deserialize(&out)
@@ -400,7 +416,7 @@ impl TeeHandle {
 
     pub async fn derive_address_auto(
         &self,
-        wallet_id: Option<uuid::Uuid>,
+        wallet_id: uuid::Uuid,
     ) -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
         let input = bincode::serialize(&proto::DeriveAddressAutoInput { wallet_id })
             .context("Failed to serialize DeriveAddressAutoInput")?;
@@ -437,15 +453,31 @@ impl TeeHandle {
         &self,
         wallet_id: uuid::Uuid,
         derivation_path: &str,
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::ExportPrivateKeyInput {
             wallet_id,
             derivation_path: derivation_path.to_string(),
+            passkey_assertion,
         })?;
         let out = self.call(proto::Command::ExportPrivateKey, input).await?;
         let output: proto::ExportPrivateKeyOutput = bincode::deserialize(&out)
             .with_context(|| "Failed to deserialize ExportPrivateKeyOutput")?;
         Ok(output.private_key)
+    }
+
+    /// Register (or change) a PassKey public key for a wallet in TEE secure storage.
+    /// Requires current passkey assertion to authorize the change.
+    pub async fn register_passkey_ta(&self, wallet_id: uuid::Uuid, passkey_pubkey: &[u8], passkey_assertion: Option<proto::PasskeyAssertion>) -> Result<bool> {
+        let input = bincode::serialize(&proto::RegisterPasskeyTaInput {
+            wallet_id,
+            passkey_pubkey: passkey_pubkey.to_vec(),
+            passkey_assertion,
+        }).context("Failed to serialize RegisterPasskeyTaInput")?;
+        let out = self.call(proto::Command::RegisterPasskeyTa, input).await?;
+        let output: proto::RegisterPasskeyTaOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize RegisterPasskeyTaOutput")?;
+        Ok(output.registered)
     }
 
     /// Pre-load wallet into TA LRU cache. Returns cache size.

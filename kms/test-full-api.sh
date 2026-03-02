@@ -172,10 +172,10 @@ echo "${YELLOW}[Phase 6] PassKey${NC}"
 # Generate a dummy P-256 uncompressed public key (65 bytes = 04 + 32x + 32y)
 DUMMY_P256_PUBKEY="04$(openssl rand -hex 32)$(openssl rand -hex 32)"
 
-timed_curl "POST /RegisterPasskey" \
-    -X POST "$BASE/RegisterPasskey" \
+timed_curl "POST /ChangePasskey" \
+    -X POST "$BASE/ChangePasskey" \
     -H "$HDR_JSON" \
-    -H "x-amz-target: TrentService.RegisterPasskey" \
+    -H "x-amz-target: TrentService.ChangePasskey" \
     -d "{\"KeyId\":\"$KEY_ID\",\"PasskeyPublicKey\":\"$DUMMY_P256_PUBKEY\",\"CredentialId\":\"test-cred-001\"}"
 echo ""
 

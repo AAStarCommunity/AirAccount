@@ -18,8 +18,25 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// WebAuthn PassKey assertion data — attached to sign/export/delete requests
+/// for TA-level mandatory verification when a passkey is bound to the wallet.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct CreateWalletInput {}
+pub struct PasskeyAssertion {
+    /// authenticatorData from WebAuthn assertion
+    pub authenticator_data: Vec<u8>,
+    /// SHA-256(clientDataJSON) - 32 bytes
+    pub client_data_hash: [u8; 32],
+    /// ECDSA signature r component (32 bytes)
+    pub signature_r: [u8; 32],
+    /// ECDSA signature s component (32 bytes)
+    pub signature_s: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CreateWalletInput {
+    /// P-256 public key in uncompressed format (65 bytes: 0x04 || x || y)
+    pub passkey_pubkey: Vec<u8>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateWalletOutput {
@@ -30,6 +47,8 @@ pub struct CreateWalletOutput {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RemoveWalletInput {
     pub wallet_id: Uuid,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -39,6 +58,8 @@ pub struct RemoveWalletOutput {}
 pub struct DeriveAddressInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -63,6 +84,8 @@ pub struct SignTransactionInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub transaction: EthTransaction,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -75,6 +98,8 @@ pub struct SignMessageInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub message: Vec<u8>,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -87,6 +112,8 @@ pub struct SignHashInput {
     pub wallet_id: Uuid,
     pub hd_path: String,
     pub hash: [u8; 32],
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -96,7 +123,7 @@ pub struct SignHashOutput {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressAutoInput {
-    pub wallet_id: Option<Uuid>,  // None = create new wallet, Some = use existing
+    pub wallet_id: Uuid,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -111,6 +138,8 @@ pub struct DeriveAddressAutoOutput {
 pub struct ExportPrivateKeyInput {
     pub wallet_id: Uuid,
     pub derivation_path: String,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -139,6 +168,22 @@ pub struct VerifyPasskeyInput {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VerifyPasskeyOutput {
     pub valid: bool,
+}
+
+/// Register a PassKey public key to a wallet (stored in TEE secure storage).
+/// Once registered, all sensitive operations require PassKey assertion.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RegisterPasskeyTaInput {
+    pub wallet_id: Uuid,
+    /// New P-256 public key in uncompressed format (65 bytes: 0x04 || x || y)
+    pub passkey_pubkey: Vec<u8>,
+    /// Current passkey assertion (required to change passkey)
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RegisterPasskeyTaOutput {
+    pub registered: bool,
 }
 
 /// Pre-load wallet into TA memory cache (no crypto, just storage read + seed cache).

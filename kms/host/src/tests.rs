@@ -20,8 +20,10 @@ pub mod tests {
 
     pub fn test_workflow() {
         // Simulate the workflow of creating a wallet, deriving an address, and signing a transaction
-        let wallet_id = create_wallet().unwrap();
-        let address = derive_address(wallet_id, "m/44'/60'/0'/0/0").unwrap();
+        // Dummy P-256 uncompressed public key for test
+        let dummy_pk = [0x04u8; 65]; // format-correct but not a valid key
+        let wallet_id = create_wallet(&dummy_pk).unwrap();
+        let address = derive_address(wallet_id, "m/44'/60'/0'/0/0", None).unwrap();
         let result = sign_transaction(
             wallet_id,
             "m/44'/60'/0'/0/0",

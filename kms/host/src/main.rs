@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use kms::{cli, tests, create_wallet, derive_address, remove_wallet, sign_transaction};
+use kms::{cli, tests, create_wallet, derive_address, sign_transaction};
 
 use anyhow::{bail, Result};
 use structopt::StructOpt;
@@ -26,10 +26,6 @@ fn main() -> Result<()> {
         cli::Command::CreateWallet(_opt) => {
             let wallet_id = create_wallet()?;
             println!("Wallet ID: {}", wallet_id);
-        }
-        cli::Command::RemoveWallet(opt) => {
-            remove_wallet(opt.wallet_id)?;
-            println!("Wallet removed");
         }
         cli::Command::DeriveAddress(opt) => {
             let address = derive_address(opt.wallet_id, &opt.hd_path)?;
