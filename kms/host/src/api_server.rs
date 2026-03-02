@@ -5,23 +5,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
 use warp::Filter;
 use hex;
 
 // Import from kms library and proto
-use kms::ta_client::TaClient;
+use kms::ta_client::TeeHandle;
 use kms::address_cache::{update_address_entry, lookup_address};
 use proto;
 
-/// Max concurrent TEE operations (STM32 is single-core, TEE is single-threaded)
-const TEE_MAX_CONCURRENCY: usize = 1;
-/// Estimated seconds per TEE derivation operation on Cortex-A7 (PBKDF2+BIP32+secp256k1)
-const TEE_OP_ESTIMATE_SECS: u64 = 120;
+/// Estimated seconds per TEE operation with persistent session
+const TEE_OP_ESTIMATE_SECS: u64 = 1;
 
 // ========================================
 // AWS KMS 兼容的数据结构
@@ -249,6 +246,20 @@ pub struct QueueStatusResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WarmupCacheRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WarmupCacheResponse {
+    #[serde(rename = "Cached")]
+    pub cached: bool,
+    #[serde(rename = "CacheSize")]
+    pub cache_size: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterPasskeyRequest {
     #[serde(rename = "KeyId")]
     pub key_id: String,
@@ -320,39 +331,24 @@ fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     Ok((r, s))
 }
 
-enum SignPayload {
-    Transaction(proto::EthTransaction),
-    Message(Vec<u8>),
-}
-
 // ========================================
 // KMS API Server
 // ========================================
 
 pub struct KmsApiServer {
     metadata_store: Arc<RwLock<HashMap<String, KeyMetadata>>>,
-    tee_semaphore: Arc<Semaphore>,
-    pending_tasks: Arc<AtomicUsize>,
+    tee: TeeHandle,
     /// Track key derivation status: key_id -> "deriving" | "ready" | "error:msg"
     key_status: Arc<RwLock<HashMap<String, String>>>,
     /// PassKey public keys: key_id -> passkey_pubkey_bytes (uncompressed P-256, 65 bytes)
     passkey_store: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
-/// RAII guard that decrements pending_tasks on drop
-struct PendingGuard(Arc<AtomicUsize>);
-impl Drop for PendingGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 impl KmsApiServer {
     pub fn new() -> Self {
         Self {
             metadata_store: Arc::new(RwLock::new(HashMap::new())),
-            tee_semaphore: Arc::new(Semaphore::new(TEE_MAX_CONCURRENCY)),
-            pending_tasks: Arc::new(AtomicUsize::new(0)),
+            tee: TeeHandle::new(),
             key_status: Arc::new(RwLock::new(HashMap::new())),
             passkey_store: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -361,17 +357,7 @@ impl KmsApiServer {
     pub async fn create_key(&self, req: CreateKeyRequest) -> Result<CreateKeyResponse> {
         println!("📝 KMS CreateKey API called");
 
-        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
-        let _guard = PendingGuard(self.pending_tasks.clone());
-
-        let _permit = self.tee_semaphore.acquire().await
-            .map_err(|_| anyhow!("TEE semaphore closed"))?;
-
-        let wallet_id = tokio::task::spawn_blocking(move || -> Result<uuid::Uuid> {
-            let mut ta_client = TaClient::new()?;
-            Ok(ta_client.create_wallet()?)
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+        let wallet_id = self.tee.create_wallet().await?;
 
         let key_metadata = KeyMetadata {
             key_id: wallet_id.to_string(),
@@ -391,30 +377,16 @@ impl KmsApiServer {
         store.insert(wallet_id.to_string(), key_metadata.clone());
         drop(store);
 
-        // Mark as deriving and spawn background address derivation via derive_address_auto
+        // Mark as deriving and spawn background address derivation
         {
             let mut status = self.key_status.write().await;
             status.insert(wallet_id.to_string(), "deriving".to_string());
         }
         let metadata_store = self.metadata_store.clone();
         let key_status = self.key_status.clone();
-        let tee_semaphore = self.tee_semaphore.clone();
-        let pending_tasks = self.pending_tasks.clone();
+        let tee = self.tee.clone();
         tokio::spawn(async move {
-            pending_tasks.fetch_add(1, Ordering::SeqCst);
-            let _guard = PendingGuard(pending_tasks);
-
-            let _permit = tee_semaphore.acquire().await;
-            let result = tokio::task::spawn_blocking(move || -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
-                let mut ta_client = TaClient::new()?;
-                Ok(ta_client.derive_address_auto(Some(wallet_id))?)
-            }).await;
-
-            let derivation_result = match result {
-                Ok(Ok(tuple)) => Ok(tuple),
-                Ok(Err(e)) => Err(format!("{}", e)),
-                Err(e) => Err(format!("{}", e)),
-            };
+            let derivation_result = tee.derive_address_auto(Some(wallet_id)).await;
 
             match derivation_result {
                 Ok((_wid, address_bytes, public_key, derivation_path)) => {
@@ -435,7 +407,8 @@ impl KmsApiServer {
                     let mut status = key_status.write().await;
                     status.insert(wallet_id.to_string(), "ready".to_string());
                 }
-                Err(err_msg) => {
+                Err(e) => {
+                    let err_msg = format!("{}", e);
                     eprintln!("❌ Background derivation failed for {}: {}", wallet_id, err_msg);
                     let mut status = key_status.write().await;
                     status.insert(wallet_id.to_string(), format!("error:{}", err_msg));
@@ -517,11 +490,21 @@ impl KmsApiServer {
     }
 
     pub fn queue_status(&self) -> QueueStatusResponse {
-        let depth = self.pending_tasks.load(Ordering::SeqCst);
+        let depth = self.tee.pending_count();
         QueueStatusResponse {
             queue_depth: depth,
             estimated_wait_seconds: depth as u64 * TEE_OP_ESTIMATE_SECS,
         }
+    }
+
+    pub async fn warmup_cache(&self, req: WarmupCacheRequest) -> Result<WarmupCacheResponse> {
+        let wallet_uuid = Uuid::parse_str(&req.key_id)?;
+        let cache_size = self.tee.warmup_cache(wallet_uuid).await?;
+        println!("🔥 Warmup cache for {}: cache_size={}", req.key_id, cache_size);
+        Ok(WarmupCacheResponse {
+            cached: true,
+            cache_size,
+        })
     }
 
     pub async fn register_passkey(&self, req: RegisterPasskeyRequest) -> Result<RegisterPasskeyResponse> {
@@ -606,20 +589,12 @@ impl KmsApiServer {
         };
 
         // Verify in TEE
-        let sem = self.tee_semaphore.clone();
-        let _permit = sem.acquire().await.map_err(|_| anyhow!("TEE semaphore closed"))?;
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut ta_client = TaClient::new()?;
-            let valid = ta_client.verify_passkey(
-                wallet_uuid, &pubkey, &auth_data, &client_data_hash, &sig_r, &sig_s,
-            )?;
-            if !valid {
-                return Err(anyhow!("PassKey verification failed"));
-            }
-            Ok(())
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+        let valid = self.tee.verify_passkey(
+            wallet_uuid, &pubkey, &auth_data, &client_data_hash, &sig_r, &sig_s,
+        ).await?;
+        if !valid {
+            return Err(anyhow!("PassKey verification failed"));
+        }
 
         Ok(())
     }
@@ -633,19 +608,8 @@ impl KmsApiServer {
         }
         drop(store);
 
-        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
-        let _guard = PendingGuard(self.pending_tasks.clone());
-
-        let _permit = self.tee_semaphore.acquire().await
-            .map_err(|_| anyhow!("TEE semaphore closed"))?;
-
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let derivation_path = req.derivation_path.clone();
-        let address_bytes = tokio::task::spawn_blocking(move || -> Result<[u8; 20]> {
-            let mut ta_client = TaClient::new()?;
-            Ok(ta_client.derive_address(wallet_uuid, &derivation_path)?)
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+        let address_bytes = self.tee.derive_address(wallet_uuid, &req.derivation_path).await?;
 
         let address = format!("0x{}", hex::encode(&address_bytes));
 
@@ -690,11 +654,8 @@ impl KmsApiServer {
             &wallet_uuid.to_string(), wallet_uuid, req.passkey.as_ref(),
         ).await?;
 
-        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
-        let _guard = PendingGuard(self.pending_tasks.clone());
-
-        // Prepare sign payload before acquiring TEE permit
-        let sign_payload = if let Some(transaction) = req.transaction {
+        // Prepare sign payload
+        let signature = if let Some(transaction) = req.transaction {
             println!("  📝 Transaction signing mode");
             let to_bytes = if transaction.to.starts_with("0x") {
                 hex::decode(&transaction.to[2..])
@@ -719,7 +680,7 @@ impl KmsApiServer {
                 gas: transaction.gas as u128,
                 data,
             };
-            SignPayload::Transaction(eth_transaction)
+            self.tee.sign_transaction(wallet_uuid, &derivation_path, eth_transaction).await?
         } else if let Some(message) = req.message {
             println!("  📝 Message signing mode");
             let message_bytes = if message.starts_with("0x") {
@@ -727,26 +688,10 @@ impl KmsApiServer {
             } else {
                 base64::decode(&message).unwrap_or_else(|_| message.as_bytes().to_vec())
             };
-            SignPayload::Message(message_bytes)
+            self.tee.sign_message(wallet_uuid, &derivation_path, &message_bytes).await?
         } else {
             return Err(anyhow!("Either Transaction or Message must be provided"));
         };
-
-        let _permit = self.tee_semaphore.acquire().await
-            .map_err(|_| anyhow!("TEE semaphore closed"))?;
-
-        let signature = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-            let mut ta_client = TaClient::new()?;
-            match sign_payload {
-                SignPayload::Transaction(eth_tx) => {
-                    Ok(ta_client.sign_transaction(wallet_uuid, &derivation_path, eth_tx)?)
-                }
-                SignPayload::Message(msg) => {
-                    Ok(ta_client.sign_message(wallet_uuid, &derivation_path, &msg)?)
-                }
-            }
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
 
         Ok(SignResponse {
             signature: hex::encode(&signature),
@@ -792,9 +737,6 @@ impl KmsApiServer {
             &wallet_uuid.to_string(), wallet_uuid, req.passkey.as_ref(),
         ).await?;
 
-        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
-        let _guard = PendingGuard(self.pending_tasks.clone());
-
         let hash_bytes = if req.hash.starts_with("0x") {
             hex::decode(&req.hash[2..])?
         } else {
@@ -808,14 +750,7 @@ impl KmsApiServer {
         let mut hash_array = [0u8; 32];
         hash_array.copy_from_slice(&hash_bytes);
 
-        let _permit = self.tee_semaphore.acquire().await
-            .map_err(|_| anyhow!("TEE semaphore closed"))?;
-
-        let signature = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-            let mut ta_client = TaClient::new()?;
-            Ok(ta_client.sign_hash(wallet_uuid, &derivation_path, &hash_array)?)
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+        let signature = self.tee.sign_hash(wallet_uuid, &derivation_path, &hash_array).await?;
 
         Ok(SignHashResponse {
             signature: hex::encode(&signature),
@@ -849,20 +784,8 @@ impl KmsApiServer {
     pub async fn delete_key(&self, req: DeleteKeyRequest) -> Result<DeleteKeyResponse> {
         println!("📝 KMS ScheduleKeyDeletion API called for key: {}", req.key_id);
 
-        self.pending_tasks.fetch_add(1, Ordering::SeqCst);
-        let _guard = PendingGuard(self.pending_tasks.clone());
-
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-
-        let _permit = self.tee_semaphore.acquire().await
-            .map_err(|_| anyhow!("TEE semaphore closed"))?;
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut ta_client = TaClient::new()?;
-            ta_client.remove_wallet(wallet_uuid)?;
-            Ok(())
-        }).await
-            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))??;
+        self.tee.remove_wallet(wallet_uuid).await?;
 
         let mut store = self.metadata_store.write().await;
         store.remove(&req.key_id);
@@ -888,7 +811,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": "0.1.0",
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/DeleteKey", "/RegisterPasskey"],
+            "POST": ["/CreateKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/RegisterPasskey", "/WarmupCache"],
             "GET": ["/health", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
         }
     })))
@@ -1006,6 +929,19 @@ async fn handle_register_passkey(
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("RegisterPasskey error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_warmup_cache(
+    body: WarmupCacheRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.warmup_cache(body).await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("WarmupCache error: {}", e);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -1151,6 +1087,14 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_rp.clone()))
         .and_then(handle_register_passkey);
 
+    // WarmupCache API
+    let server_wc = server.clone();
+    let warmup_cache = warp::path("WarmupCache")
+        .and(warp::post())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_wc.clone()))
+        .and_then(handle_warmup_cache);
+
     // Clone server for each route
     let server1 = server.clone();
     let server2 = server.clone();
@@ -1158,7 +1102,6 @@ pub async fn start_kms_server() -> Result<()> {
     let server4 = server.clone();
     let server5 = server.clone();
     let server6 = server.clone();
-    let server7 = server.clone();
 
     // CreateKey API
     let create_key = warp::path("CreateKey")
@@ -1217,13 +1160,8 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server6.clone()))
         .and_then(handle_get_public_key);
 
-    // DeleteKey API (ScheduleKeyDeletion)
-    let delete_key = warp::path("DeleteKey")
-        .and(warp::post())
-        .and(warp::header::exact("x-amz-target", "TrentService.ScheduleKeyDeletion"))
-        .and(aws_kms_body())
-        .and(warp::any().map(move || server7.clone()))
-        .and_then(handle_delete_key);
+    // DeleteKey removed from public API — use CLI on Mac Mini instead:
+    //   ssh root@192.168.7.2 ./kms remove-wallet -w <wallet-id>
 
     let routes = index
         .or(test_ui)
@@ -1231,6 +1169,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(key_status)
         .or(queue_status)
         .or(register_passkey)
+        .or(warmup_cache)
         .or(create_key)
         .or(describe_key)
         .or(list_keys)
@@ -1238,7 +1177,6 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign)
         .or(sign_hash)
         .or(get_public_key)
-        .or(delete_key)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server starting on http://0.0.0.0:3000");
@@ -1252,8 +1190,9 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /Sign          - Sign Ethereum transaction or message");
     println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
-    println!("   POST /DeleteKey     - Schedule key deletion");
+    println!("   ---- /DeleteKey     - CLI only (removed from public API)");
     println!("   POST /RegisterPasskey - Register PassKey public key");
+    println!("   POST /WarmupCache   - Pre-load wallet into TA LRU cache");
     println!("   GET  /KeyStatus     - Key derivation status (polling)");
     println!("   GET  /QueueStatus   - TEE queue depth");
     println!("   GET  /health        - Health check");

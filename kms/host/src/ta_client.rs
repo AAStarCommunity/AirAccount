@@ -21,6 +21,8 @@
 use optee_teec::{Context, Operation, ParamType, Uuid};
 use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
 use anyhow::{Result, Context as AnyhowContext};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const OUTPUT_MAX_SIZE: usize = 1024;
 
@@ -265,6 +267,267 @@ impl TaClient {
 
         Ok(output.private_key)
     }
+}
+
+// ========================================
+// TeeHandle — persistent session via dedicated TEE thread
+// ========================================
+
+struct TeeCommand {
+    command: proto::Command,
+    input: Vec<u8>,
+    reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
+}
+
+/// Cloneable async handle to a single long-lived TEE session.
+/// All TEE calls are serialised through one worker thread, avoiding the
+/// ~4.4s open_session overhead on every request.
+#[derive(Clone)]
+pub struct TeeHandle {
+    tx: std::sync::mpsc::Sender<TeeCommand>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl TeeHandle {
+    /// Spawn the TEE worker thread and return a handle.
+    /// Panics if the initial Context / Session cannot be created.
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<TeeCommand>();
+        let pending = Arc::new(AtomicUsize::new(0));
+
+        std::thread::spawn(move || {
+            tee_worker_loop(rx);
+        });
+
+        println!("🔗 TeeHandle: worker thread spawned, session will be opened on first command");
+
+        Self { tx, pending }
+    }
+
+    /// Number of commands currently queued (for QueueStatus).
+    pub fn pending_count(&self) -> usize {
+        self.pending.load(Ordering::SeqCst)
+    }
+
+    // ---- async wrappers (mirror TaClient API) ----
+
+    async fn call(&self, command: proto::Command, input: Vec<u8>) -> Result<Vec<u8>> {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(TeeCommand { command, input, reply: reply_tx })
+            .map_err(|_| anyhow::anyhow!("TEE worker thread has exited"))?;
+        let result = reply_rx.await
+            .map_err(|_| anyhow::anyhow!("TEE worker dropped reply channel"))?;
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    pub async fn create_wallet(&self) -> Result<uuid::Uuid> {
+        let out = self.call(proto::Command::CreateWallet, vec![]).await?;
+        let output: proto::CreateWalletOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize CreateWalletOutput")?;
+        Ok(output.wallet_id)
+    }
+
+    pub async fn remove_wallet(&self, wallet_id: uuid::Uuid) -> Result<()> {
+        let input = bincode::serialize(&proto::RemoveWalletInput { wallet_id })
+            .context("Failed to serialize RemoveWalletInput")?;
+        self.call(proto::Command::RemoveWallet, input).await?;
+        Ok(())
+    }
+
+    pub async fn derive_address(&self, wallet_id: uuid::Uuid, hd_path: &str) -> Result<[u8; 20]> {
+        let input = bincode::serialize(&proto::DeriveAddressInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+        }).context("Failed to serialize DeriveAddressInput")?;
+        let out = self.call(proto::Command::DeriveAddress, input).await?;
+        let output: proto::DeriveAddressOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize DeriveAddressOutput")?;
+        Ok(output.address)
+    }
+
+    pub async fn sign_transaction(
+        &self,
+        wallet_id: uuid::Uuid,
+        hd_path: &str,
+        transaction: proto::EthTransaction,
+    ) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::SignTransactionInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+            transaction,
+        }).context("Failed to serialize SignTransactionInput")?;
+        let out = self.call(proto::Command::SignTransaction, input).await?;
+        let output: proto::SignTransactionOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize SignTransactionOutput")?;
+        Ok(output.signature)
+    }
+
+    pub async fn sign_message(
+        &self,
+        wallet_id: uuid::Uuid,
+        hd_path: &str,
+        message: &[u8],
+    ) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::SignMessageInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+            message: message.to_vec(),
+        }).context("Failed to serialize SignMessageInput")?;
+        let out = self.call(proto::Command::SignMessage, input).await?;
+        let output: proto::SignMessageOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize SignMessageOutput")?;
+        Ok(output.signature)
+    }
+
+    pub async fn sign_hash(
+        &self,
+        wallet_id: uuid::Uuid,
+        hd_path: &str,
+        hash: &[u8; 32],
+    ) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::SignHashInput {
+            wallet_id,
+            hd_path: hd_path.to_string(),
+            hash: *hash,
+        }).context("Failed to serialize SignHashInput")?;
+        let out = self.call(proto::Command::SignHash, input).await?;
+        let output: proto::SignHashOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize SignHashOutput")?;
+        Ok(output.signature)
+    }
+
+    pub async fn derive_address_auto(
+        &self,
+        wallet_id: Option<uuid::Uuid>,
+    ) -> Result<(uuid::Uuid, [u8; 20], Vec<u8>, String)> {
+        let input = bincode::serialize(&proto::DeriveAddressAutoInput { wallet_id })
+            .context("Failed to serialize DeriveAddressAutoInput")?;
+        let out = self.call(proto::Command::DeriveAddressAuto, input).await?;
+        let output: proto::DeriveAddressAutoOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize DeriveAddressAutoOutput")?;
+        Ok((output.wallet_id, output.address, output.public_key, output.derivation_path))
+    }
+
+    pub async fn verify_passkey(
+        &self,
+        wallet_id: uuid::Uuid,
+        public_key: &[u8],
+        authenticator_data: &[u8],
+        client_data_hash: &[u8; 32],
+        signature_r: &[u8; 32],
+        signature_s: &[u8; 32],
+    ) -> Result<bool> {
+        let input = bincode::serialize(&proto::VerifyPasskeyInput {
+            wallet_id,
+            public_key: public_key.to_vec(),
+            authenticator_data: authenticator_data.to_vec(),
+            client_data_hash: *client_data_hash,
+            signature_r: *signature_r,
+            signature_s: *signature_s,
+        }).context("Failed to serialize VerifyPasskeyInput")?;
+        let out = self.call(proto::Command::VerifyPasskey, input).await?;
+        let output: proto::VerifyPasskeyOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize VerifyPasskeyOutput")?;
+        Ok(output.valid)
+    }
+
+    pub async fn export_private_key(
+        &self,
+        wallet_id: uuid::Uuid,
+        derivation_path: &str,
+    ) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::ExportPrivateKeyInput {
+            wallet_id,
+            derivation_path: derivation_path.to_string(),
+        })?;
+        let out = self.call(proto::Command::ExportPrivateKey, input).await?;
+        let output: proto::ExportPrivateKeyOutput = bincode::deserialize(&out)
+            .with_context(|| "Failed to deserialize ExportPrivateKeyOutput")?;
+        Ok(output.private_key)
+    }
+
+    /// Pre-load wallet into TA LRU cache. Returns cache size.
+    pub async fn warmup_cache(&self, wallet_id: uuid::Uuid) -> Result<u32> {
+        let input = bincode::serialize(&proto::WarmupCacheInput { wallet_id })
+            .context("Failed to serialize WarmupCacheInput")?;
+        let out = self.call(proto::Command::WarmupCache, input).await?;
+        let output: proto::WarmupCacheOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize WarmupCacheOutput")?;
+        Ok(output.cache_size)
+    }
+}
+
+// ---- TEE worker thread ----
+
+fn invoke_on_session(
+    session: &mut optee_teec::Session,
+    command: proto::Command,
+    input: &[u8],
+) -> Result<Vec<u8>> {
+    let p0 = ParamTmpRef::new_input(input);
+    let mut output = vec![0u8; OUTPUT_MAX_SIZE];
+    let p1 = ParamTmpRef::new_output(output.as_mut_slice());
+    let p2 = ParamValue::new(0, 0, ParamType::ValueInout);
+    let mut operation = Operation::new(0, p0, p1, p2, ParamNone);
+
+    match session.invoke_command(command as u32, &mut operation) {
+        Ok(()) => {
+            let len = operation.parameters().2.a() as usize;
+            Ok(output[..len].to_vec())
+        }
+        Err(e) => {
+            let len = operation.parameters().2.a() as usize;
+            let msg = String::from_utf8_lossy(&output[..len]);
+            Err(anyhow::anyhow!("TA command failed: {} (error: {:?})", msg, e))
+        }
+    }
+}
+
+fn is_session_error(result: &Result<Vec<u8>>) -> bool {
+    match result {
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            msg.contains("TargetDead") || msg.contains("ItemNotFound")
+                || msg.contains("Communication") || msg.contains("Session")
+        }
+        Ok(_) => false,
+    }
+}
+
+fn tee_worker_loop(rx: std::sync::mpsc::Receiver<TeeCommand>) {
+    let mut ctx = Context::new().expect("TEE Context::new failed");
+    let uuid = Uuid::parse_str(proto::UUID).expect("Invalid TA UUID");
+    let mut session = ctx.open_session(uuid.clone()).expect("Initial open_session failed");
+    println!("🔗 TEE worker: session opened");
+
+    for cmd in rx.iter() {
+        let result = invoke_on_session(&mut session, cmd.command, &cmd.input);
+
+        if is_session_error(&result) {
+            eprintln!("⚠️  TEE session error, attempting reconnect…");
+            match ctx.open_session(uuid.clone()) {
+                Ok(new_session) => {
+                    session = new_session;
+                    println!("🔗 TEE worker: session reconnected");
+                    let retry = invoke_on_session(&mut session, cmd.command, &cmd.input);
+                    let _ = cmd.reply.send(retry);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("❌ TEE reconnect failed: {:?}", e);
+                    // Send the original error
+                    let _ = cmd.reply.send(result);
+                    continue;
+                }
+            }
+        }
+
+        let _ = cmd.reply.send(result);
+    }
+
+    println!("🔗 TEE worker: channel closed, exiting");
 }
 
 #[cfg(test)]

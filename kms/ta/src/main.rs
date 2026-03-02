@@ -17,6 +17,7 @@
 
 #![no_main]
 
+mod bip32_secp;
 mod hash;
 mod wallet;
 
@@ -28,10 +29,146 @@ use proto::Command;
 use secure_db::SecureStorageClient;
 
 use anyhow::{anyhow, bail, Result};
+use std::cell::RefCell;
 use std::io::Write;
+use uuid::Uuid;
 use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
+
+// ========================================
+// LRU Wallet Cache (TA is single-threaded)
+// ========================================
+// Uses Vec instead of HashMap to avoid SipHasher's getrandom dependency,
+// which panics in OP-TEE TA environment. 200-entry linear scan is negligible.
+
+const CACHE_CAPACITY: usize = 200;
+
+struct WalletCacheEntry {
+    id: Uuid,
+    wallet: Wallet,
+    tick: u64,
+}
+
+struct WalletLruCache {
+    entries: Vec<WalletCacheEntry>,
+    tick: u64,
+}
+
+impl WalletLruCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            tick: 0,
+        }
+    }
+
+    fn get(&mut self, id: &Uuid) -> Option<Wallet> {
+        for entry in self.entries.iter_mut() {
+            if &entry.id == id {
+                self.tick += 1;
+                entry.tick = self.tick;
+                return Some(entry.wallet.clone());
+            }
+        }
+        None
+    }
+
+    fn put(&mut self, wallet: &Wallet) {
+        self.tick += 1;
+        let id = wallet.get_id();
+
+        // Update existing
+        for entry in self.entries.iter_mut() {
+            if entry.id == id {
+                entry.wallet = wallet.clone();
+                entry.tick = self.tick;
+                return;
+            }
+        }
+
+        // Evict LRU if at capacity
+        if self.entries.len() >= CACHE_CAPACITY {
+            let lru_idx = self.entries.iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.tick)
+                .map(|(i, _)| i)
+                .unwrap();
+            self.entries.swap_remove(lru_idx);
+        }
+
+        self.entries.push(WalletCacheEntry {
+            id,
+            wallet: wallet.clone(),
+            tick: self.tick,
+        });
+    }
+
+    fn remove(&mut self, id: &Uuid) {
+        self.entries.retain(|e| &e.id != id);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+thread_local! {
+    static WALLET_CACHE: RefCell<WalletLruCache> = RefCell::new(WalletLruCache::new());
+}
+
+// ---- Cache helper functions ----
+
+fn cache_get(wallet_id: &Uuid) -> Option<Wallet> {
+    WALLET_CACHE.with(|c| c.borrow_mut().get(wallet_id))
+}
+
+fn cache_put(wallet: &Wallet) {
+    WALLET_CACHE.with(|c| c.borrow_mut().put(wallet));
+}
+
+fn cache_remove(wallet_id: &Uuid) {
+    WALLET_CACHE.with(|c| c.borrow_mut().remove(wallet_id));
+}
+
+fn cache_len() -> usize {
+    WALLET_CACHE.with(|c| c.borrow().len())
+}
+
+/// Save wallet to secure storage AND update cache.
+fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
+    db.put(wallet)?;
+    cache_put(wallet);
+    Ok(())
+}
+
+/// Load wallet + ensure seed cached.
+/// On cache hit with seed already cached: ZERO secure storage I/O.
+fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
+    // Fast path: cache hit
+    if let Some(mut w) = cache_get(wallet_id) {
+        let changed = w.ensure_seed_cached()?;
+        if !changed {
+            return Ok(w);
+        }
+        // Seed was just computed — persist to storage
+        let db = SecureStorageClient::open(DB_NAME)?;
+        save_wallet(&db, &w)?;
+        return Ok(w);
+    }
+
+    // Slow path: cache miss — read from storage
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut w = db.get::<Wallet>(wallet_id)
+        .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
+    let changed = w.ensure_seed_cached()?;
+    if changed {
+        save_wallet(&db, &w)?;
+    } else {
+        cache_put(&w);
+    }
+    Ok(w)
+}
 
 #[ta_create]
 fn create() -> optee_utee::Result<()> {
@@ -72,7 +209,7 @@ fn create_wallet(_input: &proto::CreateWalletInput) -> Result<proto::CreateWalle
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
-    db_client.put(&wallet)?;
+    save_wallet(&db_client, &wallet)?;
     dbg_println!("[+] Wallet saved in secure storage");
 
     Ok(proto::CreateWalletOutput {
@@ -86,105 +223,63 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
     db_client.delete_entry::<Wallet>(&input.wallet_id)?;
+    cache_remove(&input.wallet_id);
     dbg_println!("[+] Wallet removed");
 
     Ok(proto::RemoveWalletOutput {})
 }
 
 fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddressOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
-    let wallet = db_client
-        .get::<Wallet>(&input.wallet_id)
-        .map_err(|e| anyhow!("[+] Deriving address: error: wallet not found: {:?}", e))?;
-    dbg_println!("[+] Deriving address: wallet loaded");
-
+    let wallet = load_wallet_cached(&input.wallet_id)?;
     let (address, public_key) = wallet.derive_address(&input.hd_path)?;
-    dbg_println!("[+] Deriving address: address: {:?}", address);
-    dbg_println!("[+] Deriving address: public key: {:?}", public_key);
-
-    Ok(proto::DeriveAddressOutput {
-        address,
-        public_key,
-    })
+    Ok(proto::DeriveAddressOutput { address, public_key })
 }
 
 fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTransactionOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
-    let wallet = db_client
-        .get::<Wallet>(&input.wallet_id)
-        .map_err(|e| anyhow!("[+] Sign transaction: error: wallet not found: {:?}", e))?;
-    dbg_println!("[+] Sign transaction: wallet loaded");
-
+    let wallet = load_wallet_cached(&input.wallet_id)?;
     let signature = wallet.sign_transaction(&input.hd_path, &input.transaction)?;
-    dbg_println!("[+] Sign transaction: signature: {:?}", signature);
-
     Ok(proto::SignTransactionOutput { signature })
 }
 
 fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
-    let wallet = db_client
-        .get::<Wallet>(&input.wallet_id)
-        .map_err(|e| anyhow!("[+] Sign message: error: wallet not found: {:?}", e))?;
-    dbg_println!("[+] Sign message: wallet loaded");
-
+    let wallet = load_wallet_cached(&input.wallet_id)?;
     let signature = wallet.sign_message(&input.hd_path, &input.message)?;
-    dbg_println!("[+] Sign message: signature: {:?}", signature);
-
     Ok(proto::SignMessageOutput { signature })
 }
 
 fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
-    let wallet = db_client
-        .get::<Wallet>(&input.wallet_id)
-        .map_err(|e| anyhow!("[+] Sign hash: error: wallet not found: {:?}", e))?;
-    dbg_println!("[+] Sign hash: wallet loaded");
-
+    let wallet = load_wallet_cached(&input.wallet_id)?;
     let signature = wallet.sign_hash(&input.hd_path, &input.hash)?;
-    dbg_println!("[+] Sign hash: signature: {:?}", signature);
-
     Ok(proto::SignHashOutput { signature })
 }
 
 fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::DeriveAddressAutoOutput> {
     let db_client = SecureStorageClient::open(DB_NAME)?;
 
-    let (wallet_id, wallet, address_index) = if let Some(existing_id) = input.wallet_id {
-        // Use existing wallet and increment address index
+    let (wallet_id, mut wallet, address_index) = if let Some(existing_id) = input.wallet_id {
         dbg_println!("[+] Loading existing wallet: {:?}", existing_id);
-        let mut wallet = db_client
-            .get::<Wallet>(&existing_id)
-            .map_err(|e| anyhow!("[+] Derive address auto: wallet not found: {:?}", e))?;
+        let mut wallet = match cache_get(&existing_id) {
+            Some(w) => w,
+            None => db_client.get::<Wallet>(&existing_id)
+                .map_err(|e| anyhow!("wallet not found: {:?}", e))?,
+        };
 
         let index = wallet.increment_address_index()?;
-        dbg_println!("[+] Incremented address index to: {}", index);
-
         (existing_id, wallet, index)
     } else {
-        // Create new wallet
-        dbg_println!("[+] Creating new wallet");
         let mut wallet = Wallet::new()?;
         let wallet_id = wallet.get_id();
-        dbg_println!("[+] New wallet ID: {:?}", wallet_id);
-
-        // First address uses index 0, then increment for next time
         let index = wallet.increment_address_index()?;
-        dbg_println!("[+] First address index: {}", index);
-
         (wallet_id, wallet, index)
     };
 
-    // Derive address with auto-incremented path
+    wallet.ensure_seed_cached()?;
+
     let derivation_path = format!("m/44'/60'/0'/0/{}", address_index);
-    dbg_println!("[+] Derivation path: {}", derivation_path);
-
     let (address, public_key) = wallet.derive_address(&derivation_path)?;
-    dbg_println!("[+] Derived address: {:?}", address);
 
-    // Save wallet (with updated counter)
-    db_client.put(&wallet)?;
-    dbg_println!("[+] Wallet saved");
+    // Always save: address index was incremented
+    save_wallet(&db_client, &wallet)?;
 
     Ok(proto::DeriveAddressAutoOutput {
         wallet_id,
@@ -197,17 +292,10 @@ fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::D
 fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::ExportPrivateKeyOutput> {
     dbg_println!("[+] Export private key for wallet: {:?}, path: {}", input.wallet_id, input.derivation_path);
 
-    let db_client = SecureStorageClient::open(DB_NAME)?;
-    let wallet = db_client
-        .get::<Wallet>(&input.wallet_id)
-        .map_err(|e| anyhow!("[+] Export private key: wallet not found: {:?}", e))?;
-
+    let wallet = load_wallet_cached(&input.wallet_id)?;
     let private_key = wallet.export_private_key(&input.derivation_path)?;
-    dbg_println!("[+] Private key exported (length: {} bytes)", private_key.len());
 
-    Ok(proto::ExportPrivateKeyOutput {
-        private_key,
-    })
+    Ok(proto::ExportPrivateKeyOutput { private_key })
 }
 
 fn verify_passkey(input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPasskeyOutput> {
@@ -248,6 +336,15 @@ fn verify_passkey(input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPass
     Ok(proto::VerifyPasskeyOutput { valid })
 }
 
+fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOutput> {
+    dbg_println!("[+] Warmup cache for wallet: {:?}", input.wallet_id);
+    let _wallet = load_wallet_cached(&input.wallet_id)?;
+    Ok(proto::WarmupCacheOutput {
+        cached: true,
+        cache_size: cache_len() as u32,
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -269,6 +366,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
         Command::ExportPrivateKey => process(serialized_input, export_private_key),
         Command::VerifyPasskey => process(serialized_input, verify_passkey),
+        Command::WarmupCache => process(serialized_input, warmup_cache),
         _ => bail!("Unsupported command"),
     }
 }

@@ -388,8 +388,12 @@ fn create_wallet(...) -> Result<...> {
 
 ## 📚 文档索引
 
+### API 文档
+- [KMS API Reference (DK2)](../docs/KMS-API-Reference.md) - 完整 REST API 参考、请求/响应结构、使用流程
+
 ### 开发指南
 - [完整开发指南](../docs/KMS-Development-Guide.md) - Docker、QEMU、部署完整流程
+- [DK2 开发部署](DK2-dev.md) - STM32MP157F-DK2 硬件开发指南
 - [Changes.md](../docs/Changes.md) - 项目变更历史和技术要点
 
 ### 监控系统
