@@ -140,3 +140,15 @@ pub struct VerifyPasskeyInput {
 pub struct VerifyPasskeyOutput {
     pub valid: bool,
 }
+
+/// Pre-load wallet into TA memory cache (no crypto, just storage read + seed cache).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WarmupCacheInput {
+    pub wallet_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WarmupCacheOutput {
+    pub cached: bool,
+    pub cache_size: u32,
+}

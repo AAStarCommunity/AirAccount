@@ -21,7 +21,7 @@ mod in_out;
 pub use in_out::*;
 
 
-#[derive(FromPrimitive, IntoPrimitive, Debug)]
+#[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone)]
 #[repr(u32)]
 pub enum Command {
     CreateWallet,
@@ -33,6 +33,7 @@ pub enum Command {
     DeriveAddressAuto,
     ExportPrivateKey,
     VerifyPasskey,
+    WarmupCache,
     #[default]
     Unknown,
 }

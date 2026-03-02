@@ -16,11 +16,12 @@
 // under the License.
 
 use anyhow::{anyhow, Result};
-use bip32::{Mnemonic, XPrv};
+use bip32::Mnemonic;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 use uuid::Uuid;
 
+use crate::bip32_secp::{self, CachedXPrv, DerivedKey};
 use crate::hash::keccak_hash_to_bytes;
 use ethereum_tx_sign::Transaction;
 use optee_utee::Random;
@@ -33,6 +34,12 @@ pub struct Wallet {
     entropy: Vec<u8>,
     next_address_index: u32,
     next_account_index: u32,
+    /// Cached BIP39 seed (64 bytes) — avoids re-running PBKDF2 on every operation
+    #[serde(default)]
+    cached_seed: Option<Vec<u8>>,
+    /// Cached m/44'/60'/0' extended key (97 bytes) — skips 3 hardened derivation levels
+    #[serde(default)]
+    cached_account_root: Option<Vec<u8>>,
 }
 
 impl Storable for Wallet {
@@ -62,6 +69,8 @@ impl Wallet {
             entropy,
             next_address_index: 0,
             next_account_index: 0,
+            cached_seed: None,
+            cached_account_root: None,
         })
     }
 
@@ -98,42 +107,74 @@ impl Wallet {
     }
 
     pub fn get_seed(&self) -> Result<Vec<u8>> {
+        if let Some(ref seed) = self.cached_seed {
+            return Ok(seed.clone());
+        }
         let mnemonic = Mnemonic::from_entropy(
             self.entropy.as_slice().try_into()?,
             bip32::Language::English,
         );
-        let seed = mnemonic.to_seed(""); // empty passwords
+        let seed = mnemonic.to_seed("");
         Ok(seed.as_bytes().to_vec())
     }
 
-    pub fn derive_prv_key(&self, hd_path: &str) -> Result<Vec<u8>> {
-        let path = hd_path.parse()?;
-        let child_xprv = XPrv::derive_from_path(self.get_seed()?, &path)?;
-        let child_xprv_bytes = child_xprv.to_bytes();
-        Ok(child_xprv_bytes.to_vec())
+    /// Compute seed via PBKDF2 and cache it, plus compute account root (m/44'/60'/0').
+    /// Returns `true` if anything was actually cached (caller should persist).
+    pub fn ensure_seed_cached(&mut self) -> Result<bool> {
+        let mut changed = false;
+
+        if self.cached_seed.is_none() {
+            let mnemonic = Mnemonic::from_entropy(
+                self.entropy.as_slice().try_into()?,
+                bip32::Language::English,
+            );
+            let seed = mnemonic.to_seed("");
+            self.cached_seed = Some(seed.as_bytes().to_vec());
+            changed = true;
+        }
+
+        // Also cache the account root if not already cached
+        if self.cached_account_root.is_none() {
+            let seed = self.cached_seed.as_ref().unwrap();
+            let root = bip32_secp::compute_account_root(seed)?;
+            self.cached_account_root = Some(root.serialize().to_vec());
+            changed = true;
+        }
+
+        Ok(changed)
     }
 
-    pub fn derive_pub_key(&self, hd_path: &str) -> Result<Vec<u8>> {
-        let path = hd_path.parse()?;
-        let child_xprv = XPrv::derive_from_path(self.get_seed()?, &path)?;
-        // public key
-        let child_xpub_bytes = child_xprv.public_key().to_bytes();
-        Ok(child_xpub_bytes.to_vec())
+    /// Get cached account root, or compute it on the fly.
+    fn get_account_root(&self) -> Result<Option<CachedXPrv>> {
+        match &self.cached_account_root {
+            Some(data) => Ok(Some(CachedXPrv::deserialize(data)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Derive key using optimized libsecp256k1 path.
+    fn derive_key(&self, hd_path: &str) -> Result<DerivedKey> {
+        let seed = self.get_seed()?;
+        let (account, address) = bip32_secp::parse_eth_path(hd_path)?;
+        let cached = self.get_account_root()?;
+        bip32_secp::derive_full(&seed, cached.as_ref(), account, address)
     }
 
     pub fn derive_address(&self, hd_path: &str) -> Result<([u8; 20], Vec<u8>)> {
-        let public_key_bytes = self.derive_pub_key(hd_path)?;
-        // uncompress public key
-        let public_key = secp256k1::PublicKey::from_slice(&public_key_bytes)?;
-        let uncompressed_public_key = &public_key.serialize_uncompressed()[1..];
+        let derived = self.derive_key(hd_path)?;
 
-        // pubkey to address
-        let address = &keccak_hash_to_bytes(&uncompressed_public_key)[12..];
-        Ok((address.try_into()?, public_key_bytes))
+        // Ethereum address: Keccak256(uncompressed_pubkey[1..]) → last 20 bytes
+        let uncompressed_no_prefix = &derived.public_key_uncompressed[1..];
+        let address = &keccak_hash_to_bytes(uncompressed_no_prefix)[12..];
+
+        Ok((
+            address.try_into()?,
+            derived.public_key_compressed.to_vec(),
+        ))
     }
 
     pub fn sign_transaction(&self, hd_path: &str, transaction: &EthTransaction) -> Result<Vec<u8>> {
-        let xprv = self.derive_prv_key(hd_path)?;
+        let derived = self.derive_key(hd_path)?;
         let legacy_transaction = ethereum_tx_sign::LegacyTransaction {
             chain: transaction.chain_id,
             nonce: transaction.nonce,
@@ -143,7 +184,7 @@ impl Wallet {
             value: transaction.value,
             data: transaction.data.clone(),
         };
-        let ecdsa = legacy_transaction.ecdsa(&xprv).map_err(|e| {
+        let ecdsa = legacy_transaction.ecdsa(&derived.private_key.to_vec()).map_err(|e| {
             let ethereum_tx_sign::Error::Secp256k1(inner_error) = e;
             inner_error
         })?;
@@ -152,16 +193,13 @@ impl Wallet {
     }
 
     pub fn sign_message(&self, hd_path: &str, message: &[u8]) -> Result<Vec<u8>> {
-        let xprv = self.derive_prv_key(hd_path)?;
+        let derived = self.derive_key(hd_path)?;
 
-        // Hash the message using Keccak256
         let message_hash = keccak_hash_to_bytes(message);
 
-        // Sign the hash using secp256k1
-        let secret_key = secp256k1::SecretKey::from_slice(&xprv[..32])?;
+        let secret_key = secp256k1::SecretKey::from_slice(&derived.private_key)?;
         let secp = secp256k1::Secp256k1::new();
 
-        // Create Message from 32-byte hash
         let mut hash_array = [0u8; 32];
         hash_array.copy_from_slice(&message_hash[..32]);
         let message_obj = secp256k1::Message::from_slice(&hash_array)?;
@@ -169,7 +207,6 @@ impl Wallet {
         let sig = secp.sign_ecdsa_recoverable(&message_obj, &secret_key);
         let (recovery_id, sig_bytes) = sig.serialize_compact();
 
-        // Combine signature with recovery id (v = recovery_id + 27 for Ethereum)
         let mut signature = Vec::with_capacity(65);
         signature.extend_from_slice(&sig_bytes);
         signature.push(recovery_id.to_i32() as u8 + 27);
@@ -178,19 +215,16 @@ impl Wallet {
     }
 
     pub fn sign_hash(&self, hd_path: &str, hash: &[u8; 32]) -> Result<Vec<u8>> {
-        let xprv = self.derive_prv_key(hd_path)?;
+        let derived = self.derive_key(hd_path)?;
 
-        // Sign the hash directly using secp256k1 (no additional hashing)
-        let secret_key = secp256k1::SecretKey::from_slice(&xprv[..32])?;
+        let secret_key = secp256k1::SecretKey::from_slice(&derived.private_key)?;
         let secp = secp256k1::Secp256k1::new();
 
-        // Use the provided hash directly
         let message_obj = secp256k1::Message::from_slice(hash)?;
 
         let sig = secp.sign_ecdsa_recoverable(&message_obj, &secret_key);
         let (recovery_id, sig_bytes) = sig.serialize_compact();
 
-        // Combine signature with recovery id (v = recovery_id + 27 for Ethereum)
         let mut signature = Vec::with_capacity(65);
         signature.extend_from_slice(&sig_bytes);
         signature.push(recovery_id.to_i32() as u8 + 27);
@@ -198,12 +232,9 @@ impl Wallet {
         Ok(signature)
     }
 
-    /// Export private key for a given derivation path
-    /// WARNING: This should only be used for debugging/verification purposes
     pub fn export_private_key(&self, hd_path: &str) -> Result<Vec<u8>> {
-        let xprv = self.derive_prv_key(hd_path)?;
-        // Return the 32-byte private key
-        Ok(xprv[..32].to_vec())
+        let derived = self.derive_key(hd_path)?;
+        Ok(derived.private_key.to_vec())
     }
 }
 
@@ -226,5 +257,11 @@ impl TryFrom<Vec<u8>> for Wallet {
 impl Drop for Wallet {
     fn drop(&mut self) {
         self.entropy.iter_mut().for_each(|x| *x = 0);
+        if let Some(ref mut seed) = self.cached_seed {
+            seed.iter_mut().for_each(|x| *x = 0);
+        }
+        if let Some(ref mut root) = self.cached_account_root {
+            root.iter_mut().for_each(|x| *x = 0);
+        }
     }
 }

@@ -37,6 +37,7 @@ bip32 = { version = "0.3.0", features = ["bip39"]}
 hex = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0.197", features = ["derive"] }
 sha3 = "0.10.6"
+hmac = "0.12"
 secp256k1 = "0.27.0"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10", default-features = false }

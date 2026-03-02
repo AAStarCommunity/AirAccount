@@ -24,5 +24,5 @@ pub mod tests;
 pub mod address_cache;
 
 // Re-export commonly used items
-pub use ta_client::{TaClient, create_wallet, derive_address, remove_wallet, sign_transaction};
+pub use ta_client::{TaClient, TeeHandle, create_wallet, derive_address, remove_wallet, sign_transaction};
 pub use address_cache::{AddressMetadata, AddressMap, load_address_map, save_address_map, update_address_entry, lookup_address};
