@@ -523,6 +523,7 @@ fn is_session_error(result: &Result<Vec<u8>>) -> bool {
             let msg = format!("{:?}", e);
             msg.contains("TargetDead") || msg.contains("ItemNotFound")
                 || msg.contains("Communication") || msg.contains("Session")
+                || msg.contains("panicked") || msg.contains("0xffff3024")
         }
         Ok(_) => false,
     }
