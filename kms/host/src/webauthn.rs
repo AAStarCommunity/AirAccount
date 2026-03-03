@@ -639,4 +639,139 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    // ── P-256 ECDSA signature verification tests ──
+    // These test the same logic as api_server::verify_passkey_ca
+
+    use p256::ecdsa::SigningKey;
+    use p256::ecdsa::signature::Signer;
+
+    /// Generate a test P-256 keypair for assertion testing
+    fn test_keypair() -> (SigningKey, VerifyingKey) {
+        let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let verifying_key = *signing_key.verifying_key();
+        (signing_key, verifying_key)
+    }
+
+    /// Build a proto::PasskeyAssertion from auth_data, cdh, and signing key.
+    /// Signs SHA256(auth_data || cdh) using Prehashed mode to match TA behavior.
+    fn build_test_assertion(
+        signing_key: &SigningKey,
+        auth_data: &[u8],
+        client_data_hash: &[u8; 32],
+    ) -> proto::PasskeyAssertion {
+        // Sign the raw message (auth_data || cdh).
+        // p256 Signer::sign() internally hashes with SHA-256 = ECDSA(SHA256(msg))
+        // So we pass auth_data || cdh as the message.
+        let mut msg = Vec::with_capacity(auth_data.len() + 32);
+        msg.extend_from_slice(auth_data);
+        msg.extend_from_slice(client_data_hash);
+        let sig: Signature = signing_key.sign(&msg);
+        let (r_bytes, s_bytes) = sig.split_bytes();
+        let mut signature_r = [0u8; 32];
+        let mut signature_s = [0u8; 32];
+        signature_r.copy_from_slice(&r_bytes);
+        signature_s.copy_from_slice(&s_bytes);
+
+        proto::PasskeyAssertion {
+            authenticator_data: auth_data.to_vec(),
+            client_data_hash: *client_data_hash,
+            signature_r,
+            signature_s,
+        }
+    }
+
+    /// Verify a proto::PasskeyAssertion against a pubkey hex — same as verify_passkey_ca
+    fn verify_ca_style(pubkey_hex: &str, assertion: &proto::PasskeyAssertion) -> Result<()> {
+        let pk_hex = pubkey_hex.trim_start_matches("0x");
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| anyhow!("Invalid pubkey hex: {}", e))?;
+        let encoded_point = EncodedPoint::from_bytes(&pk_bytes)
+            .map_err(|e| anyhow!("Invalid P-256 point: {:?}", e))?;
+        let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)
+            .map_err(|e| anyhow!("Failed to parse verifying key: {:?}", e))?;
+
+        let mut msg = Vec::with_capacity(assertion.authenticator_data.len() + 32);
+        msg.extend_from_slice(&assertion.authenticator_data);
+        msg.extend_from_slice(&assertion.client_data_hash);
+
+        let signature = Signature::from_scalars(assertion.signature_r, assertion.signature_s)
+            .map_err(|e| anyhow!("Invalid signature: {:?}", e))?;
+        verifying_key.verify(&msg, &signature)
+            .map_err(|_| anyhow!("Verification failed"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_passkey_ca_valid_signature() {
+        let (sk, vk) = test_keypair();
+        let pubkey_hex = format!("0x{}", hex::encode(
+            EncodedPoint::from(vk).as_bytes()
+        ));
+
+        let auth_data = [0x05u8; 37]; // realistic length
+        let cdh = [0xABu8; 32];
+        let assertion = build_test_assertion(&sk, &auth_data, &cdh);
+
+        assert!(verify_ca_style(&pubkey_hex, &assertion).is_ok());
+    }
+
+    #[test]
+    fn verify_passkey_ca_tampered_signature() {
+        let (sk, vk) = test_keypair();
+        let pubkey_hex = format!("0x{}", hex::encode(
+            EncodedPoint::from(vk).as_bytes()
+        ));
+
+        let auth_data = [0x05u8; 37];
+        let cdh = [0xABu8; 32];
+        let mut assertion = build_test_assertion(&sk, &auth_data, &cdh);
+
+        // Tamper with signature_r
+        assertion.signature_r[0] ^= 0xFF;
+        assert!(verify_ca_style(&pubkey_hex, &assertion).is_err());
+    }
+
+    #[test]
+    fn verify_passkey_ca_wrong_key() {
+        let (sk, _vk) = test_keypair();
+        let (_sk2, vk2) = test_keypair();
+        let wrong_pubkey_hex = format!("0x{}", hex::encode(
+            EncodedPoint::from(vk2).as_bytes()
+        ));
+
+        let auth_data = [0x05u8; 37];
+        let cdh = [0xABu8; 32];
+        let assertion = build_test_assertion(&sk, &auth_data, &cdh);
+
+        // Verify with wrong key should fail
+        assert!(verify_ca_style(&wrong_pubkey_hex, &assertion).is_err());
+    }
+
+    #[test]
+    fn verify_passkey_ca_tampered_auth_data() {
+        let (sk, vk) = test_keypair();
+        let pubkey_hex = format!("0x{}", hex::encode(
+            EncodedPoint::from(vk).as_bytes()
+        ));
+
+        let auth_data = [0x05u8; 37];
+        let cdh = [0xABu8; 32];
+        let mut assertion = build_test_assertion(&sk, &auth_data, &cdh);
+
+        // Tamper with authenticator_data — signature should no longer match
+        assertion.authenticator_data[0] ^= 0xFF;
+        assert!(verify_ca_style(&pubkey_hex, &assertion).is_err());
+    }
+
+    #[test]
+    fn verify_passkey_ca_invalid_pubkey_hex() {
+        let assertion = proto::PasskeyAssertion {
+            authenticator_data: vec![0u8; 37],
+            client_data_hash: [0u8; 32],
+            signature_r: [1u8; 32],
+            signature_s: [1u8; 32],
+        };
+        assert!(verify_ca_style("0xDEADBEEF", &assertion).is_err());
+    }
 }

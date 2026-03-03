@@ -552,4 +552,64 @@ mod tests {
         assert_eq!(got.passkey_pubkey.as_deref(), Some("0x04new"));
         assert_eq!(got.credential_id.as_deref(), Some("cred-123"));
     }
+
+    #[test]
+    fn concurrent_access() {
+        use std::thread;
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-concurrent")).unwrap();
+
+        let handles: Vec<_> = (0..10).map(|i| {
+            let db = db.clone();
+            thread::spawn(move || {
+                let addr = format!("0xaddr{}", i);
+                db.upsert_address(&addr, "w-concurrent", &format!("m/0/{}", i), None).unwrap();
+                db.get_wallet("w-concurrent").unwrap().unwrap();
+            })
+        }).collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        // All 10 addresses should exist
+        for i in 0..10 {
+            let addr = format!("0xaddr{}", i);
+            assert!(db.lookup_address(&addr).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn update_wallet_status_with_error() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-err")).unwrap();
+        db.update_wallet_status("w-err", "error", Some("PBKDF2 timeout")).unwrap();
+        let got = db.get_wallet("w-err").unwrap().unwrap();
+        assert_eq!(got.status, "error");
+        assert_eq!(got.error_msg.as_deref(), Some("PBKDF2 timeout"));
+    }
+
+    #[test]
+    fn update_sign_count() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-sc")).unwrap();
+        db.update_wallet_sign_count("w-sc", 42).unwrap();
+        let got = db.get_wallet("w-sc").unwrap().unwrap();
+        assert_eq!(got.sign_count, 42);
+    }
+
+    #[test]
+    fn cleanup_expired_challenges() {
+        let db = test_db();
+        // Store a challenge with -1 second TTL (already expired)
+        db.store_challenge("c-expired", &[1,2,3], None, "auth", "localhost", -1).unwrap();
+        db.store_challenge("c-valid", &[4,5,6], None, "auth", "localhost", 300).unwrap();
+
+        let cleaned = db.cleanup_expired_challenges().unwrap();
+        assert_eq!(cleaned, 1);
+
+        // Valid challenge should still be consumable
+        assert!(db.consume_challenge("c-valid").unwrap().is_some());
+        // Expired one was cleaned up
+        assert!(db.consume_challenge("c-expired").unwrap().is_none());
+    }
 }
