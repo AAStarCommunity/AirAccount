@@ -1,6 +1,6 @@
 # KMS API Reference (STM32 DK2)
 
-> Last updated: 2026-03-03 13:47 +07
+> Last updated: 2026-03-03 15:35 +07
 
 Base URL: `https://kms1.aastar.io` (production) / `http://192.168.7.2:3000` (local DK2)
 
@@ -91,16 +91,17 @@ Base URL: `https://kms1.aastar.io` (production) / `http://192.168.7.2:3000` (loc
 |-------|-----------|----------|-----------------|
 | **L1: Rate Limit** | `RateLimiter` | 每 API Key 滑动窗口限速（默认 60 req/min） | `429 Too Many Requests` |
 | **L2: Input Validation** | CA validators | 格式校验：derivation path、hash hex、message size、UUID | `400 Bad Request` |
-| **L3: P-256 Pre-verify** | `verify_passkey_ca()` | P-256 ECDSA 签名验证（Rust `p256` crate） | `401 Unauthorized` |
+| **L3: P-256 Pre-verify** | `verify_passkey_ca()` | P-256 ECDSA 签名验证（Rust `p256` crate，~20ms） | `401 Unauthorized` |
 | **L4: Circuit Breaker** | `CircuitBreaker` | 连续 3 次 TA session 失败后熔断 30s | `503 Service Unavailable` |
+| **L5: TA P-256 verify** | `p256-m` (C library) | TA 内 P-256 ECDSA 签名验证（~320ms） | TA error |
 
 ```
-Request → [Rate Limit] → [Input Validation] → [P-256 Pre-verify] → [Circuit Breaker] → TA Queue
-                ↓                  ↓                    ↓                    ↓
-              429               400                  401                  503
+Request → [Rate Limit] → [Input Validation] → [P-256 Pre-verify] → [Circuit Breaker] → TA Queue → [p256-m verify]
+                ↓                  ↓                    ↓                    ↓                            ↓
+              429               400                  401                  503                     TA reject
 ```
 
-CA 端拦截无效请求，保护 TA 单线程队列不被浪费。
+CA 端拦截无效请求，保护 TA 单线程队列不被浪费。TA 端 p256-m 做最终验证（defense-in-depth）。
 
 ### 1.2 TLS (Thread-Local Storage) 与 OP-TEE
 
@@ -1228,33 +1229,31 @@ Signature 支持两种格式：
 
 STM32MP157F-DK2, Cortex-A7 @ 650MHz
 
-### 13.1 Full API Benchmark — DK2 Direct (2026-03-03 15:00)
+### 13.1 Full API Benchmark — DK2 Direct (2026-03-03 15:35, with p256-m TA verify)
 
-Measured via USB Ethernet direct to DK2. 3 rounds, real P-256 passkey assertions.
+Measured via USB Ethernet direct to DK2. 5 rounds, real P-256 passkey assertions. **TA 端 p256-m ECDSA verify 已启用。**
 
-| Operation | Avg | Min | Median | Max | Notes |
-|-----------|-----|-----|--------|-----|-------|
-| GET /health | **5ms** | 3ms | 4ms | 7ms | CA-only |
-| GET /QueueStatus | **3ms** | 3ms | 3ms | 3ms | CA-only |
-| POST /ListKeys | **6ms** | 5ms | 6ms | 7ms | CA-only (SQLite) |
-| POST /DescribeKey | **5ms** | 4ms | 5ms | 6ms | CA-only (SQLite) |
-| POST /GetPublicKey | **4ms** | 4ms | 4ms | 4ms | CA-only (cache) |
-| POST /DeriveAddress | **900ms** | 891ms | 894ms | 915ms | TEE BIP32 |
-| **POST /SignHash** | **936ms** | 916ms | 919ms | 974ms | TEE secp256k1 sign |
-| **POST /Sign (message)** | **1.066s** | 1.063s | 1.064s | 1.070s | EIP-191 + sign |
-| **POST /Sign (transaction)** | **1.931s** | 1.920s | 1.921s | 1.952s | RLP + sign |
-| POST /CreateKey | **2.460s** | — | — | — | TA create + storage |
-| POST /ChangePasskey | **2.678s** | — | — | — | TA update passkey |
-| POST /DeleteKey | **2.882s** | — | — | — | TA storage delete |
-| Background derivation | **91.8s** | — | — | — | PBKDF2 + BIP32 (cold) |
+| Operation | Avg | Notes |
+|-----------|-----|-------|
+| GET /health | **5ms** | CA-only |
+| GET /QueueStatus | **3ms** | CA-only |
+| POST /ListKeys | **6ms** | CA-only (SQLite) |
+| POST /DescribeKey | **5ms** | CA-only (SQLite) |
+| POST /GetPublicKey | **4ms** | CA-only (cache) |
+| POST /DeriveAddress | **1.16s** | TEE BIP32 + p256-m verify |
+| **POST /SignHash** | **1.26s** | TEE secp256k1 sign + p256-m verify |
+| **POST /Sign (message)** | **1.27s** | EIP-191 + sign + p256-m verify |
+| POST /CreateKey | **3.5s** | TA create + secure storage |
+| Background derivation | **~90s** | PBKDF2 + BIP32 (cold) |
 
-> CA-only 操作 <10ms。TEE 签名 ~0.9-1.9s。HTTPS+Cloudflare 增加 ~180ms 网络延迟。
+> CA-only 操作 <10ms。TEE 签名 ~1.2-1.3s（含 p256-m ~320ms）。HTTPS+Cloudflare 增加 ~180ms。
 
 ### 13.2 Performance Breakdown
 
 | Component | Cost | Notes |
 |-----------|------|-------|
 | P-256 ECDSA verify (p256 crate, CA) | **~20ms** | CA pre-verify，无效 assertion 不进 TA 队列 |
+| P-256 ECDSA verify (p256-m, TA) | **~320ms** | TA Secure World，defense-in-depth |
 | secp256k1 ECDSA sign (cached seed) | **~800ms** | TA Secure World |
 | Transaction RLP encode + sign | **~900ms** | TA Secure World |
 | PBKDF2-HMAC-SHA512 (2048 rounds) | **~55s** | 首次加载钱包时，seed 缓存后跳过 |
@@ -1263,16 +1262,16 @@ Measured via USB Ethernet direct to DK2. 3 rounds, real P-256 passkey assertions
 
 ### 13.3 Historical Comparison
 
-| Metric | No PassKey (v0.1) | OP-TEE native P-256 | p256-m | CA-only P-256 (current) |
-|--------|-------------------|---------------------|--------|-------------------------|
-| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~960ms** | **~1.03s** |
-| Sign (message) | ~1s | ~3.1s | ~1.0s | **~1.11s** |
-| CreateKey | ~3.5s | ~6.1s | ~7.2s | **~6.5s** |
-| P-256 verify location | N/A | TA (~2s) | TA (~100ms) | **CA (~20ms)** |
+| Metric | No PassKey (v0.1) | OP-TEE native P-256 | CA-only (removed) | p256-m fixed (current) |
+|--------|-------------------|---------------------|--------------------|------------------------|
+| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~936ms** | **~1.26s** |
+| Sign (message) | ~1s | ~3.1s | ~1.07s | **~1.27s** |
+| DeriveAddress | ~0.9s | ~2.9s | ~0.9s | **~1.16s** |
+| P-256 verify | N/A | TA optee (~2s) | CA only (~20ms) | **CA (~20ms) + TA p256-m (~320ms)** |
 
-> **p256-m 已移除**: p256-m C 库的 `.text`/`.data` 段在 OP-TEE Secure World 中破坏内存布局，
-> 导致所有 TA 操作触发 TEE_ERROR_TARGET_DEAD (0xffff3024)。P-256 验证移至 CA 端（Rust p256 crate），
-> 性能基本持平（~20ms CA 端 vs ~100ms TA 端，差异被 secp256k1 sign ~800ms 掩盖）。
+> **p256-m crash 已修复 (2026-03-03)**: 编译 flags `-O1 -fPIC -fno-common -marm` 解决了 Secure World 内存布局问题。
+> 之前默认优化 + Thumb 模式导致 `.text`/`.data` 段破坏 OP-TEE 内存，触发 TEE_ERROR_TARGET_DEAD。
+> 现在 CA 端预验证 + TA 端 p256-m 验证，双重 defense-in-depth。
 
 ### 13.4 Notes
 

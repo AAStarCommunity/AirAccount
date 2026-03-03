@@ -94,6 +94,6 @@ Note: `api-key` must run from `/` directory (same as kms service working directo
 
 ## Known Issues (Beta)
 
-- **p256-m removed from TA**: p256-m C library `.text`/`.data` segments corrupt OP-TEE Secure World memory layout even when functions aren't called, causing TEE_ERROR_TARGET_DEAD on all operations. Removed entirely; CA-side P-256 verify (Rust p256 crate) is active.
+- **p256-m crash fixed (2026-03-03)**: Compile flags `-O1 -fPIC -fno-common -marm` fixed OP-TEE Secure World memory corruption. TA-side P-256 ECDSA verify is now active (~320ms overhead). CA pre-verify also retained (defense-in-depth).
 - **ExportPrivateKey API**: Suspended for beta. Use `export_key` CLI on DK2.
 - **OP-TEE secure storage corrupts TLS**: `PersistentObject::create()` (write) corrupts `thread_local!` segments. `cache_put` must run before `db.put`.
