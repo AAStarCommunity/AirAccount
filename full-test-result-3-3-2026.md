@@ -1,6 +1,6 @@
 # KMS Full Test Results
 
-> Last updated: 2026-03-03 13:47
+> Last updated: 2026-03-03 15:35
 
 Board: STM32MP157F-DK2 (Cortex-A7 650MHz)
 Branch: KMS-stm32
@@ -82,27 +82,24 @@ Test coverage:
 cd kms/test && ./perf-test.sh 192.168.7.2:3000 5
 ```
 
-### Real Benchmark — DK2 Direct (2026-03-03 15:00 +07)
+### Real Benchmark — DK2 Direct (2026-03-03 15:35 +07, p256-m TA verify enabled)
 
-Measured via USB Ethernet direct connection to DK2, no CDN. 3 rounds per API. Real P-256 ECDSA passkey assertions.
+Measured via USB Ethernet direct connection to DK2, no CDN. 5 rounds per API. Real P-256 ECDSA passkey assertions. **TA-side p256-m ECDSA verify active.**
 
-| Operation | Avg | Min | Median | Max | HTTP | Notes |
-|-----------|-----|-----|--------|-----|------|-------|
-| GET /health | **5ms** | 3ms | 4ms | 7ms | 200 | CA-only |
-| GET /QueueStatus | **3ms** | 3ms | 3ms | 3ms | 200 | CA-only |
-| POST /ListKeys | **6ms** | 5ms | 6ms | 7ms | 200 | CA-only (SQLite) |
-| POST /DescribeKey | **5ms** | 4ms | 5ms | 6ms | 200 | CA-only (SQLite) |
-| POST /GetPublicKey | **4ms** | 4ms | 4ms | 4ms | 200 | CA-only (cache) |
-| POST /DeriveAddress | **900ms** | 891ms | 894ms | 915ms | 200 | TEE BIP32 + passkey |
-| **POST /SignHash** | **936ms** | 916ms | 919ms | 974ms | 200 | TEE secp256k1 ECDSA |
-| **POST /Sign (message)** | **1.066s** | 1.063s | 1.064s | 1.070s | 200 | EIP-191 hash + sign |
-| **POST /Sign (transaction)** | **1.931s** | 1.920s | 1.921s | 1.952s | 200 | RLP encode + sign |
-| POST /CreateKey | **2.460s** | — | — | — | 200 | TA create + secure storage |
-| POST /ChangePasskey | **2.678s** | — | — | — | 200 | TA update passkey |
-| POST /DeleteKey | **2.882s** | — | — | — | 200 | TA secure storage delete |
-| Background derivation | **91.8s** | — | — | — | — | PBKDF2 + BIP32 (cold) |
+| Operation | Avg | Min | Max | HTTP | Notes |
+|-----------|-----|-----|-----|------|-------|
+| GET /health | **5ms** | 3ms | 7ms | 200 | CA-only |
+| GET /QueueStatus | **3ms** | 3ms | 3ms | 200 | CA-only |
+| POST /ListKeys | **6ms** | 5ms | 7ms | 200 | CA-only (SQLite) |
+| POST /DescribeKey | **5ms** | 4ms | 6ms | 200 | CA-only (SQLite) |
+| POST /GetPublicKey | **4ms** | 4ms | 4ms | 200 | CA-only (cache) |
+| POST /DeriveAddress | **1.16s** | 1.15s | 1.17s | 200 | TEE BIP32 + p256-m verify |
+| **POST /SignHash** | **1.26s** | 1.25s | 1.27s | 200 | TEE secp256k1 + p256-m verify |
+| **POST /Sign (message)** | **1.27s** | 1.26s | 1.28s | 200 | EIP-191 + sign + p256-m verify |
+| POST /CreateKey | **3.5s** | — | — | 200 | TA create + secure storage |
+| Background derivation | **~90s** | — | — | — | PBKDF2 + BIP32 (cold) |
 
-> CA-only 操作 <10ms。TEE 签名操作 ~0.9-1.9s。首次 PBKDF2 ~90s（seed 缓存后跳过）。
+> CA-only 操作 <10ms。TEE 签名操作 ~1.2-1.3s（含 p256-m ~320ms）。PBKDF2 ~90s（seed 缓存后跳过）。
 
 ### Via HTTPS/Cloudflare (2026-03-03 earlier)
 
@@ -118,15 +115,15 @@ Network latency ~180ms (Singapore edge).
 
 ### Historical Performance Comparison
 
-| Metric | No PassKey (v0.1) | OP-TEE native P-256 | p256-m (removed) | CA-only P-256 (current) |
-|--------|-------------------|---------------------|-------------------|-------------------------|
-| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~960ms** | **~1.03s** |
-| Sign (message) | ~1s | ~3.1s | ~1.0s | **~1.11s** |
-| CreateKey | ~3.5s | ~6.1s | ~7.2s | **~6.5s** |
-| P-256 verify location | N/A | TA (~2s) | TA (~100ms) | **CA (~20ms)** |
+| Metric | No PassKey (v0.1) | OP-TEE native P-256 | CA-only (removed) | p256-m fixed (current) |
+|--------|-------------------|---------------------|--------------------|------------------------|
+| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~936ms** | **~1.26s** |
+| Sign (message) | ~1s | ~3.1s | ~1.07s | **~1.27s** |
+| DeriveAddress | ~0.9s | ~2.9s | ~0.9s | **~1.16s** |
+| P-256 verify | N/A | TA optee (~2s) | CA only (~20ms) | **CA (~20ms) + TA p256-m (~320ms)** |
 
-> **p256-m 已移除**: p256-m C 库的 .text/.data 段在 OP-TEE Secure World 中破坏内存布局，
-> 导致所有 TA 操作触发 TEE_ERROR_TARGET_DEAD (0xffff3024)。P-256 验证移至 CA 端。
+> **p256-m crash 已修复 (2026-03-03)**: 编译 flags `-O1 -fPIC -fno-common -marm` 解决了 Secure World 内存布局问题。
+> CA pre-verify + TA p256-m verify 双重 defense-in-depth。
 
 ## Test Infrastructure
 
