@@ -2,6 +2,16 @@
 
 ---
 
+## KMS Beta 加固 (2026-03-03 13:47)
+
+- 移除 p256-m C 库（TA crash 根因）
+- CA 端 Rate Limit + Circuit Breaker + Input Validation
+- 生产 API 性能基准写入文档
+- 旧钱包数据清理（DB + secure storage）
+- TLS/防护层架构文档
+
+---
+
 ## 🧹 清理无效的助记词备份恢复功能 (2025-10-16 20:55)
 
 ### 删除的功能

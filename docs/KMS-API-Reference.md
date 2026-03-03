@@ -68,6 +68,43 @@ Base URL: `https://kms1.aastar.io` (production) / `http://192.168.7.2:3000` (loc
 - **TA**: OP-TEE Trusted Application，负责钱包创建/签名/密钥派生，运行在 ARM TrustZone 安全世界
 - **Proto**: CA↔TA 通信协议层，bincode 序列化，定义 Command 枚举和 Input/Output 结构
 
+### 1.1 Defense-in-Depth (三层防护)
+
+请求在到达 TA 之前必须通过 CA 端三层防护：
+
+| Layer | Component | Function | Failure Response |
+|-------|-----------|----------|-----------------|
+| **L1: Rate Limit** | `RateLimiter` | 每 API Key 滑动窗口限速（默认 60 req/min） | `429 Too Many Requests` |
+| **L2: Input Validation** | CA validators | 格式校验：derivation path、hash hex、message size、UUID | `400 Bad Request` |
+| **L3: P-256 Pre-verify** | `verify_passkey_ca()` | P-256 ECDSA 签名验证（Rust `p256` crate） | `401 Unauthorized` |
+| **L4: Circuit Breaker** | `CircuitBreaker` | 连续 3 次 TA session 失败后熔断 30s | `503 Service Unavailable` |
+
+```
+Request → [Rate Limit] → [Input Validation] → [P-256 Pre-verify] → [Circuit Breaker] → TA Queue
+                ↓                  ↓                    ↓                    ↓
+              429               400                  401                  503
+```
+
+CA 端拦截无效请求，保护 TA 单线程队列不被浪费。
+
+### 1.2 TLS (Thread-Local Storage) 与 OP-TEE
+
+> **注意**: 此处 TLS 指 **Thread-Local Storage**（`thread_local!` 宏），非 Transport Layer Security。
+
+OP-TEE Secure World 中 `PersistentObject::create()`（写操作）会**破坏 TLS 段**，
+导致之后访问 `thread_local!` 变量（如 `WALLET_CACHE`）时 panic。
+
+| 操作类型 | 对 TLS 的影响 | 安全性 |
+|---------|-------------|--------|
+| `PersistentObject::open()` (读) | 不影响 | 安全 |
+| `PersistentObject::create()` (写) | **破坏 TLS 段** | 写后禁止访问 thread_local |
+| `RefCell::borrow_mut()` | 写后不稳定 | 某些路径会 panic |
+
+**已实施的 workaround**:
+- `save_wallet`: `cache_put()` 在 `db.put()` **之前**执行（写前缓存）
+- `remove_wallet`: 跳过 `cache_remove()`，让 LRU 自然淘汰（避免写后访问 TLS）
+- 所有缓存读操作使用 `thread_local!` + `RefCell`，写后不再触碰
+
 ---
 
 ## 2. API Overview Table
@@ -1193,6 +1230,7 @@ Measured via HTTPS through Cloudflare. Network latency ~180ms (Singapore edge).
 | `KMS_RP_ID` | `aastar.io` | WebAuthn Relying Party ID |
 | `KMS_RP_NAME` | `AirAccount KMS` | WebAuthn Relying Party 显示名 |
 | `KMS_ORIGIN` | `https://{KMS_RP_ID}` | WebAuthn Expected Origin |
+| `KMS_RATE_LIMIT` | `60` | 每 API Key 每分钟最大请求数 |
 | `RUST_LOG` | (无) | 日志级别 (e.g. `info`, `debug`) |
 
 ---
