@@ -1101,16 +1101,25 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
+const KMS_VERSION: &str = "0.15.22";
+
 async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&serde_json::json!({
         "status": "healthy",
         "service": "kms-api",
-        "version": "0.1.0",
+        "version": KMS_VERSION,
         "ta_mode": "real",
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
-            "GET": ["/health", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
+            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
         }
+    })))
+}
+
+async fn version_check() -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::json(&serde_json::json!({
+        "version": KMS_VERSION,
+        "build": env!("CARGO_PKG_VERSION"),
     })))
 }
 
@@ -1497,6 +1506,11 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::get())
         .and_then(health_check);
 
+    // Version check
+    let version = warp::path("version")
+        .and(warp::get())
+        .and_then(version_check);
+
     // KeyStatus - GET /KeyStatus?KeyId=xxx
     let server_ks = server.clone();
     let key_status = warp::path("KeyStatus")
@@ -1651,6 +1665,7 @@ pub async fn start_kms_server() -> Result<()> {
     let routes = index
         .or(test_ui)
         .or(health)
+        .or(version)
         .or(key_status)
         .or(queue_status)
         .or(change_passkey)
