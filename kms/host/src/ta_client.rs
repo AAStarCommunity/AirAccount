@@ -23,6 +23,8 @@ use optee_teec::{ParamNone, ParamTmpRef, ParamValue};
 use anyhow::{Result, Context as AnyhowContext};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 const OUTPUT_MAX_SIZE: usize = 1024;
 
@@ -285,13 +287,86 @@ struct TeeCommand {
     reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
 }
 
+// ---- Circuit Breaker ----
+// Tracks consecutive TA failures. Opens circuit after threshold, blocking
+// new requests for recovery_secs to prevent cascading crashes.
+
+const CB_THRESHOLD: usize = 3;
+const CB_RECOVERY_SECS: u64 = 30;
+
+struct CircuitBreaker {
+    consecutive_failures: AtomicUsize,
+    open_until: Mutex<Option<Instant>>,
+}
+
+impl CircuitBreaker {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: AtomicUsize::new(0),
+            open_until: Mutex::new(None),
+        }
+    }
+
+    /// Check if circuit is open. Returns Err if requests should be blocked.
+    fn check(&self) -> Result<()> {
+        let guard = self.open_until.lock().unwrap();
+        if let Some(until) = *guard {
+            if Instant::now() < until {
+                return Err(anyhow::anyhow!(
+                    "TEE circuit breaker OPEN: TA had {} consecutive failures, blocking for {}s",
+                    self.consecutive_failures.load(Ordering::SeqCst),
+                    CB_RECOVERY_SECS
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a successful TA call. Resets failure counter and closes circuit.
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+        let mut guard = self.open_until.lock().unwrap();
+        *guard = None;
+    }
+
+    /// Record a failed TA call. Opens circuit if threshold exceeded.
+    fn record_failure(&self) {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if count >= CB_THRESHOLD {
+            let mut guard = self.open_until.lock().unwrap();
+            let until = Instant::now() + std::time::Duration::from_secs(CB_RECOVERY_SECS);
+            *guard = Some(until);
+            eprintln!(
+                "🔴 Circuit breaker OPEN: {} consecutive TA failures, blocking for {}s",
+                count, CB_RECOVERY_SECS
+            );
+        }
+    }
+
+    fn failure_count(&self) -> usize {
+        self.consecutive_failures.load(Ordering::SeqCst)
+    }
+
+    fn is_open(&self) -> bool {
+        let guard = self.open_until.lock().unwrap();
+        match *guard {
+            Some(until) => Instant::now() < until,
+            None => false,
+        }
+    }
+}
+
 /// Cloneable async handle to a single long-lived TEE session.
 /// All TEE calls are serialised through one worker thread, avoiding the
 /// ~4.4s open_session overhead on every request.
+///
+/// Includes circuit breaker: after 3 consecutive TA failures, blocks new
+/// requests for 30s to prevent cascading crashes. Auto-recovers.
 #[derive(Clone)]
 pub struct TeeHandle {
     tx: std::sync::mpsc::Sender<TeeCommand>,
     pending: Arc<AtomicUsize>,
+    cb: Arc<CircuitBreaker>,
 }
 
 impl TeeHandle {
@@ -300,14 +375,16 @@ impl TeeHandle {
     pub fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<TeeCommand>();
         let pending = Arc::new(AtomicUsize::new(0));
+        let cb = Arc::new(CircuitBreaker::new());
 
         std::thread::spawn(move || {
             tee_worker_loop(rx);
         });
 
         println!("🔗 TeeHandle: worker thread spawned, session will be opened on first command");
+        println!("🛡️  Circuit breaker: threshold={}, recovery={}s", CB_THRESHOLD, CB_RECOVERY_SECS);
 
-        Self { tx, pending }
+        Self { tx, pending, cb }
     }
 
     /// Number of commands currently queued (for QueueStatus).
@@ -315,9 +392,17 @@ impl TeeHandle {
         self.pending.load(Ordering::SeqCst)
     }
 
+    /// Circuit breaker status for diagnostics.
+    pub fn circuit_breaker_status(&self) -> (bool, usize) {
+        (self.cb.is_open(), self.cb.failure_count())
+    }
+
     // ---- async wrappers (mirror TaClient API) ----
 
     async fn call(&self, command: proto::Command, input: Vec<u8>) -> Result<Vec<u8>> {
+        // Circuit breaker: reject immediately if TA is repeatedly failing
+        self.cb.check()?;
+
         self.pending.fetch_add(1, Ordering::SeqCst);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.tx.send(TeeCommand { command, input, reply: reply_tx })
@@ -325,6 +410,22 @@ impl TeeHandle {
         let result = reply_rx.await
             .map_err(|_| anyhow::anyhow!("TEE worker dropped reply channel"))?;
         self.pending.fetch_sub(1, Ordering::SeqCst);
+
+        // Update circuit breaker based on result
+        match &result {
+            Ok(_) => self.cb.record_success(),
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                // Only count session-level errors, not business logic errors
+                if msg.contains("TargetDead") || msg.contains("panicked")
+                    || msg.contains("0xffff3024") || msg.contains("Communication")
+                    || msg.contains("TEE worker thread has exited")
+                {
+                    self.cb.record_failure();
+                }
+            }
+        }
+
         result
     }
 

@@ -25,6 +25,7 @@ pub mod ta_client;
 pub mod tests;
 pub mod address_cache;
 pub mod db;
+pub mod rate_limit;
 pub mod webauthn;
 
 // Re-export commonly used items
