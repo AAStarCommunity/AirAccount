@@ -243,19 +243,22 @@ echo ""
 # ── Phase 7: Cleanup ──
 echo "${YELLOW}[Phase 7] Cleanup${NC}"
 DEL_START=$(now_ms)
-DEL_RESULT=$(ssh -o ConnectTimeout=5 root@192.168.7.2 "/usr/local/bin/kms remove-wallet -w $KEY_ID" 2>&1 || echo "SKIP")
-DEL_END=$(now_ms)
-DEL_TIME=$((DEL_END - DEL_START))
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
+timed_curl "POST /DeleteKey" \
+    -X POST "$BASE/DeleteKey" \
+    -H "$HDR_JSON" -H "x-amz-target: TrentService.ScheduleKeyDeletion" $API_KEY_HDR \
+    -d "{\"KeyId\":\"$KEY_ID\",\"Passkey\":$PASSKEY_JSON}"
 
-API_NAMES+=("CLI remove-wallet")
-API_TIMES+=("$DEL_TIME")
-if echo "$DEL_RESULT" | grep -qi "SKIP\|error\|fail"; then
-    API_STATUS+=("SKIP")
-    printf "${YELLOW}SKIP${NC} %-32s %6d ms  %s\n" "CLI remove-wallet" "$DEL_TIME" "$(echo "$DEL_RESULT" | head -c 80)"
-else
-    API_STATUS+=("OK")
+# Verify deleted key returns 404
+timed_curl "POST /DescribeKey (deleted)" \
+    -X POST "$BASE/DescribeKey" \
+    -H "$HDR_JSON" -H "x-amz-target: TrentService.DescribeKey" $API_KEY_HDR \
+    -d "{\"KeyId\":\"$KEY_ID\"}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
     TOTAL_PASS=$((TOTAL_PASS + 1))
-    printf "${GREEN} OK ${NC} %-32s %6d ms\n" "CLI remove-wallet" "$DEL_TIME"
+    echo "  (Expected failure — deleted key not found)"
 fi
 echo ""
 

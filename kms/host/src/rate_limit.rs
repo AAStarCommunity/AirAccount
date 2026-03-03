@@ -1,7 +1,7 @@
 //! Per-API-key sliding window rate limiter.
 //!
 //! Tracks request timestamps per key. Rejects with 429 when window limit exceeded.
-//! Default: 60 requests/minute (configurable via KMS_RATE_LIMIT env var).
+//! Default: 100 requests/minute (configurable via KMS_RATE_LIMIT env var).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ impl RateLimiter {
         let limit = std::env::var("KMS_RATE_LIMIT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(60);
+            .unwrap_or(100);
         Self::new(limit)
     }
 
