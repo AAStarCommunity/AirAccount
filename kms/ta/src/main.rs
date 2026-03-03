@@ -205,15 +205,12 @@ macro_rules! dbg_println {
     ($($arg:tt)*) => {};
 }
 
-// p256-m FFI disabled: crashes in OP-TEE Secure World on DK2.
-// CA-side P-256 verify (Rust p256 crate) is the active security check.
-// TODO: investigate p256-m crash in Secure World (possibly stack/alignment).
-//
-// extern "C" {
-//     fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
-// }
-// #[no_mangle]
-// pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 { -1 }
+// p256-m FFI — debugging crash (branch: debug/p256m-ta)
+extern "C" {
+    fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
+}
+#[no_mangle]
+pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 { -1 }
 
 /// Verify passkey assertion against wallet's bound passkey.
 /// All wallets MUST have passkey bound — rejects if missing.
@@ -230,9 +227,46 @@ fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyA
 
     let _assertion = assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
 
-    // CA has already verified the P-256 ECDSA signature via pre_verify_passkey().
-    // TA trusts CA verification for now (defense-in-depth temporarily reduced).
-    dbg_println!("[+] PassKey check: bound + assertion present (CA pre-verified)");
+    // DEBUG: restore p256-m TA-side ECDSA verify
+    // signature = r(32) || s(32) = 64 bytes
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&_assertion.signature_r);
+    sig_bytes[32..].copy_from_slice(&_assertion.signature_s);
+
+    // pubkey from wallet is 65 bytes (04 || x || y), p256-m wants 64 bytes (x || y)
+    let pubkey_xy = if _pubkey.len() == 65 && _pubkey[0] == 0x04 {
+        &_pubkey[1..65]
+    } else {
+        return Err(anyhow!("Invalid pubkey format: expected 65 bytes (04||x||y), got {}", _pubkey.len()));
+    };
+
+    // Build signed_data = authenticator_data || client_data_hash
+    let mut signed_data = _assertion.authenticator_data.clone();
+    signed_data.extend_from_slice(&_assertion.client_data_hash);
+
+    // Hash the signed_data with SHA-256 (p256-m expects hash input)
+    use sha2::Digest;
+    let hash_of_signed = sha2::Sha256::digest(&signed_data);
+
+    trace_println!("[+] p256-m verify: sig={}B pubkey={}B hash={}B",
+        sig_bytes.len(), pubkey_xy.len(), hash_of_signed.len());
+
+    let ret = unsafe {
+        p256_ecdsa_verify(
+            sig_bytes.as_ptr(),
+            pubkey_xy.as_ptr(),
+            hash_of_signed.as_ptr(),
+            hash_of_signed.len(),
+        )
+    };
+
+    trace_println!("[+] p256-m verify result: {}", ret);
+
+    if ret != 0 {
+        return Err(anyhow!("PassKey verification failed (p256-m): error code {}", ret));
+    }
+
+    dbg_println!("[+] PassKey verified via p256-m in TA");
     Ok(())
 }
 

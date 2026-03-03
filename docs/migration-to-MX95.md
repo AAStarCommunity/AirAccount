@@ -53,13 +53,13 @@ Environment=KMS_DB_PATH=/data/kms/kms.db
 | 架构 | ARMv7-A (32-bit) | ARMv8.2-A (64-bit) |
 | 安全核心 | ARM TrustZone (shared A7) | EdgeLock Secure Enclave (独立 M33) |
 | Secure Storage | REE-FS on SD card | **RPMB on eMMC** |
-| 预期性能 | SignHash ~936ms | **~100-150ms** (8-10x) |
+| 预期性能 | SignHash ~1.26s (含 p256-m verify) | **~100-150ms** (8-10x) |
 
 ### 迁移工作
 
 1. **Target triple**: `arm-unknown-optee` → `aarch64-unknown-optee`
 2. **TA 构建**: xargo → cargo (64-bit OP-TEE 可能直接支持 std)
-3. **p256-m**: 64-bit 适配（如果重新启用 TA 端验证）
+3. **p256-m**: 64-bit 适配（当前 32-bit limbs，需验证 aarch64 下编译 flags）
 4. **OP-TEE 版本**: 可能从 3.x 升级到 4.x（API 差异）
 5. **RPMB 配置**: `tee-supplicant` 启用 RPMB backend
 6. **CA 编译**: `armv7-unknown-linux-gnueabihf` → `aarch64-unknown-linux-gnu`
