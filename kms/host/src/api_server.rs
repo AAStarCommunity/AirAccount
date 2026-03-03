@@ -15,6 +15,7 @@ use p256::EncodedPoint;
 // Import from kms library and proto
 use kms::ta_client::TeeHandle;
 use kms::db::{KmsDb, WalletRow};
+use kms::rate_limit::RateLimiter;
 use kms::webauthn;
 use proto;
 
@@ -267,6 +268,10 @@ pub struct KeyStatusResponse {
 pub struct QueueStatusResponse {
     pub queue_depth: usize,
     pub estimated_wait_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker_open: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<usize>,
 }
 
 
@@ -379,6 +384,7 @@ fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
 pub struct KmsApiServer {
     db: KmsDb,
     tee: TeeHandle,
+    rate_limiter: RateLimiter,
     rp_name: String,
     rp_id: String,
     expected_origin: String,
@@ -390,13 +396,68 @@ impl KmsApiServer {
         let rp_name = std::env::var("KMS_RP_NAME").unwrap_or_else(|_| "AirAccount KMS".to_string());
         let expected_origin = std::env::var("KMS_ORIGIN")
             .unwrap_or_else(|_| format!("https://{}", rp_id));
+        let rate_limiter = RateLimiter::from_env();
+        println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
         Self {
             db,
             tee: TeeHandle::new(),
+            rate_limiter,
             rp_name,
             rp_id,
             expected_origin,
         }
+    }
+
+    // ========================================
+    // CA-side input validation (defense-in-depth)
+    // Validates BEFORE sending to TA to prevent TA crashes from bad input.
+    // ========================================
+
+    /// Validate BIP-44 derivation path format.
+    /// Accepted: m/44'/60'/0'/0/N where N is 0-9999.
+    fn validate_derivation_path(path: &str) -> Result<()> {
+        if path.len() > 64 {
+            return Err(anyhow!("Derivation path too long: {} chars (max 64)", path.len()));
+        }
+        if !path.starts_with("m/") {
+            return Err(anyhow!("Derivation path must start with 'm/': {}", path));
+        }
+        // Validate each component is a number with optional hardened marker
+        for part in path[2..].split('/') {
+            let num_str = part.trim_end_matches('\'');
+            if num_str.parse::<u32>().is_err() {
+                return Err(anyhow!("Invalid derivation path component '{}' in: {}", part, path));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate wallet UUID format at CA layer.
+    fn validate_key_id(key_id: &str) -> Result<Uuid> {
+        Uuid::parse_str(key_id)
+            .map_err(|_| anyhow!("Invalid KeyId format (expected UUID): {}", key_id))
+    }
+
+    /// Validate hex-encoded hash (must be exactly 32 bytes = 64 hex chars).
+    fn validate_hash_hex(hash: &str) -> Result<[u8; 32]> {
+        let hex_str = hash.trim_start_matches("0x");
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow!("Invalid hash hex: {}", e))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("Hash must be exactly 32 bytes, got {} bytes", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Validate hex-encoded message (reasonable size limit for TA).
+    fn validate_message(message: &str) -> Result<()> {
+        let max_len = 64 * 1024; // 64KB
+        if message.len() > max_len {
+            return Err(anyhow!("Message too large: {} bytes (max {})", message.len(), max_len));
+        }
+        Ok(())
     }
 
     pub async fn create_key(&self, req: CreateKeyRequest) -> Result<CreateKeyResponse> {
@@ -521,9 +582,12 @@ impl KmsApiServer {
 
     pub fn queue_status(&self) -> QueueStatusResponse {
         let depth = self.tee.pending_count();
+        let (cb_open, cb_failures) = self.tee.circuit_breaker_status();
         QueueStatusResponse {
             queue_depth: depth,
             estimated_wait_seconds: depth as u64 * TEE_OP_ESTIMATE_SECS,
+            circuit_breaker_open: Some(cb_open),
+            consecutive_failures: Some(cb_failures),
         }
     }
 
@@ -704,11 +768,13 @@ impl KmsApiServer {
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
         println!("📝 KMS DeriveAddress API called for key: {}", req.key_id);
 
+        // CA-side validation before TA call
+        let wallet_uuid = Self::validate_key_id(&req.key_id)?;
+        Self::validate_derivation_path(&req.derivation_path)?;
+
         if !self.db.wallet_exists(&req.key_id)? {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
-
-        let wallet_uuid = Uuid::parse_str(&req.key_id)?;
         let passkey_assertion = self.resolve_passkey_assertion(
             &req.key_id, req.passkey.as_ref(), req.webauthn.as_ref(),
         ).await?;
@@ -723,6 +789,11 @@ impl KmsApiServer {
     }
 
     pub async fn sign(&self, req: SignRequest) -> Result<SignResponse> {
+        // CA-side validation: message size
+        if let Some(ref msg) = req.message {
+            Self::validate_message(msg)?;
+        }
+
         // Resolve wallet_id and derivation_path (support both Address and KeyId modes)
         let (wallet_uuid, derivation_path) = if let Some(ref address) = req.address {
             println!("📝 KMS Sign API called with Address: {}", address);
@@ -797,6 +868,9 @@ impl KmsApiServer {
     }
 
     pub async fn sign_hash(&self, req: SignHashRequest) -> Result<SignHashResponse> {
+        // CA-side validation: hash format
+        let hash_array = Self::validate_hash_hex(&req.hash)?;
+
         // 支持三种方式:
         // 1. Address (优先级最高,从 DB 查找)
         // 2. KeyId + DerivationPath (手动指定路径)
@@ -807,7 +881,7 @@ impl KmsApiServer {
             let row = self.db.lookup_address(address)?
                 .ok_or_else(|| anyhow!("Address not found: {}", address))?;
 
-            (Uuid::parse_str(&row.key_id)?, row.derivation_path)
+            (Self::validate_key_id(&row.key_id)?, row.derivation_path)
         } else if let Some(key_id) = &req.key_id {
             println!("📝 KMS SignHash API called with KeyId: {}", key_id);
 
@@ -818,29 +892,19 @@ impl KmsApiServer {
                 .or(w.derivation_path)
                 .ok_or_else(|| anyhow!("No derivation path available for this key"))?;
 
-            (Uuid::parse_str(key_id)?, derivation_path)
+            (Self::validate_key_id(key_id)?, derivation_path)
         } else {
             return Err(anyhow!("Either KeyId or Address must be provided"));
         };
+
+        // CA-side validation: derivation path
+        Self::validate_derivation_path(&derivation_path)?;
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self.resolve_passkey_assertion(
             &key_id_str, req.passkey.as_ref(), req.webauthn.as_ref(),
         ).await?;
-
-        let hash_bytes = if req.hash.starts_with("0x") {
-            hex::decode(&req.hash[2..])?
-        } else {
-            hex::decode(&req.hash)?
-        };
-
-        if hash_bytes.len() != 32 {
-            return Err(anyhow!("Hash must be exactly 32 bytes, got {} bytes", hash_bytes.len()));
-        }
-
-        let mut hash_array = [0u8; 32];
-        hash_array.copy_from_slice(&hash_bytes);
 
         let signature = self.tee.sign_hash(wallet_uuid, &derivation_path, &hash_array, passkey_assertion).await?;
 
@@ -1232,9 +1296,19 @@ struct ApiError(String);
 impl warp::reject::Reject for ApiError {}
 
 async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+    if let Some(rl_error) = err.find::<RateLimitError>() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "error": format!("Rate limit exceeded: {} requests/minute", rl_error.0)
+            })),
+            warp::http::StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
     if let Some(api_error) = err.find::<ApiError>() {
         let status = if api_error.0.contains("API key") {
             warp::http::StatusCode::UNAUTHORIZED
+        } else if api_error.0.contains("circuit breaker") {
+            warp::http::StatusCode::SERVICE_UNAVAILABLE
         } else {
             warp::http::StatusCode::BAD_REQUEST
         };
@@ -1268,6 +1342,33 @@ fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
             })
     })
 }
+
+// ========================================
+// Rate limit middleware
+// ========================================
+
+/// Per-API-key rate limiter. Extracts x-api-key header and checks sliding window.
+/// Returns 429 if rate limit exceeded.
+fn rate_limit_filter(
+    limiter: RateLimiter,
+) -> impl Filter<Extract = (), Error = warp::Rejection> + Clone {
+    warp::header::optional::<String>("x-api-key")
+        .and_then(move |key: Option<String>| {
+            let limiter = limiter.clone();
+            async move {
+                let key = key.unwrap_or_else(|| "anonymous".to_string());
+                match limiter.check(&key) {
+                    Ok(_remaining) => Ok(()),
+                    Err(limit) => Err(warp::reject::custom(RateLimitError(limit))),
+                }
+            }
+        })
+        .untuple_one()
+}
+
+#[derive(Debug)]
+struct RateLimitError(usize);
+impl warp::reject::Reject for RateLimitError {}
 
 // ========================================
 // API Key middleware
@@ -1345,6 +1446,7 @@ pub async fn start_kms_server() -> Result<()> {
         println!("⚠️  API Key authentication: DISABLED (run `api-key generate` to enable)");
     }
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
+    let rl_filter = rate_limit_filter(server.rate_limiter.clone());
 
     // Root path - serve simple welcome message
     let index = warp::path::end()
@@ -1417,11 +1519,12 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
-    // ChangePasskey API
+    // ChangePasskey API (TEE)
     let server_cp = server.clone();
     let change_passkey = warp::path("ChangePasskey")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(aws_kms_body())
         .and(warp::any().map(move || server_cp.clone()))
         .and_then(handle_change_passkey);
@@ -1434,10 +1537,11 @@ pub async fn start_kms_server() -> Result<()> {
     let server5 = server.clone();
     let server6 = server.clone();
 
-    // CreateKey API
+    // CreateKey API (TEE)
     let create_key = warp::path("CreateKey")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.CreateKey"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server1.clone()))
@@ -1461,48 +1565,53 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server3.clone()))
         .and_then(handle_list_keys);
 
-    // DeriveAddress API
+    // DeriveAddress API (TEE)
     let derive_address = warp::path("DeriveAddress")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.DeriveAddress"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server4.clone()))
         .and_then(handle_derive_address);
 
-    // Sign API
+    // Sign API (TEE)
     let sign = warp::path("Sign")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.Sign"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server5.clone()))
         .and_then(handle_sign);
 
-    // SignHash API
+    // SignHash API (TEE)
     let server6_clone = Arc::clone(&server);
     let sign_hash = warp::path("SignHash")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.SignHash"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server6_clone.clone()))
         .and_then(handle_sign_hash);
 
-    // GetPublicKey API
+    // GetPublicKey API (TEE)
     let get_public_key = warp::path("GetPublicKey")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.GetPublicKey"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server6.clone()))
         .and_then(handle_get_public_key);
 
-    // DeleteKey API
+    // DeleteKey API (TEE)
     let server7 = Arc::clone(&server);
     let delete_key = warp::path("DeleteKey")
         .and(warp::post())
         .and(api_key_filter.clone())
+        .and(rl_filter.clone())
         .and(warp::header::exact("x-amz-target", "TrentService.ScheduleKeyDeletion"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server7.clone()))
