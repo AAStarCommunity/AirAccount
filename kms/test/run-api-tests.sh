@@ -164,53 +164,50 @@ echo ""
 # ── Phase 5: Key Operations (with real passkey assertion) ──
 echo "${YELLOW}[Phase 5] Key Operations (real passkey)${NC}"
 
+# Helper: extract assertion fields and build Passkey JSON
+# CA API expects: { "AuthenticatorData": "hex", "ClientDataHash": "hex", "Signature": "r_hex + s_hex" }
+make_passkey_json() {
+    local assertion="$1"
+    local auth_data cdh sig_r sig_s sig
+    auth_data=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
+    cdh=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
+    sig_r=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
+    sig_s=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+    sig="${sig_r}${sig_s}"
+    echo "{\"AuthenticatorData\":\"$auth_data\",\"ClientDataHash\":\"$cdh\",\"Signature\":\"$sig\"}"
+}
+
 # DeriveAddress
-ASSERTION=$(make_assertion)
-AUTH_DATA=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
-CDH=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
-SIG_R=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
-SIG_S=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 
 timed_curl "POST /DeriveAddress (2nd)" \
     -X POST "$BASE/DeriveAddress" \
     -H "$HDR_JSON" -H "x-amz-target: TrentService.DeriveAddress" $API_KEY_HDR \
-    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/1\",\"Passkey\":{\"AuthenticatorData\":\"$AUTH_DATA\",\"ClientDataHash\":\"$CDH\",\"SignatureR\":\"$SIG_R\",\"SignatureS\":\"$SIG_S\"}}"
+    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/1\",\"Passkey\":$PASSKEY_JSON}"
 
 # SignHash
-ASSERTION=$(make_assertion)
-AUTH_DATA=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
-CDH=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
-SIG_R=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
-SIG_S=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 
 timed_curl "POST /SignHash" \
     -X POST "$BASE/SignHash" \
     -H "$HDR_JSON" -H "x-amz-target: TrentService.SignHash" $API_KEY_HDR \
-    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"Passkey\":{\"AuthenticatorData\":\"$AUTH_DATA\",\"ClientDataHash\":\"$CDH\",\"SignatureR\":\"$SIG_R\",\"SignatureS\":\"$SIG_S\"}}"
+    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"Passkey\":$PASSKEY_JSON}"
 
 # Sign (message)
-ASSERTION=$(make_assertion)
-AUTH_DATA=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
-CDH=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
-SIG_R=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
-SIG_S=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 
 timed_curl "POST /Sign (message)" \
     -X POST "$BASE/Sign" \
     -H "$HDR_JSON" -H "x-amz-target: TrentService.Sign" $API_KEY_HDR \
-    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f20576f726c64\",\"Passkey\":{\"AuthenticatorData\":\"$AUTH_DATA\",\"ClientDataHash\":\"$CDH\",\"SignatureR\":\"$SIG_R\",\"SignatureS\":\"$SIG_S\"}}"
+    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f20576f726c64\",\"Passkey\":$PASSKEY_JSON}"
 
 # Sign (transaction)
-ASSERTION=$(make_assertion)
-AUTH_DATA=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
-CDH=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
-SIG_R=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
-SIG_S=$(echo "$ASSERTION" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 
 timed_curl "POST /Sign (transaction)" \
     -X POST "$BASE/Sign" \
     -H "$HDR_JSON" -H "x-amz-target: TrentService.Sign" $API_KEY_HDR \
-    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"ChainId\":1,\"Nonce\":0,\"To\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"Value\":1000000000000000000,\"GasPrice\":20000000000,\"GasLimit\":21000},\"Passkey\":{\"AuthenticatorData\":\"$AUTH_DATA\",\"ClientDataHash\":\"$CDH\",\"SignatureR\":\"$SIG_R\",\"SignatureS\":\"$SIG_S\"}}"
+    -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"Passkey\":$PASSKEY_JSON}"
 echo ""
 
 # ── Phase 6: Negative Tests ──
