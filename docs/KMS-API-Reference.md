@@ -1128,54 +1128,59 @@ Signature 支持两种格式：
 
 ## 13. Performance Notes
 
-STM32MP157F-DK2, Cortex-A7 @ 650MHz, measured 2026-03-02
+STM32MP157F-DK2, Cortex-A7 @ 650MHz
 
-### 13.1 Full API Benchmark (p256-m optimized, 2026-03-03)
+### 13.1 Full API Benchmark (2026-03-03, production `kms1.aastar.io`)
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| GET /health | **<5ms** | HTTP round-trip only |
-| GET /QueueStatus | **~23ms** | CA-only |
-| POST /CreateKey | **~7.2s** | PBKDF2 + wallet + secure storage write |
-| Background derivation (poll KeyStatus) | **~90s** | HD key derivation, PBKDF2 if cold |
-| POST /DescribeKey | **~23ms** | CA-only (SQLite DB) |
-| POST /ListKeys | **~22ms** | CA-only |
-| POST /SignHash (hot) | **~960ms** | p256-m verify (~100ms) + secp256k1 sign |
-| POST /Sign (message) | **~1.0s** | EIP-191 message sign |
-| POST /Sign (transaction) | **~1.7s** | TX RLP encode + sign |
-| POST /GetPublicKey | **~23ms** | CA-only (no TA call needed) |
-| POST /DeriveAddress | **~920ms** | TA HD derivation + P-256 verify |
-| POST /DeleteKey | **~4.1s** | Secure storage delete |
+Measured via HTTPS through Cloudflare. Network latency ~180ms (Singapore edge).
+
+| Operation | Avg | Min | Median | Max | Notes |
+|-----------|-----|-----|--------|-----|-------|
+| GET /health | 338ms | 291ms | 338ms | 365ms | CA-only + network |
+| POST /ListKeys | 220ms | 180ms | 220ms | 386ms | CA-only (SQLite) |
+| POST /DescribeKey | 210ms | 200ms | 210ms | 337ms | CA-only (SQLite) |
+| POST /GetPublicKey | 230ms | 190ms | 220ms | 351ms | TEE (cache hit) |
+| **POST /SignHash** | **1.03s** | **996ms** | **1.02s** | **1.07s** | TEE secp256k1 sign |
+| **POST /Sign (message)** | **1.11s** | **1.07s** | **1.10s** | **1.16s** | EIP-191 message sign |
+| **POST /Sign (transaction)** | **1.13s** | **1.06s** | **1.08s** | **1.19s** | TX RLP encode + sign |
+| POST /CreateKey | ~6.5s | — | — | — | PBKDF2 + secure storage write |
+| Background derivation | ~90s | — | — | — | HD key derivation (PBKDF2 if cold) |
+| POST /DeleteKey | ~4.1s | — | — | — | Secure storage delete |
+
+> CA-only 操作 (~200ms) = 实际处理 <5ms + HTTPS/Cloudflare 网络开销 ~180ms。
+> TEE 操作 (~1s) = CA pre-verify P-256 (~20ms) + TA secp256k1 ECDSA (~800ms) + 网络。
 
 ### 13.2 Performance Breakdown
 
 | Component | Cost | Notes |
 |-----------|------|-------|
-| P-256 ECDSA verify (p256-m, TA) | **~100ms** | Was ~2s with OP-TEE native or Rust p256 |
-| P-256 ECDSA verify (p256 crate, CA) | **~20ms** | CA pre-verify |
-| secp256k1 sign (cached seed) | **~800ms** | |
-| Transaction RLP encode + sign | **~1.5s** | |
-| PBKDF2-HMAC-SHA512 (2048 rounds) | **~55s** | |
-| Secure storage write | **~0.5-1s** | |
-| HTTP round-trip (CA-only) | **~20-25ms** | |
+| P-256 ECDSA verify (p256 crate, CA) | **~20ms** | CA pre-verify，无效 assertion 不进 TA 队列 |
+| secp256k1 ECDSA sign (cached seed) | **~800ms** | TA Secure World |
+| Transaction RLP encode + sign | **~900ms** | TA Secure World |
+| PBKDF2-HMAC-SHA512 (2048 rounds) | **~55s** | 首次加载钱包时，seed 缓存后跳过 |
+| Secure storage write | **~0.5-1s** | OP-TEE persistent object |
+| HTTP round-trip (CA-only) | **~3-5ms** | 本地直连；HTTPS+CDN 增加 ~180ms |
 
 ### 13.3 Historical Comparison
 
-| Metric | No PassKey (v0.1) | OP-TEE native P-256 | p256-m (current) |
-|--------|-------------------|---------------------|------------------|
-| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~960ms** |
-| Sign (message) | ~1s | ~3.1s | **~1.0s** |
-| CreateKey | ~3.5s | ~6.1s | **~7.2s** |
-| P-256 verify | N/A | ~2s | **~100ms** |
+| Metric | No PassKey (v0.1) | OP-TEE native P-256 | p256-m | CA-only P-256 (current) |
+|--------|-------------------|---------------------|--------|-------------------------|
+| SignHash (hot) | **0.83~1.12s** | **~3.0s** | **~960ms** | **~1.03s** |
+| Sign (message) | ~1s | ~3.1s | ~1.0s | **~1.11s** |
+| CreateKey | ~3.5s | ~6.1s | ~7.2s | **~6.5s** |
+| P-256 verify location | N/A | TA (~2s) | TA (~100ms) | **CA (~20ms)** |
 
-p256-m (C library, ~3KB code) 将 P-256 ECDSA 验证从 ~2s 降至 ~100ms，使得添加 PassKey 后 SignHash 总耗时与无 PassKey 版本基本持平。
+> **p256-m 已移除**: p256-m C 库的 `.text`/`.data` 段在 OP-TEE Secure World 中破坏内存布局，
+> 导致所有 TA 操作触发 TEE_ERROR_TARGET_DEAD (0xffff3024)。P-256 验证移至 CA 端（Rust p256 crate），
+> 性能基本持平（~20ms CA 端 vs ~100ms TA 端，差异被 secp256k1 sign ~800ms 掩盖）。
 
 ### 13.4 Notes
 
 - **PBKDF2 瓶颈**: 2048 rounds SHA-512 在 32-bit ARM 耗时 ~55s。Seed 缓存后跳过。
 - **TEE 单线程**: 所有 TA 操作排队执行。检查 `/QueueStatus` 估算等待时间。
-- **Address cache**: Sign by Address 依赖 CA 内存缓存，新建 wallet 需等 background derivation 完成或手动 rebuild-cache。
-- **CA-side pre-verification**: 新版 CA 代码在 CA 层做 P-256 预验证，无效 assertion 不进 TA 队列（节省 ~3s TA 占用时间）。
+- **CA pre-verify**: P-256 ECDSA 在 CA 端验证，无效 assertion 不进 TA 队列，节省 ~1s TA 占用。
+- **LRU Cache**: TA 端 200-entry 钱包缓存，cache hit 时 ZERO secure storage I/O。
+- **Cloudflare 延迟**: 生产环境通过 Cloudflare CDN，增加 ~180ms 网络延迟。本地直连 DK2 时 CA-only 操作 <5ms。
 
 ---
 
