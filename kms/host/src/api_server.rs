@@ -1334,13 +1334,17 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
 
 fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
 ) -> impl Filter<Extract = (T,), Error = warp::Rejection> + Clone {
-    warp::body::bytes().and_then(|bytes: bytes::Bytes| async move {
-        serde_json::from_slice(&bytes)
-            .map_err(|e| {
-                eprintln!("JSON parse error: {}", e);
-                warp::reject::custom(ApiError(format!("Invalid JSON: {}", e)))
-            })
-    })
+    warp::body::bytes()
+        .or(warp::any().map(|| bytes::Bytes::new()))
+        .unify()
+        .and_then(|bytes: bytes::Bytes| async move {
+            let data: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
+            serde_json::from_slice(data)
+                .map_err(|e| {
+                    eprintln!("JSON parse error: {}", e);
+                    warp::reject::custom(ApiError(format!("Invalid JSON: {}", e)))
+                })
+        })
 }
 
 // ========================================
