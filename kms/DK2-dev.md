@@ -1,5 +1,72 @@
 # STM32MP157F-DK2 KMS Development Guide
 
+> Last updated: 2026-03-03 17:59
+
+## Endpoints & Test UI
+
+| 端点 | 环境 | 版本 |
+|------|------|------|
+| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.15.22 |
+| `https://kms.aastar.io` | **QEMU 模拟** (Cloudflare tunnel) | v0.1.0 |
+| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.15.22 |
+| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.1.0 |
+
+所有端点的 `/test` 路径提供交互式 Test UI：`https://kms1.aastar.io/test`
+
+Test UI 功能：
+- 左侧所有 API 按钮（GET/POST，标注 auth 要求）
+- 右侧 JSON 编辑器 + 实时响应展示
+- PassKey P-256 ECDSA assertion 浏览器内通过 SubtleCrypto 生成（私钥不离开页面）
+- 自动从响应中提取 KeyId 填入后续请求
+
+文件位置：`kms/test/kms-test-page.html` → 部署到目标机 `/root/shared/kms-test-page.html`
+
+## Docker Containers
+
+| 容器 | 镜像 | 用途 | 状态 |
+|------|------|------|------|
+| `stm32-builder` | ubuntu:22.04 | **DK2 交叉编译** (nightly-2024-05-15, xargo, v26 SDK) | 保留 |
+| `teaclave_dev_env` | teaclave/...expand-memory | **QEMU OP-TEE 模拟器** (aarch64, port 3000) | 保留 |
+
+> `stm32-builder-v20` (ubuntu:20.04) 和 `stm32-community` (jadiaconu) 已删除（未使用）。
+
+### QEMU 启动脚本（三个 Terminal）
+
+```bash
+# Terminal 2: Guest VM Shell (先启动)
+./scripts/terminal2-guest-vm.sh
+
+# Terminal 3: Secure World Log (先启动)
+./scripts/terminal3-secure-log.sh
+
+# Terminal 1: QEMU (等 Terminal 2+3 就绪后启动)
+./scripts/terminal1-qemu.sh
+```
+
+启动后在 QEMU guest 内：
+```bash
+mount -t 9p -o trans=virtio host /root/shared
+cp /root/shared/*.ta /lib/optee_armtz/
+cd /root/shared && ./kms-api-server
+```
+
+### QEMU 构建与部署
+
+QEMU 使用 `teaclave_dev_env` 容器内的 Rust 工具链编译（aarch64 target），不用 `stm32-builder`：
+
+```bash
+# 进入 QEMU 容器
+docker exec -it teaclave_dev_env bash
+
+# 编译 TA + CA（容器内执行）
+cd /root/AirAccount/kms/ta && cargo build --release
+cd /root/AirAccount/kms/host && cargo build --release --bin kms-api-server
+
+# 部署到共享目录（QEMU guest 通过 9p 挂载）
+cp /root/AirAccount/kms/ta/target/release/*.ta /opt/teaclave/shared/
+cp /root/AirAccount/kms/host/target/release/kms-api-server /opt/teaclave/shared/
+```
+
 ## Network Setup
 
 ```
@@ -9,7 +76,7 @@ SSH: ssh root@192.168.7.2
 
 Board: Cortex-A7 650MHz, ARMv7-A 32-bit, OP-TEE 3.16, OpenSTLinux kirkstone v22.06
 
-## Docker Build Environment
+## Docker Build Environment (DK2)
 
 **统一使用 `stm32-builder` 容器**（基于 ubuntu:22.04，包含 nightly-2024-05-15 + xargo + v26 SDK）。
 
