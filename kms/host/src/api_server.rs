@@ -1128,6 +1128,7 @@ async fn handle_sign_hash(
     }
 }
 
+
 async fn handle_get_public_key(
     body: GetPublicKeyRequest,
     server: Arc<KmsApiServer>

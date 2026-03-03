@@ -18,12 +18,15 @@
 use optee_utee_build::{Error, RustEdition, TaConfig};
 
 fn main() -> Result<(), Error> {
-    // Compile p256-m.c (minimal P-256 ECDSA for 32-bit MCU, ~33ms verify on Cortex-A7)
-    cc::Build::new()
-        .file("p256-m.c")
-        .opt_level(3)
-        .warnings(false)
-        .compile("p256m");
+    // p256-m disabled: crashes in OP-TEE Secure World on DK2 (Cortex-A7).
+    // CA-side P-256 verify (Rust p256 crate) is the active security check.
+    // TODO: investigate p256-m crash — possibly stack/alignment issue in Secure World.
+    //
+    // cc::Build::new()
+    //     .file("p256-m.c")
+    //     .opt_level(3)
+    //     .warnings(false)
+    //     .compile("p256m");
 
     let ta_config = TaConfig::new_default_with_cargo_env(proto::UUID)?
         .ta_data_size(1024 * 1024)

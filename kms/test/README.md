@@ -1,5 +1,30 @@
 # KMS Test Suite
 
+Updated: 2026-03-03
+
+## Production Environment
+
+| Item | Value |
+|------|-------|
+| Endpoint | `https://kms1.aastar.io` |
+| API Key | `kms_bfc3d79efeba419db34c18df8e437e96` |
+| Board | STM32MP157F-DK2 (Cortex-A7 650MHz) |
+| TA Mode | Real OP-TEE Secure World |
+
+### Quick API Test
+
+```bash
+# Health check (no auth)
+curl https://kms1.aastar.io/health
+
+# List wallets (requires API key)
+curl -X POST https://kms1.aastar.io/ListKeys \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: kms_bfc3d79efeba419db34c18df8e437e96" \
+  -H "x-amz-target: TrentService.ListKeys" \
+  -d '{}'
+```
+
 ## Prerequisites
 
 ```bash
@@ -52,3 +77,23 @@ python3 p256_helper.py assertion <pem>        # create signed assertion
 python3 p256_helper.py fixture out.json label # generate test user file
 python3 p256_helper.py gen-all                # generate all fixtures
 ```
+
+## CLI Tools (on DK2)
+
+```bash
+# Export private key (admin, no passkey needed)
+export_key <wallet_id> [derivation_path]
+
+# API key management
+cd / && api-key generate --label <name>
+cd / && api-key list
+cd / && api-key revoke <key>
+```
+
+Note: `api-key` must run from `/` directory (same as kms service working directory) to use the correct SQLite DB.
+
+## Known Issues (Beta)
+
+- **p256-m removed from TA**: p256-m C library `.text`/`.data` segments corrupt OP-TEE Secure World memory layout even when functions aren't called, causing TEE_ERROR_TARGET_DEAD on all operations. Removed entirely; CA-side P-256 verify (Rust p256 crate) is active.
+- **ExportPrivateKey API**: Suspended for beta. Use `export_key` CLI on DK2.
+- **OP-TEE secure storage corrupts TLS**: `PersistentObject::create()` (write) corrupts `thread_local!` segments. `cache_put` must run before `db.put`.
