@@ -1,8 +1,23 @@
 # KMS API Reference (STM32 DK2)
 
-> Last updated: 2026-03-03 +07
+> Last updated: 2026-03-03 13:47 +07
 
 Base URL: `https://kms1.aastar.io` (production) / `http://192.168.7.2:3000` (local DK2)
+
+---
+
+## For Developers — 文档阅读路径
+
+| 阶段 | 文档 | 内容 |
+|------|------|------|
+| 了解项目 | 本文 §1-§3 | 架构、API 总览、认证机制 |
+| 构建部署 | [`kms/DK2-dev.md`](../kms/DK2-dev.md) | Docker 环境、编译、部署到 DK2 |
+| API 集成 | 本文 §5-§8 | 所有 HTTP API 详细规格 |
+| 测试 | [`kms/test/README.md`](../kms/test/README.md) | P-256 工具、测试脚本、fixtures |
+| 测试结果 | [`full-test-result-3-3-2026.md`](../full-test-result-3-3-2026.md) | 单元测试 + 性能基准 + 历史对比 |
+| 排查问题 | 本文 §16 | 日志、常见错误、环境重置 |
+
+> 本文 + `DK2-dev.md` 覆盖 API 规格和硬件部署。本地 QEMU 开发另见 `kms/README.md`。
 
 ---
 
@@ -1074,12 +1089,58 @@ CREATE INDEX idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX idx_wallet_credential ON wallets(credential_id);
 ```
 
+### 敏感性分析
+
+| 字段 | 敏感度 | 说明 |
+|------|--------|------|
+| key_id, address, public_key | 安全 | 公开数据 |
+| derivation_path, description | 安全 | 元数据 |
+| passkey_pubkey | 低 | P-256 **公钥**，非私钥 |
+| credential_id | 低 | WebAuthn 标识符 |
+| challenge (BLOB) | 安全 | 随机 nonce，TTL 5min，一次性 |
+| **api_key** | **高** | **明文存储**，等同密码 |
+
+> **CA DB 不存储任何私钥、种子、助记词。** 所有密钥材料仅在 TA Secure Storage 中（HUK 加密）。
+> `api_keys` 表是唯一敏感数据，需 `chmod 600` 保护 DB 文件。
+
 ### 数据恢复
 
 如果 CA DB 丢失，钱包数据可从 TA 安全存储恢复：
 - TA 中存有 entropy、passkey_pubkey
 - 重新调用 `DeriveAddressAuto` 可恢复 address/public_key/derivation_path
 - WebAuthn credential_id 和 sign_count 无法从 TA 恢复（需前端重新注册）
+
+**恢复步骤**：
+```bash
+# 1. 停止服务
+ssh root@192.168.7.2 "systemctl stop kms"
+
+# 2. 备份损坏的 DB（如果还在）
+ssh root@192.168.7.2 "cp /home/root/kms.db /home/root/kms.db.bak 2>/dev/null"
+
+# 3. 删除旧 DB，重启服务（自动建表）
+ssh root@192.168.7.2 "rm -f /home/root/kms.db && systemctl start kms"
+
+# 4. 对每个已知的 wallet_id，重新派生地址（需要 passkey assertion）
+curl -X POST http://192.168.7.2:3000/DeriveAddress \
+  -H "Content-Type: application/json" \
+  -H "x-amz-target: TrentService.DeriveAddress" \
+  -d '{"KeyId":"<wallet-uuid>","DerivationPath":"m/44'\''/60'\''/0'\''/0/0","Passkey":"..."}'
+
+# 5. 重新生成 API Key
+ssh root@192.168.7.2 "/usr/local/bin/api-key generate 'restored-key'"
+```
+
+### 备份
+
+```bash
+# 在线热备份（WAL 模式安全）
+ssh root@192.168.7.2 "sqlite3 /home/root/kms.db '.backup /home/root/kms-backup.db'"
+
+# 定时备份（加到 crontab）
+# 每天 3:00 AM 备份，保留 7 天
+0 3 * * * sqlite3 /home/root/kms.db ".backup /home/root/backups/kms-$(date +\%Y\%m\%d).db" && find /home/root/backups/ -name 'kms-*.db' -mtime +7 -delete
+```
 
 ---
 
@@ -1167,25 +1228,27 @@ Signature 支持两种格式：
 
 STM32MP157F-DK2, Cortex-A7 @ 650MHz
 
-### 13.1 Full API Benchmark (2026-03-03, production `kms1.aastar.io`)
+### 13.1 Full API Benchmark — DK2 Direct (2026-03-03 15:00)
 
-Measured via HTTPS through Cloudflare. Network latency ~180ms (Singapore edge).
+Measured via USB Ethernet direct to DK2. 3 rounds, real P-256 passkey assertions.
 
 | Operation | Avg | Min | Median | Max | Notes |
 |-----------|-----|-----|--------|-----|-------|
-| GET /health | 338ms | 291ms | 338ms | 365ms | CA-only + network |
-| POST /ListKeys | 220ms | 180ms | 220ms | 386ms | CA-only (SQLite) |
-| POST /DescribeKey | 210ms | 200ms | 210ms | 337ms | CA-only (SQLite) |
-| POST /GetPublicKey | 230ms | 190ms | 220ms | 351ms | TEE (cache hit) |
-| **POST /SignHash** | **1.03s** | **996ms** | **1.02s** | **1.07s** | TEE secp256k1 sign |
-| **POST /Sign (message)** | **1.11s** | **1.07s** | **1.10s** | **1.16s** | EIP-191 message sign |
-| **POST /Sign (transaction)** | **1.13s** | **1.06s** | **1.08s** | **1.19s** | TX RLP encode + sign |
-| POST /CreateKey | ~6.5s | — | — | — | PBKDF2 + secure storage write |
-| Background derivation | ~90s | — | — | — | HD key derivation (PBKDF2 if cold) |
-| POST /DeleteKey | ~4.1s | — | — | — | Secure storage delete |
+| GET /health | **5ms** | 3ms | 4ms | 7ms | CA-only |
+| GET /QueueStatus | **3ms** | 3ms | 3ms | 3ms | CA-only |
+| POST /ListKeys | **6ms** | 5ms | 6ms | 7ms | CA-only (SQLite) |
+| POST /DescribeKey | **5ms** | 4ms | 5ms | 6ms | CA-only (SQLite) |
+| POST /GetPublicKey | **4ms** | 4ms | 4ms | 4ms | CA-only (cache) |
+| POST /DeriveAddress | **900ms** | 891ms | 894ms | 915ms | TEE BIP32 |
+| **POST /SignHash** | **936ms** | 916ms | 919ms | 974ms | TEE secp256k1 sign |
+| **POST /Sign (message)** | **1.066s** | 1.063s | 1.064s | 1.070s | EIP-191 + sign |
+| **POST /Sign (transaction)** | **1.931s** | 1.920s | 1.921s | 1.952s | RLP + sign |
+| POST /CreateKey | **2.460s** | — | — | — | TA create + storage |
+| POST /ChangePasskey | **2.678s** | — | — | — | TA update passkey |
+| POST /DeleteKey | **2.882s** | — | — | — | TA storage delete |
+| Background derivation | **91.8s** | — | — | — | PBKDF2 + BIP32 (cold) |
 
-> CA-only 操作 (~200ms) = 实际处理 <5ms + HTTPS/Cloudflare 网络开销 ~180ms。
-> TEE 操作 (~1s) = CA pre-verify P-256 (~20ms) + TA secp256k1 ECDSA (~800ms) + 网络。
+> CA-only 操作 <10ms。TEE 签名 ~0.9-1.9s。HTTPS+Cloudflare 增加 ~180ms 网络延迟。
 
 ### 13.2 Performance Breakdown
 
@@ -1279,14 +1342,38 @@ cd kms/test && ./perf-test.sh 192.168.7.2:3000 5
 ### 日志查看
 
 ```bash
-# CA 服务日志
+# CA 服务日志（实时）
 ssh root@192.168.7.2 "journalctl -u kms -f"
+
+# CA 服务日志（最近 100 行）
+ssh root@192.168.7.2 "journalctl -u kms -n 100 --no-pager"
 
 # TA 日志 (如果内核支持)
 ssh root@192.168.7.2 "cat /proc/tee_log"
 
 # 实时查看 KMS 服务状态
 ssh root@192.168.7.2 "systemctl status kms"
+
+# 查看日志磁盘占用
+ssh root@192.168.7.2 "journalctl --disk-usage"
+```
+
+### 日志管理
+
+已配置自动清理（`/etc/systemd/journald.conf.d/kms.conf`）：
+
+| 参数 | 值 | 说明 |
+|------|---|------|
+| `SystemMaxUse` | 50M | 日志总量上限 |
+| `MaxRetentionSec` | 30day | 保留最近 30 天 |
+| `MaxFileSec` | 7day | 每 7 天轮转一次 |
+
+**CA 端日志输出**：`println!`/`eprintln!` → systemd journal 自动收集。
+**TA 端日志输出**：`trace_println!`（生命周期事件），`dbg_println!`（release 构建下编译为空操作，不输出）。
+
+```bash
+# 手动清理旧日志
+ssh root@192.168.7.2 "journalctl --vacuum-time=30d --vacuum-size=50M"
 ```
 
 ### 常见错误排查
