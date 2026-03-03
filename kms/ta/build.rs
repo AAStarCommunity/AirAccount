@@ -18,6 +18,13 @@
 use optee_utee_build::{Error, RustEdition, TaConfig};
 
 fn main() -> Result<(), Error> {
+    // Compile p256-m.c (minimal P-256 ECDSA for 32-bit MCU, ~33ms verify on Cortex-A7)
+    cc::Build::new()
+        .file("p256-m.c")
+        .opt_level(3)
+        .warnings(false)
+        .compile("p256m");
+
     let ta_config = TaConfig::new_default_with_cargo_env(proto::UUID)?
         .ta_data_size(1024 * 1024)
         .ta_stack_size(128 * 1024);
