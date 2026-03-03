@@ -7,7 +7,7 @@ Updated: 2026-03-03
 | Item | Value |
 |------|-------|
 | Endpoint | `https://kms1.aastar.io` |
-| API Key | `kms_bfc3d79efeba419db34c18df8e437e96` |
+| API Key | `kms_****（run `api-key list` on DK2 to get key）` |
 | Board | STM32MP157F-DK2 (Cortex-A7 650MHz) |
 | TA Mode | Real OP-TEE Secure World |
 
@@ -20,7 +20,7 @@ curl https://kms1.aastar.io/health
 # List wallets (requires API key)
 curl -X POST https://kms1.aastar.io/ListKeys \
   -H "Content-Type: application/json" \
-  -H "x-api-key: kms_bfc3d79efeba419db34c18df8e437e96" \
+  -H "x-api-key: kms_****（run `api-key list` on DK2 to get key）" \
   -H "x-amz-target: TrentService.ListKeys" \
   -d '{}'
 ```
