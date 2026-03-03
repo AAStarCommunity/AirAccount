@@ -18,15 +18,20 @@
 use optee_utee_build::{Error, RustEdition, TaConfig};
 
 fn main() -> Result<(), Error> {
-    // TEST 1: p256-m with -O1 -fPIC (investigating crash)
-    cc::Build::new()
+    // p256-m: compile with -O1 -fPIC
+    let mut cc_build = cc::Build::new();
+    cc_build
         .file("p256-m.c")
         .opt_level(1)
         .pic(true)
         .flag("-fno-common")
-        .flag("-marm")           // force ARM mode (not Thumb)
-        .warnings(false)
-        .compile("p256m");
+        .warnings(false);
+    // -marm is ARM32-only (force ARM mode, not Thumb); skip on aarch64
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.starts_with("arm") || target.contains("arm-unknown") {
+        cc_build.flag("-marm");
+    }
+    cc_build.compile("p256m");
 
     let ta_config = TaConfig::new_default_with_cargo_env(proto::UUID)?
         .ta_data_size(1024 * 1024)
