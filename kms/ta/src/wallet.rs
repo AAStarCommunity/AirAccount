@@ -170,10 +170,7 @@ impl Wallet {
         let uncompressed_no_prefix = &derived.public_key_uncompressed[1..];
         let address = &keccak_hash_to_bytes(uncompressed_no_prefix)[12..];
 
-        Ok((
-            address.try_into()?,
-            derived.public_key_compressed.to_vec(),
-        ))
+        Ok((address.try_into()?, derived.public_key_compressed.to_vec()))
     }
 
     pub fn sign_transaction(&self, hd_path: &str, transaction: &EthTransaction) -> Result<Vec<u8>> {
@@ -187,10 +184,12 @@ impl Wallet {
             value: transaction.value,
             data: transaction.data.clone(),
         };
-        let ecdsa = legacy_transaction.ecdsa(&derived.private_key.to_vec()).map_err(|e| {
-            let ethereum_tx_sign::Error::Secp256k1(inner_error) = e;
-            inner_error
-        })?;
+        let ecdsa = legacy_transaction
+            .ecdsa(&derived.private_key.to_vec())
+            .map_err(|e| {
+                let ethereum_tx_sign::Error::Secp256k1(inner_error) = e;
+                inner_error
+            })?;
         let signature = legacy_transaction.sign(&ecdsa);
         Ok(signature)
     }

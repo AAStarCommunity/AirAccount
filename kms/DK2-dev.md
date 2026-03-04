@@ -156,20 +156,43 @@ killall kms-api-server
 KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" /root/shared/kms-api-server
 ```
 
-### QEMU 构建
+### QEMU 构建（TA + CA）
 
 ```bash
-# Mac 上编辑代码后，容器内直接编译（volume mount，无需 docker cp）
+# TA 构建（跳过 clippy，直接编译 + strip + sign）
+docker exec teaclave_dev_env bash -lc '
+cd /root/teaclave_sdk_src/projects/web3/kms/ta
+LINKER_CFG="target.${TARGET_TA}.linker=\"${CROSS_COMPILE_TA}gcc\""
+xargo build --target $TARGET_TA --release --config "$LINKER_CFG"
+UUID=$(cat ../uuid.txt)
+OUT=$PWD/target/${TARGET_TA}/release
+${CROSS_COMPILE_TA}objcopy --strip-unneeded $OUT/ta $OUT/stripped_ta
+python3 ${TA_DEV_KIT_DIR}/scripts/sign_encrypt.py \
+  --uuid $UUID --key ${TA_DEV_KIT_DIR}/keys/default_ta.pem \
+  --in $OUT/stripped_ta --out $OUT/${UUID}.ta
+'
+
+# CA 构建
 docker exec teaclave_dev_env bash -lc "
   cd /root/teaclave_sdk_src/projects/web3/kms/host
   cargo build --target aarch64-unknown-linux-gnu --release --bin kms-api-server
 "
 
-# 部署到 QEMU 共享目录
-docker exec teaclave_dev_env bash -lc "
-  cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/
-"
+# 删除旧文件 + 部署新文件（必须先删后部署，避免残留旧版本）
+docker exec teaclave_dev_env bash -lc '
+UUID=$(cat /root/teaclave_sdk_src/projects/web3/kms/uuid.txt)
+rm -f /opt/teaclave/shared/kms-api-server /opt/teaclave/shared/*.ta /opt/teaclave/shared/ta/*.ta
+cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/${TARGET_TA}/release/${UUID}.ta /opt/teaclave/shared/
+cp /root/teaclave_sdk_src/projects/web3/kms/ta/target/${TARGET_TA}/release/${UUID}.ta /opt/teaclave/shared/ta/
+cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/
+'
 ```
+
+> **注意**:
+> - TA target 是 `$TARGET_TA`（aarch64-unknown-optee），不是 Makefile 默认的 `aarch64-unknown-linux-gnu`
+> - `xargo clean` 会清除 sysroot 缓存，重建耗时 ~40s；非必要不要 clean
+> - TA 改动后如果 target 没变，不需要 `xargo clean`，增量编译即可
+> - 部署前**必须删除旧文件**，否则 guest 可能加载旧 TA
 
 ### QEMU 网络路径
 

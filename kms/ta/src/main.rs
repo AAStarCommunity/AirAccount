@@ -89,7 +89,9 @@ impl WalletLruCache {
 
         // Evict LRU if at capacity
         if self.entries.len() >= CACHE_CAPACITY {
-            let lru_idx = self.entries.iter()
+            let lru_idx = self
+                .entries
+                .iter()
                 .enumerate()
                 .min_by_key(|(_, e)| e.tick)
                 .map(|(i, _)| i)
@@ -162,7 +164,8 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
 
     // Slow path: cache miss — read from storage
     let db = SecureStorageClient::open(DB_NAME)?;
-    let mut w = db.get::<Wallet>(wallet_id)
+    let mut w = db
+        .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
     let changed = w.ensure_seed_cached()?;
     if changed {
@@ -210,7 +213,9 @@ extern "C" {
     fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
 }
 #[no_mangle]
-pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 { -1 }
+pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 {
+    -1
+}
 
 /// Verify passkey assertion against wallet's bound passkey.
 /// All wallets MUST have passkey bound — rejects if missing.
@@ -219,13 +224,17 @@ pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i
 /// CA-side pre-verification (Rust p256 crate) is the primary security check.
 /// TA-side only validates that passkey is bound and assertion is present.
 /// TODO: debug p256-m crash on DK2, re-enable TA-side ECDSA verify.
-fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyAssertion>) -> Result<()> {
+fn verify_passkey_for_wallet(
+    wallet: &Wallet,
+    assertion: Option<&proto::PasskeyAssertion>,
+) -> Result<()> {
     let _pubkey = match wallet.get_passkey() {
         Some(pk) => pk,
         None => return Err(anyhow!("Wallet has no PassKey bound. Cannot verify.")),
     };
 
-    let _assertion = assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
+    let _assertion =
+        assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
 
     // DEBUG: restore p256-m TA-side ECDSA verify
     // signature = r(32) || s(32) = 64 bytes
@@ -237,7 +246,10 @@ fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyA
     let pubkey_xy = if _pubkey.len() == 65 && _pubkey[0] == 0x04 {
         &_pubkey[1..65]
     } else {
-        return Err(anyhow!("Invalid pubkey format: expected 65 bytes (04||x||y), got {}", _pubkey.len()));
+        return Err(anyhow!(
+            "Invalid pubkey format: expected 65 bytes (04||x||y), got {}",
+            _pubkey.len()
+        ));
     };
 
     // Build signed_data = authenticator_data || client_data_hash
@@ -248,8 +260,12 @@ fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyA
     use sha2::Digest;
     let hash_of_signed = sha2::Sha256::digest(&signed_data);
 
-    trace_println!("[+] p256-m verify: sig={}B pubkey={}B hash={}B",
-        sig_bytes.len(), pubkey_xy.len(), hash_of_signed.len());
+    trace_println!(
+        "[+] p256-m verify: sig={}B pubkey={}B hash={}B",
+        sig_bytes.len(),
+        pubkey_xy.len(),
+        hash_of_signed.len()
+    );
 
     let ret = unsafe {
         p256_ecdsa_verify(
@@ -263,7 +279,10 @@ fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyA
     trace_println!("[+] p256-m verify result: {}", ret);
 
     if ret != 0 {
-        return Err(anyhow!("PassKey verification failed (p256-m): error code {}", ret));
+        return Err(anyhow!(
+            "PassKey verification failed (p256-m): error code {}",
+            ret
+        ));
     }
 
     dbg_println!("[+] PassKey verified via p256-m in TA");
@@ -273,7 +292,10 @@ fn verify_passkey_for_wallet(wallet: &Wallet, assertion: Option<&proto::PasskeyA
 fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWalletOutput> {
     // Validate passkey public key (mandatory)
     if input.passkey_pubkey.len() != 65 || input.passkey_pubkey[0] != 0x04 {
-        return Err(anyhow!("PassKey pubkey must be 65 bytes uncompressed (0x04||x||y), got {} bytes", input.passkey_pubkey.len()));
+        return Err(anyhow!(
+            "PassKey pubkey must be 65 bytes uncompressed (0x04||x||y), got {} bytes",
+            input.passkey_pubkey.len()
+        ));
     }
 
     let mut wallet = Wallet::new()?;
@@ -299,7 +321,8 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     let db_client = SecureStorageClient::open(DB_NAME)?;
 
     // Load from DB (not cache) — read op doesn't corrupt TLS
-    let wallet = db_client.get::<Wallet>(&input.wallet_id)
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
 
     // Mandatory passkey verification
@@ -316,7 +339,10 @@ fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddr
     let wallet = load_wallet_cached(&input.wallet_id)?;
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let (address, public_key) = wallet.derive_address(&input.hd_path)?;
-    Ok(proto::DeriveAddressOutput { address, public_key })
+    Ok(proto::DeriveAddressOutput {
+        address,
+        public_key,
+    })
 }
 
 fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTransactionOutput> {
@@ -340,13 +366,16 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     Ok(proto::SignHashOutput { signature })
 }
 
-fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::DeriveAddressAutoOutput> {
+fn derive_address_auto(
+    input: &proto::DeriveAddressAutoInput,
+) -> Result<proto::DeriveAddressAutoOutput> {
     let db_client = SecureStorageClient::open(DB_NAME)?;
 
     dbg_println!("[+] DeriveAddressAuto for wallet: {:?}", input.wallet_id);
     let mut wallet = match cache_get(&input.wallet_id) {
         Some(w) => w,
-        None => db_client.get::<Wallet>(&input.wallet_id)
+        None => db_client
+            .get::<Wallet>(&input.wallet_id)
             .map_err(|e| anyhow!("wallet not found: {:?}", e))?,
     };
 
@@ -366,8 +395,14 @@ fn derive_address_auto(input: &proto::DeriveAddressAutoInput) -> Result<proto::D
     })
 }
 
-fn export_private_key(input: &proto::ExportPrivateKeyInput) -> Result<proto::ExportPrivateKeyOutput> {
-    dbg_println!("[+] Export private key for wallet: {:?}, path: {}", input.wallet_id, input.derivation_path);
+fn export_private_key(
+    input: &proto::ExportPrivateKeyInput,
+) -> Result<proto::ExportPrivateKeyOutput> {
+    dbg_println!(
+        "[+] Export private key for wallet: {:?}, path: {}",
+        input.wallet_id,
+        input.derivation_path
+    );
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
@@ -395,12 +430,16 @@ fn verify_passkey(_input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPas
     Ok(proto::VerifyPasskeyOutput { valid: true })
 }
 
-fn register_passkey_ta(input: &proto::RegisterPasskeyTaInput) -> Result<proto::RegisterPasskeyTaOutput> {
+fn register_passkey_ta(
+    input: &proto::RegisterPasskeyTaInput,
+) -> Result<proto::RegisterPasskeyTaOutput> {
     trace_println!("[+] Registering passkey for wallet: {:?}", input.wallet_id);
 
     if input.passkey_pubkey.len() != 65 || input.passkey_pubkey[0] != 0x04 {
-        bail!("PassKey public key must be 65 bytes uncompressed (0x04 || x || y), got {} bytes",
-            input.passkey_pubkey.len());
+        bail!(
+            "PassKey public key must be 65 bytes uncompressed (0x04 || x || y), got {} bytes",
+            input.passkey_pubkey.len()
+        );
     }
 
     let mut wallet = load_wallet_cached(&input.wallet_id)?;
