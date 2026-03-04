@@ -10,7 +10,6 @@
 /// Point multiplication count for m/44'/60'/0'/0/N:
 ///   First call (no cache):  3 hardened(0) + 2 normal(2) + final(0, point-add) = 2
 ///   Cached call:            read cache(0) + 2 normal(2) + final(0, point-add) = 2
-
 use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
@@ -60,7 +59,6 @@ impl CachedXPrv {
         pubkey.copy_from_slice(&data[64..97]);
         Ok(Self { key, chain, pubkey })
     }
-
 }
 
 /// HMAC-SHA512
@@ -133,8 +131,8 @@ fn derive_child(
 
     // child_key = IL + parent_key (mod n)
     // Use secp256k1's SecretKey::add_tweak which does modular addition
-    let parent_scalar = Scalar::from_be_bytes(*parent_key)
-        .map_err(|_| anyhow!("Invalid parent key scalar"))?;
+    let parent_scalar =
+        Scalar::from_be_bytes(*parent_key).map_err(|_| anyhow!("Invalid parent key scalar"))?;
     let child_sk = SecretKey::from_slice(il)
         .map_err(|_| anyhow!("BIP32 derivation produced invalid IL"))?
         .add_tweak(&parent_scalar)
@@ -216,8 +214,8 @@ pub fn derive_full(
     // This is the last level, so we also want the child's public key.
     // child_pk = IL*G + parent_pk (point addition) instead of child_key*G (point mul)
     let secp = Secp256k1::signing_only();
-    let parent_sk = SecretKey::from_slice(&key)
-        .map_err(|e| anyhow!("Invalid key at account level: {}", e))?;
+    let parent_sk =
+        SecretKey::from_slice(&key).map_err(|e| anyhow!("Invalid key at account level: {}", e))?;
     let parent_pk_obj = PublicKey::from_secret_key(&secp, &parent_sk); // 1 point_mul
 
     // HMAC for final normal child
@@ -228,8 +226,7 @@ pub fn derive_full(
     let il = &hmac_out[..32];
 
     // child_key = IL + parent_key (mod n)
-    let parent_scalar = Scalar::from_be_bytes(key)
-        .map_err(|_| anyhow!("Invalid key scalar"))?;
+    let parent_scalar = Scalar::from_be_bytes(key).map_err(|_| anyhow!("Invalid key scalar"))?;
     let child_sk = SecretKey::from_slice(il)
         .map_err(|_| anyhow!("BIP32: invalid IL at final level"))?
         .add_tweak(&parent_scalar)
