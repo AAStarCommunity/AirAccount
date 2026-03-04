@@ -12,6 +12,18 @@ use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use p256::EncodedPoint;
 use uuid::Uuid;
 
+/// Match origin against a pattern that may contain `*` wildcard.
+/// e.g. `https://*.aastar.io` matches `https://kms1.aastar.io`
+fn origin_matches(pattern: &str, origin: &str) -> bool {
+    if let Some(star_pos) = pattern.find('*') {
+        let prefix = &pattern[..star_pos];
+        let suffix = &pattern[star_pos + 1..];
+        origin.starts_with(prefix) && origin.ends_with(suffix) && origin.len() >= pattern.len() - 1
+    } else {
+        pattern == origin
+    }
+}
+
 // ========================================
 // Base64URL helpers
 // ========================================
@@ -319,7 +331,7 @@ pub fn verify_registration_response(
 
     let cd_origin = client_data["origin"].as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if !expected_origins.iter().any(|o| o == cd_origin) {
+    if !expected_origins.iter().any(|o| origin_matches(o, cd_origin)) {
         return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
     }
 
@@ -500,7 +512,7 @@ pub fn verify_authentication_response(
 
     let cd_origin = client_data["origin"].as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if !expected_origins.iter().any(|o| o == cd_origin) {
+    if !expected_origins.iter().any(|o| origin_matches(o, cd_origin)) {
         return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
     }
 
