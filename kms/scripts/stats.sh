@@ -9,7 +9,10 @@
 
 set -eo pipefail
 
-HOST="${1:-192.168.7.2:3000}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Auto-load .env from test/ if present (KMS_HOST, KMS_API_KEY, etc.)
+[ -f "$SCRIPT_DIR/../test/.env" ] && set -a && source "$SCRIPT_DIR/../test/.env" && set +a
+HOST="${1:-${KMS_HOST:-192.168.7.2:3000}}"
 BASE="http://$HOST"
 API_KEY="${KMS_API_KEY:-}"
 BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'

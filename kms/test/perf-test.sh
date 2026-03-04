@@ -7,7 +7,9 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOST="${1:-192.168.7.2:3000}"
+# Auto-load .env if present (KMS_HOST, KMS_API_KEY, etc.)
+[ -f "$SCRIPT_DIR/.env" ] && set -a && source "$SCRIPT_DIR/.env" && set +a
+HOST="${1:-${KMS_HOST:-192.168.7.2:3000}}"
 ROUNDS="${2:-5}"
 BASE="http://$HOST"
 HDR_JSON="Content-Type: application/json"
