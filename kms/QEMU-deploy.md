@@ -48,7 +48,12 @@ cp /root/shared/4319f351-0b24-4097-b659-80ee4f824cdd.ta /lib/optee_armtz/
 # 启动 KMS API Server
 # 注意: DB 必须放在本地磁盘，9p 不支持 SQLite WAL 的 xShmMap
 mkdir -p /data/kms
+
+# 生产模式（仅 aastar.io origin）
 KMS_DB_PATH=/data/kms/kms.db ./kms-api-server
+
+# 调试模式（加 localhost origin，不需要重新编译）
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://kms.aastar.io,http://localhost:5173" ./kms-api-server
 ```
 
 ## 3. 启动成功输出
@@ -56,6 +61,7 @@ KMS_DB_PATH=/data/kms/kms.db ./kms-api-server
 ```
 📦 SQLite DB opened: /data/kms/kms.db
 💾 SQLite DB: /data/kms/kms.db
+🌐 Allowed origins: ["https://kms.aastar.io", "http://localhost:5173"]
 ⏱️  Rate limiter: 100/min per API key
 🔗 TeeHandle: worker thread spawned, session will be opened on first command
 🛡️  Circuit breaker: threshold=3, recovery=30s

@@ -296,7 +296,7 @@ pub fn generate_registration_options(
 pub fn verify_registration_response(
     response: &RegistrationResponseJSON,
     expected_challenge: &[u8],
-    expected_origin: &str,
+    expected_origins: &[String],
     expected_rp_id: &str,
 ) -> Result<VerifiedRegistration> {
     // 1. Decode and verify clientDataJSON
@@ -319,8 +319,8 @@ pub fn verify_registration_response(
 
     let cd_origin = client_data["origin"].as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if cd_origin != expected_origin {
-        return Err(anyhow!("Origin mismatch: expected '{}', got '{}'", expected_origin, cd_origin));
+    if !expected_origins.iter().any(|o| o == cd_origin) {
+        return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
     }
 
     // 2. Decode attestationObject (CBOR)
@@ -475,7 +475,7 @@ pub fn generate_authentication_options(
 pub fn verify_authentication_response(
     response: &AuthenticationResponseJSON,
     expected_challenge: &[u8],
-    expected_origin: &str,
+    expected_origins: &[String],
     expected_rp_id: &str,
     stored_pubkey_uncompressed: &[u8], // 65 bytes
     stored_counter: u32,
@@ -500,8 +500,8 @@ pub fn verify_authentication_response(
 
     let cd_origin = client_data["origin"].as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if cd_origin != expected_origin {
-        return Err(anyhow!("Origin mismatch: expected '{}', got '{}'", expected_origin, cd_origin));
+    if !expected_origins.iter().any(|o| o == cd_origin) {
+        return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
     }
 
     // 2. Decode authenticatorData
