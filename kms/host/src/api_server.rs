@@ -387,15 +387,17 @@ pub struct KmsApiServer {
     rate_limiter: RateLimiter,
     rp_name: String,
     rp_id: String,
-    expected_origin: String,
+    expected_origins: Vec<String>,
 }
 
 impl KmsApiServer {
     pub fn new(db: KmsDb) -> Self {
         let rp_id = std::env::var("KMS_RP_ID").unwrap_or_else(|_| "aastar.io".to_string());
         let rp_name = std::env::var("KMS_RP_NAME").unwrap_or_else(|_| "AirAccount KMS".to_string());
-        let expected_origin = std::env::var("KMS_ORIGIN")
-            .unwrap_or_else(|_| format!("https://{}", rp_id));
+        let expected_origins: Vec<String> = std::env::var("KMS_ORIGIN")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| vec![format!("https://{}", rp_id)]);
+        println!("🌐 Allowed origins: {:?}", expected_origins);
         let rate_limiter = RateLimiter::from_env();
         println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
         Self {
@@ -404,7 +406,7 @@ impl KmsApiServer {
             rate_limiter,
             rp_name,
             rp_id,
-            expected_origin,
+            expected_origins,
         }
     }
 
@@ -745,7 +747,7 @@ impl KmsApiServer {
             let verified = webauthn::verify_authentication_response(
                 &wa.credential,
                 &challenge_row.challenge,
-                &self.expected_origin,
+                &self.expected_origins,
                 &self.rp_id,
                 &pk_bytes,
                 w.sign_count,
@@ -1003,7 +1005,7 @@ impl KmsApiServer {
 
         // 3. Verify attestation
         let verified = webauthn::verify_registration_response(
-            &req.credential, &challenge_row.challenge, &self.expected_origin, &self.rp_id,
+            &req.credential, &challenge_row.challenge, &self.expected_origins, &self.rp_id,
         )?;
 
         println!("✅ WebAuthn registration verified, pubkey {} bytes, credential_id {} bytes",
@@ -1101,7 +1103,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.15.22";
+const KMS_VERSION: &str = "0.16.0";
 
 async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&serde_json::json!({

@@ -6,10 +6,10 @@
 
 | 端点 | 环境 | 版本 |
 |------|------|------|
-| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.15.22 |
-| `https://kms.aastar.io` | **QEMU 模拟** (Cloudflare tunnel) | v0.1.0 |
-| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.15.22 |
-| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.1.0 |
+| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.16.0 |
+| `https://kms.aastar.io` | **QEMU 模拟** (Cloudflare tunnel) | v0.16.0 |
+| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.16.0 |
+| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.16.0 |
 
 所有端点的 `/test` 路径提供交互式 Test UI：`https://kms1.aastar.io/test`
 
@@ -274,6 +274,7 @@ ExecStart=/usr/local/bin/kms-api-server
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=KMS_ORIGIN=https://kms1.aastar.io,http://localhost:5173
 
 [Install]
 WantedBy=multi-user.target
@@ -283,6 +284,34 @@ WantedBy=multi-user.target
 systemctl enable kms
 systemctl start kms
 journalctl -u kms -f  # View logs
+```
+
+## WebAuthn 多源 Origin 配置
+
+`KMS_ORIGIN` 环境变量控制 WebAuthn 允许的 origin 列表（逗号分隔），**不需要重新编译**，改环境变量重启即可：
+
+```bash
+# 生产 + localhost 调试（当前 DK2 配置）
+Environment=KMS_ORIGIN=https://kms1.aastar.io,http://localhost:5173
+
+# 仅生产（关闭 localhost）
+Environment=KMS_ORIGIN=https://kms1.aastar.io
+
+# 不设置时默认 https://{KMS_RP_ID}（即 https://aastar.io）
+```
+
+修改后需要：
+```bash
+# 在 DK2 上
+vi /etc/systemd/system/kms.service   # 编辑 KMS_ORIGIN 行
+systemctl daemon-reload
+systemctl restart kms
+journalctl -u kms | grep "Allowed origins"  # 确认生效
+```
+
+QEMU 直接在启动命令中设置：
+```bash
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://kms.aastar.io,http://localhost:5173" /root/shared/kms-api-server
 ```
 
 ## Testing

@@ -146,3 +146,11 @@ PASSKEY-WORK-SUMMARY.md
 /optee-teec
 /optee-utee
 /rust
+
+# SDKs (large binary tarballs, not for git)
+/sdks/
+
+# Build artifacts (stray object files from cross-compilation)
+*.rmeta
+*.rcgu.o
+/optee-utee-build
