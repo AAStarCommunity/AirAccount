@@ -1103,7 +1103,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.0";
+const KMS_VERSION: &str = "0.16.1";
 
 async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&serde_json::json!({

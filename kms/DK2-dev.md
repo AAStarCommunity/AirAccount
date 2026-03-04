@@ -274,7 +274,7 @@ ExecStart=/usr/local/bin/kms-api-server
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
-Environment=KMS_ORIGIN=https://kms1.aastar.io,http://localhost:5173
+Environment=KMS_ORIGIN=https://*.aastar.io,http://localhost:5173
 
 [Install]
 WantedBy=multi-user.target
@@ -292,10 +292,10 @@ journalctl -u kms -f  # View logs
 
 ```bash
 # 生产 + localhost 调试（当前 DK2 配置）
-Environment=KMS_ORIGIN=https://kms1.aastar.io,http://localhost:5173
+Environment=KMS_ORIGIN=https://*.aastar.io,http://localhost:5173
 
 # 仅生产（关闭 localhost）
-Environment=KMS_ORIGIN=https://kms1.aastar.io
+Environment=KMS_ORIGIN=https://*.aastar.io
 
 # 不设置时默认 https://{KMS_RP_ID}（即 https://aastar.io）
 ```
