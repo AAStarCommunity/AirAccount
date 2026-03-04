@@ -6,10 +6,10 @@
 
 | 端点 | 环境 | 版本 |
 |------|------|------|
-| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.16.1 |
-| `https://kms.aastar.io` | **QEMU 测试** (Cloudflare tunnel) | v0.16.1 |
-| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.16.1 |
-| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.16.1 |
+| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.16.5 |
+| `https://kms.aastar.io` | **QEMU 测试** (Cloudflare tunnel) | v0.16.3 |
+| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.16.5 |
+| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.16.3 |
 
 所有端点的 `/test` 路径提供交互式 Test UI：`https://kms1.aastar.io/test`
 
@@ -145,7 +145,7 @@ mkdir -p /data/kms
 KMS_DB_PATH=/data/kms/kms.db ./kms-api-server
 
 # 启动 KMS（开发模式，加 localhost）
-KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" ./kms-api-server
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" KMS_RP_ID="aastar.io,localhost" ./kms-api-server
 ```
 
 ### QEMU 重启 KMS（不重启 QEMU）
@@ -153,7 +153,7 @@ KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:51
 ```bash
 # 在 QEMU guest shell 中（没有 pkill，用 killall）
 killall kms-api-server
-KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" /root/shared/kms-api-server
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" KMS_RP_ID="aastar.io,localhost" /root/shared/kms-api-server
 ```
 
 ### QEMU 构建（TA + CA）
@@ -235,6 +235,7 @@ Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
 Environment=KMS_ORIGIN=https://*.aastar.io,http://localhost:5173
+Environment=KMS_RP_ID=aastar.io,localhost
 
 [Install]
 WantedBy=multi-user.target
@@ -244,6 +245,7 @@ WantedBy=multi-user.target
 systemctl enable kms        # 开机自启
 journalctl -u kms -f        # 查看日志
 journalctl -u kms | grep "Allowed origins"  # 确认 origin 配置
+journalctl -u kms | grep "Allowed rpIds"   # 确认 rpId 配置
 ```
 
 ### 优雅部署（Graceful Deploy）
