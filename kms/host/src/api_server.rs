@@ -1103,7 +1103,101 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.3";
+const KMS_VERSION: &str = "0.16.4";
+
+fn render_stats_page(server: &KmsApiServer) -> String {
+    let wallets = server.db.list_wallets().unwrap_or_default();
+    let qs = server.queue_status();
+    let total = wallets.len();
+    let with_addr = wallets.iter().filter(|w| w.address.is_some()).count();
+    let with_pk = wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count();
+    let enabled = wallets.iter().filter(|w| w.status == "ready").count();
+    let api_keys = server.db.list_api_keys().map(|v| v.len()).unwrap_or(0);
+
+    let mut rows = String::new();
+    for w in &wallets {
+        let addr = if w.address.is_some() { "&#10003;" } else { "-" };
+        let addr_cls = if w.address.is_some() { "ok" } else { "dim" };
+        let pk = if w.passkey_pubkey.is_some() { "&#10003;" } else { "-" };
+        let pk_cls = if w.passkey_pubkey.is_some() { "ok" } else { "dim" };
+        let st_cls = if w.status == "ready" { "ok" } else { "warn" };
+        let short_id = &w.key_id[..8.min(w.key_id.len())];
+        let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
+        rows.push_str(&format!(
+            "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{created}</td><td>{}</td></tr>\n",
+            short_id, w.status, w.description
+        ));
+    }
+
+    let cb = if qs.circuit_breaker_open.unwrap_or(false) { "OPEN" } else { "closed" };
+    let cb_cls = if qs.circuit_breaker_open.unwrap_or(false) { "warn" } else { "ok" };
+    let fails = qs.consecutive_failures.unwrap_or(0);
+
+    format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KMS Stats</title>
+<style>
+  body {{ font-family: 'SF Mono','Menlo',monospace; background:#0d1117; color:#c9d1d9; max-width:900px; margin:0 auto; padding:24px; }}
+  h1 {{ color:#58a6ff; font-size:1.3em; margin-bottom:4px; }}
+  .sub {{ color:#8b949e; font-size:0.85em; margin-bottom:24px; }}
+  table {{ width:100%; border-collapse:collapse; margin:12px 0; }}
+  th {{ text-align:left; color:#8b949e; font-size:0.8em; border-bottom:1px solid #30363d; padding:6px 10px; }}
+  td {{ padding:6px 10px; border-bottom:1px solid #21262d; font-size:0.85em; }}
+  .card {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:16px; margin:12px 0; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }}
+  .stat {{ text-align:center; }}
+  .stat .val {{ font-size:1.6em; font-weight:bold; color:#58a6ff; }}
+  .stat .lbl {{ font-size:0.75em; color:#8b949e; }}
+  .ok {{ color:#3fb950; }}
+  .warn {{ color:#d29922; }}
+  .dim {{ color:#484f58; }}
+  a {{ color:#58a6ff; text-decoration:none; }}
+  a:hover {{ text-decoration:underline; }}
+  .footer {{ margin-top:32px; color:#484f58; font-size:0.75em; text-align:center; }}
+</style>
+</head>
+<body>
+<h1>AirAccount KMS</h1>
+<div class="sub">v{version} &middot; TA mode: real &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
+
+<div class="card grid">
+  <div class="stat"><div class="val">{total}</div><div class="lbl">Total Keys</div></div>
+  <div class="stat"><div class="val ok">{enabled}</div><div class="lbl">Ready</div></div>
+  <div class="stat"><div class="val">{with_addr}</div><div class="lbl">With Address</div></div>
+  <div class="stat"><div class="val">{with_pk}</div><div class="lbl">With PassKey</div></div>
+  <div class="stat"><div class="val">{api_keys}</div><div class="lbl">API Keys</div></div>
+  <div class="stat"><div class="val">{queue}</div><div class="lbl">Queue Depth</div></div>
+  <div class="stat"><div class="val {cb_cls}">{cb}</div><div class="lbl">Circuit Breaker</div></div>
+  <div class="stat"><div class="val">{fails}</div><div class="lbl">Failures</div></div>
+</div>
+
+<div class="card">
+<table>
+<tr><th>KeyId</th><th>Addr</th><th>PassKey</th><th>Status</th><th>Created</th><th>Description</th></tr>
+{rows}
+</table>
+</div>
+
+<div class="footer">
+  OP-TEE Secure World &middot; UUID 4319f351-0b24-4097-b659-80ee4f824cdd
+</div>
+</body>
+</html>"#,
+        version = KMS_VERSION,
+        total = total,
+        enabled = enabled,
+        with_addr = with_addr,
+        with_pk = with_pk,
+        api_keys = api_keys,
+        queue = qs.queue_depth,
+        cb_cls = cb_cls,
+        cb = cb,
+        fails = fails,
+        rows = rows,
+    )
+}
 
 async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&serde_json::json!({
@@ -1463,34 +1557,12 @@ pub async fn start_kms_server() -> Result<()> {
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
     let rl_filter = rate_limit_filter(server.rate_limiter.clone());
 
-    // Root path - serve simple welcome message
+    // Root path - live stats dashboard
+    let server_index = server.clone();
     let index = warp::path::end()
         .and(warp::get())
-        .map(|| {
-            warp::reply::html(r#"<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>KMS API</title></head>
-<body style="font-family: system-ui; max-width: 800px; margin: 50px auto; padding: 20px;">
-<h1>🔐 AirAccount KMS API</h1>
-<p>Welcome to the KMS API Server. This server provides AWS KMS-compatible APIs powered by OP-TEE.</p>
-<h2>Endpoints:</h2>
-<ul>
-<li>POST /CreateKey - Create new wallet</li>
-<li>POST /DescribeKey - Query wallet metadata</li>
-<li>POST /ListKeys - List all wallets</li>
-<li>POST /DeriveAddress - Derive Ethereum address</li>
-<li>POST /Sign - Sign message</li>
-<li>POST /GetPublicKey - Get public key</li>
-<li>POST /DeleteKey - Delete wallet (requires PassKey)</li>
-<li>POST /BeginRegistration - WebAuthn registration ceremony (step 1)</li>
-<li>POST /CompleteRegistration - WebAuthn registration ceremony (step 2)</li>
-<li>POST /BeginAuthentication - WebAuthn authentication ceremony</li>
-<li>GET /health - Health check</li>
-</ul>
-<p>For interactive testing, visit: <a href="/test">Test UI</a></p>
-<p>API is running on OP-TEE Secure World with TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd</p>
-</body>
-</html>"#)
+        .map(move || {
+            warp::reply::html(render_stats_page(&server_index))
         });
 
     // Test UI page
