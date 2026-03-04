@@ -1,266 +1,203 @@
-# STM32MP157F-DK2 KMS Development Guide
+# KMS Development & Deployment Guide
 
-> Last updated: 2026-03-03 17:59
+> Last updated: 2026-03-04
 
 ## Endpoints & Test UI
 
 | 端点 | 环境 | 版本 |
 |------|------|------|
-| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.16.0 |
-| `https://kms.aastar.io` | **QEMU 模拟** (Cloudflare tunnel) | v0.16.0 |
-| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.16.0 |
-| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.16.0 |
+| `https://kms1.aastar.io` | **DK2 生产** (Cloudflare tunnel) | v0.16.1 |
+| `https://kms.aastar.io` | **QEMU 测试** (Cloudflare tunnel) | v0.16.1 |
+| `http://192.168.7.2:3000` | DK2 本地直连 (USB Ethernet) | v0.16.1 |
+| `http://localhost:3000` | QEMU 本地 (Docker port map) | v0.16.1 |
 
 所有端点的 `/test` 路径提供交互式 Test UI：`https://kms1.aastar.io/test`
 
-Test UI 功能：
-- 左侧所有 API 按钮（GET/POST，标注 auth 要求）
-- 右侧 JSON 编辑器 + 实时响应展示
-- PassKey P-256 ECDSA assertion 浏览器内通过 SubtleCrypto 生成（私钥不离开页面）
-- 自动从响应中提取 KeyId 填入后续请求
+---
 
-文件位置：`kms/test/kms-test-page.html` → 部署到目标机 `/root/shared/kms-test-page.html`
+## 开发流程
+
+### 正常迭代（推荐流程）
+
+```
+1. 修改代码（Mac 上编辑 kms/ 目录）
+   ↓
+2. QEMU 构建 + 测试（开发验证，可中断服务）
+   ↓
+3. DK2 构建 + 优雅部署（beta 生产，不中断服务）
+   ↓
+4. 提交 + 推送到 KMS 分支
+```
+
+### 完整命令
+
+```bash
+# Step 1: 编辑代码（Mac 本地，两个容器自动可见）
+#   - stm32-builder: 挂载 /workspace = AirAccount/
+#   - teaclave_dev_env: 挂载 kms/ = projects/web3/kms/
+vim kms/host/src/api_server.rs   # 改代码
+
+# Step 2: QEMU 构建 + 部署测试
+docker exec teaclave_dev_env bash -lc "
+  cd /root/teaclave_sdk_src/projects/web3/kms/host
+  cargo build --target aarch64-unknown-linux-gnu --release --bin kms-api-server
+"
+docker exec teaclave_dev_env bash -lc "
+  cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/
+"
+# 然后在 QEMU guest 中手动重启（见下文）
+
+# Step 3: DK2 构建 + 优雅部署
+cd kms && ./scripts/build.sh ca && ./scripts/deploy.sh ca
+
+# Step 4: 验证
+curl -s http://192.168.7.2:3000/version   # DK2
+curl -s https://kms.aastar.io/version     # QEMU (如果 guest 已重启)
+```
+
+### 使用脚本（三步走）
+
+```bash
+cd kms/
+
+# Step 1: 构建（DK2 target）
+./scripts/build.sh ca          # 只编译 CA
+./scripts/build.sh ta          # 只编译 TA
+./scripts/build.sh             # 编译 TA + CA
+
+# Step 2: 部署到 DK2（优雅切换，~4s 停机）
+./scripts/deploy.sh ca         # 只部署 CA
+./scripts/deploy.sh            # 部署 TA + CA
+
+# Step 3: 测试
+./scripts/run-all-tests.sh     # 全链 API 测试
+```
+
+### 注意事项
+
+- **Mac 编辑 → 容器即可见**: stm32-builder 挂载整个 AirAccount，teaclave_dev_env 挂载 kms/ 目录
+- **不需要 docker cp**: volume mount 已配置好
+- **两个 target 共用代码**: 源码完全一样，只是编译目标不同
+- **版本号两处同步**: `Cargo.toml` 的 `version` + `api_server.rs` 的 `KMS_VERSION`
+
+---
 
 ## Docker Containers
 
-| 容器 | 镜像 | 用途 | 状态 |
-|------|------|------|------|
-| `stm32-builder` | ubuntu:22.04 | **DK2 交叉编译** (nightly-2024-05-15, xargo, v26 SDK) | 保留 |
-| `teaclave_dev_env` | teaclave/...expand-memory | **QEMU OP-TEE 模拟器** (aarch64, port 3000) | 保留 |
+| 容器 | 用途 | Target | Volume Mount |
+|------|------|--------|--------------|
+| `stm32-builder` | **DK2 交叉编译** | `armv7-unknown-linux-gnueabihf` | `-v AirAccount:/workspace` |
+| `teaclave_dev_env` | **QEMU 模拟器 + 编译** | `aarch64-unknown-linux-gnu` | `-v third_party/teaclave-trustzone-sdk:/root/teaclave_sdk_src` + `-v kms:/root/teaclave_sdk_src/projects/web3/kms` |
 
-> `stm32-builder-v20` (ubuntu:20.04) 和 `stm32-community` (jadiaconu) 已删除（未使用）。
+> 容器重建命令（仅在丢失时使用）:
+> ```bash
+> # teaclave_dev_env 必须双挂载：SDK + kms overlay
+> docker run -d --name teaclave_dev_env \
+>   -v /path/to/third_party/teaclave-trustzone-sdk:/root/teaclave_sdk_src \
+>   -v /path/to/kms:/root/teaclave_sdk_src/projects/web3/kms \
+>   -p 54320:54320 -p 54321:54321 -p 3000:3000 \
+>   teaclave_dev_env_backup tail -f /dev/null
+> ```
 
-### QEMU 启动脚本（三个 Terminal）
+### Linker 配置
+
+`kms/host/.cargo/config.toml` 已配置 QEMU aarch64 linker：
+```toml
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+```
+
+DK2 armv7 linker 通过 `build.sh` 的环境变量 `CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER` 设置，不写在 config.toml 中（避免冲突）。
+
+---
+
+## QEMU 测试环境
+
+### 启动 QEMU（三个 Terminal）
 
 ```bash
 # Terminal 2: Guest VM Shell (先启动)
-./scripts/terminal2-guest-vm.sh
+docker exec -it teaclave_dev_env ./scripts/terminal2-guest-vm.sh
 
 # Terminal 3: Secure World Log (先启动)
-./scripts/terminal3-secure-log.sh
+docker exec -it teaclave_dev_env ./scripts/terminal3-secure-log.sh
 
-# Terminal 1: QEMU (等 Terminal 2+3 就绪后启动)
-./scripts/terminal1-qemu.sh
+# Terminal 1: QEMU (等 Terminal 2+3 显示 "Listening on TCP port" 后启动)
+docker exec -it teaclave_dev_env ./scripts/terminal1-qemu.sh
 ```
 
-启动后在 QEMU guest 内：
+### QEMU Guest 内操作
+
 ```bash
-mount -t 9p -o trans=virtio host /root/shared
+# 登录
+buildroot login: root
+
+# 首次：挂载共享目录 + 系统路径
+mkdir -p shared && mount -t 9p -o trans=virtio host shared && cd shared
+mount --bind ta/ /lib/optee_armtz
+mount --bind plugin/ /usr/lib/tee-supplicant/plugins/
 cp /root/shared/*.ta /lib/optee_armtz/
-cd /root/shared && ./kms-api-server
+
+# 创建本地 DB 目录（9p 不支持 SQLite WAL）
+mkdir -p /data/kms
+
+# 启动 KMS（生产 origin）
+KMS_DB_PATH=/data/kms/kms.db ./kms-api-server
+
+# 启动 KMS（开发模式，加 localhost）
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" ./kms-api-server
 ```
 
-### QEMU 构建与部署
-
-QEMU 使用 `teaclave_dev_env` 容器内的 Rust 工具链编译（aarch64 target），不用 `stm32-builder`：
+### QEMU 重启 KMS（不重启 QEMU）
 
 ```bash
-# 进入 QEMU 容器
-docker exec -it teaclave_dev_env bash
-
-# 编译 TA + CA（容器内执行）
-cd /root/AirAccount/kms/ta && cargo build --release
-cd /root/AirAccount/kms/host && cargo build --release --bin kms-api-server
-
-# 部署到共享目录（QEMU guest 通过 9p 挂载）
-cp /root/AirAccount/kms/ta/target/release/*.ta /opt/teaclave/shared/
-cp /root/AirAccount/kms/host/target/release/kms-api-server /opt/teaclave/shared/
+# 在 QEMU guest shell 中（没有 pkill，用 killall）
+killall kms-api-server
+KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://*.aastar.io,http://localhost:5173" /root/shared/kms-api-server
 ```
 
-## Network Setup
+### QEMU 构建
+
+```bash
+# Mac 上编辑代码后，容器内直接编译（volume mount，无需 docker cp）
+docker exec teaclave_dev_env bash -lc "
+  cd /root/teaclave_sdk_src/projects/web3/kms/host
+  cargo build --target aarch64-unknown-linux-gnu --release --bin kms-api-server
+"
+
+# 部署到 QEMU 共享目录
+docker exec teaclave_dev_env bash -lc "
+  cp /root/teaclave_sdk_src/projects/web3/kms/host/target/aarch64-unknown-linux-gnu/release/kms-api-server /opt/teaclave/shared/
+"
+```
+
+### QEMU 网络路径
 
 ```
-Mac Mini M4 (192.168.7.3) ──RJ45──> STM32MP157F-DK2 (192.168.7.2)
+Browser → kms.aastar.io
+       → Cloudflare Tunnel (cloudflared on Mac)
+       → localhost:3000 (Mac)
+       → Docker port map 3000:3000 (teaclave_dev_env)
+       → QEMU hostfwd tcp::3000-:3000
+       → QEMU guest 0.0.0.0:3000 (kms-api-server)
+```
+
+---
+
+## DK2 生产环境
+
+### Network
+
+```
+Mac Mini M4 (192.168.7.3) ──USB Ethernet──> STM32MP157F-DK2 (192.168.7.2)
 SSH: ssh root@192.168.7.2
 ```
 
-Board: Cortex-A7 650MHz, ARMv7-A 32-bit, OP-TEE 3.16, OpenSTLinux kirkstone v22.06
+Board: Cortex-A7 650MHz, ARMv7-A 32-bit, OP-TEE 3.16
 
-## Docker Build Environment (DK2)
+### Systemd Service
 
-**统一使用 `stm32-builder` 容器**（基于 ubuntu:22.04，包含 nightly-2024-05-15 + xargo + v26 SDK）。
-
-```bash
-# 恢复容器
-docker start stm32-builder
-
-# 进入容器（如需交互）
-docker exec -it stm32-builder bash
-```
-
-> 容器挂载：`-v /Volumes/UltraDisk/Dev2/aastar/AirAccount:/workspace`
-> SDK 路径：`/opt/st/stm32mp1/6.6-v26.02.18/`
-> Rust 工具链：`nightly-2024-05-15` (rustc 1.80.0) + `xargo 0.3.26`
-
-### Container Setup (one-time)
-
-```bash
-# Fix optee-utee-build symlink to use our patched version
-ln -sf /workspace/sdks/rust-sdk/optee-utee-build /optee-utee-build
-
-# Install signing dependency
-pip3 install cryptography
-
-# TA GCC wrapper (with -nostartfiles for bare-metal TA)
-cat > /tmp/arm-wrapper-gcc << 'EOF'
-#!/bin/bash
-exec /opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-gcc \
-  -nostartfiles \
-  --sysroot=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi \
-  -mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mcpu=cortex-a7 "$@"
-EOF
-chmod +x /tmp/arm-wrapper-gcc
-
-# CA GCC wrapper (without -nostartfiles, for Linux userspace)
-cat > /tmp/arm-ca-gcc << 'EOF'
-#!/bin/bash
-exec /opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-gcc \
-  --sysroot=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi \
-  -mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mcpu=cortex-a7 "$@"
-EOF
-chmod +x /tmp/arm-ca-gcc
-```
-
----
-
-## One-Command Build (推荐)
-
-完整构建 TA + CA + 签名，一条命令搞定：
-
-```bash
-docker exec stm32-builder bash -c '
-source /root/.cargo/env
-
-# ===== 环境变量 =====
-export TA_DEV_KIT_DIR=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi/usr/include/optee/export-user_ta
-export RUST_TARGET_PATH=/workspace/sdks/rust-sdk
-export CC_arm_unknown_optee=/tmp/arm-wrapper-gcc
-export TARGET_TA=arm-unknown-optee
-export OPTEE_CLIENT_EXPORT=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
-export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=/tmp/arm-ca-gcc
-export CC=/tmp/arm-ca-gcc
-CROSS_STRIP=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-strip
-TA_UUID=4319f351-0b24-4097-b659-80ee4f824cdd
-
-# ===== 1. Build TA =====
-echo ">>> Building TA..."
-cd /workspace/kms/ta
-HOST_CC=gcc xargo build --target arm-unknown-optee --release \
-  --config "target.arm-unknown-optee.linker=\"/tmp/arm-wrapper-gcc\"" || exit 1
-
-# ===== 2. Post-build: strip + fix + sign =====
-echo ">>> Post-build pipeline..."
-TARGET_DIR=target/arm-unknown-optee/release
-cp $TARGET_DIR/ta $TARGET_DIR/ta.stripped
-$CROSS_STRIP $TARGET_DIR/ta.stripped
-python3 fix_ta_elf.py $TARGET_DIR/ta.stripped $TARGET_DIR/ta.fixed
-python3 $TA_DEV_KIT_DIR/scripts/sign_encrypt.py sign-enc \
-  --uuid $TA_UUID --ta-version 0 \
-  --in $TARGET_DIR/ta.fixed \
-  --out $TARGET_DIR/${TA_UUID}.ta \
-  --key $TA_DEV_KIT_DIR/keys/default_ta.pem || exit 1
-echo ">>> TA done: $TARGET_DIR/${TA_UUID}.ta"
-
-# ===== 3. Build CA =====
-echo ">>> Building CA..."
-cd /workspace/kms/host
-cargo build --target armv7-unknown-linux-gnueabihf --release --bin kms-api-server || exit 1
-echo ">>> CA done: target/armv7-unknown-linux-gnueabihf/release/kms-api-server"
-
-echo ">>> ALL BUILD DONE"
-'
-```
-
-Output binaries (在 Mac 本地文件系统的路径)：
-- TA: `kms/ta/target/arm-unknown-optee/release/4319f351-0b24-4097-b659-80ee4f824cdd.ta` (538K)
-- CA: `kms/host/target/armv7-unknown-linux-gnueabihf/release/kms-api-server` (4.9M)
-
----
-
-## Build TA (单独构建)
-
-```bash
-docker exec stm32-builder bash -c '
-source /root/.cargo/env
-export TA_DEV_KIT_DIR=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi/usr/include/optee/export-user_ta
-export RUST_TARGET_PATH=/workspace/sdks/rust-sdk
-export CC_arm_unknown_optee=/tmp/arm-wrapper-gcc
-export TARGET_TA=arm-unknown-optee
-cd /workspace/kms/ta
-HOST_CC=gcc xargo build --target arm-unknown-optee --release \
-  --config "target.arm-unknown-optee.linker=\"/tmp/arm-wrapper-gcc\""
-'
-```
-
-> **关键**: `TARGET_TA=arm-unknown-optee` 必须设置！否则 linker script 会生成 aarch64 格式导致链接失败。
-
-### Post-Build: Strip -> Fix -> Sign
-
-```bash
-docker exec stm32-builder bash -c '
-TA_UUID=4319f351-0b24-4097-b659-80ee4f824cdd
-TA_DEV_KIT_DIR=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi/usr/include/optee/export-user_ta
-CROSS_STRIP=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-strip
-cd /workspace/kms/ta
-TARGET_DIR=target/arm-unknown-optee/release
-cp $TARGET_DIR/ta $TARGET_DIR/ta.stripped
-$CROSS_STRIP $TARGET_DIR/ta.stripped
-python3 fix_ta_elf.py $TARGET_DIR/ta.stripped $TARGET_DIR/ta.fixed
-python3 $TA_DEV_KIT_DIR/scripts/sign_encrypt.py sign-enc \
-  --uuid $TA_UUID --ta-version 0 \
-  --in $TARGET_DIR/ta.fixed \
-  --out $TARGET_DIR/${TA_UUID}.ta \
-  --key $TA_DEV_KIT_DIR/keys/default_ta.pem
-'
-```
-
-## Build CA (单独构建)
-
-```bash
-docker exec stm32-builder bash -c '
-source /root/.cargo/env
-export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=/tmp/arm-ca-gcc
-export CC=/tmp/arm-ca-gcc
-export OPTEE_CLIENT_EXPORT=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
-cd /workspace/kms/host
-cargo build --target armv7-unknown-linux-gnueabihf --release --bin kms-api-server
-'
-```
-
-Output binaries:
-- `target/armv7-unknown-linux-gnueabihf/release/kms` — CLI tool
-- `target/armv7-unknown-linux-gnueabihf/release/kms-api-server` — API server
-
-### 构建常见问题
-
-| 错误 | 原因 | 解决 |
-|------|------|------|
-| `cannot represent machine 'aarch64'` | `TARGET_TA` 未设置 | `export TARGET_TA=arm-unknown-optee` |
-| `xargo: command not found` | 用错了容器 | 用 `stm32-builder`（不是 stm32-builder-v20） |
-| `OPTEE_CLIENT_EXPORT is not set` | CA 构建缺少环境变量 | `export OPTEE_CLIENT_EXPORT=...sysroots/cortexa7t2hf...` |
-| `file in wrong format` | CA 用了 aarch64 的 cc | 设置 `CC=/tmp/arm-ca-gcc` |
-| `sign_encrypt.py: error` | 缺少 `sign-enc` 子命令 | `sign_encrypt.py sign-enc --uuid ...` |
-
-## Deploy to Board
-
-```bash
-# From Mac (outside Docker, files are in shared volume)
-TA_UUID=4319f351-0b24-4097-b659-80ee4f824cdd
-
-# Deploy TA
-scp kms/ta/target/arm-unknown-optee/release/${TA_UUID}.ta root@192.168.7.2:/lib/optee_armtz/
-
-# Deploy CA binaries
-scp kms/host/target/armv7-unknown-linux-gnueabihf/release/kms root@192.168.7.2:/usr/local/bin/
-scp kms/host/target/armv7-unknown-linux-gnueabihf/release/kms-api-server root@192.168.7.2:/usr/local/bin/
-
-# Restart service
-ssh root@192.168.7.2 "systemctl restart kms-api"
-```
-
-## Systemd Service
-
-File: `/etc/systemd/system/kms.service`
+文件: `/etc/systemd/system/kms.service`
 
 ```ini
 [Unit]
@@ -281,81 +218,210 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-systemctl enable kms
-systemctl start kms
-journalctl -u kms -f  # View logs
+systemctl enable kms        # 开机自启
+journalctl -u kms -f        # 查看日志
+journalctl -u kms | grep "Allowed origins"  # 确认 origin 配置
 ```
 
-## WebAuthn 多源 Origin 配置
+### 优雅部署（Graceful Deploy）
 
-`KMS_ORIGIN` 环境变量控制 WebAuthn 允许的 origin 列表（逗号分隔），**不需要重新编译**，改环境变量重启即可：
+`deploy.sh` 采用 **Pre-stage + Atomic Swap** 策略，最小化停机时间：
+
+```
+Phase 1: Pre-stage（服务仍在运行，零影响）
+  ├── scp kms-api-server → /usr/local/bin/kms-api-server.new
+  └── scp *.ta → /lib/optee_armtz/*.ta.new
+
+Phase 2: Switchover（~3-4s 停机窗口）
+  ├── systemctl stop kms        # SIGTERM → warp drain in-flight requests
+  ├── mv *.new → live binary    # 原子替换
+  ├── systemctl daemon-reload   # 加载最新 service 文件
+  └── systemctl start kms       # 启动新版本
+
+Phase 3: Verify
+  ├── health check 轮询（最多 15s）
+  └── 输出版本对比 + 停机时长
+```
+
+实测停机 **~4 秒**。
+
+#### 生产部署建议
+
+对于 beta 阶段，当前 ~4s 停机已经足够。正式生产时可考虑：
+
+1. **低峰期部署**: 选择凌晨或低流量时段
+2. **提前公告**: 通过 API 返回 `X-Maintenance-Window` header 预告
+3. **健康检查前置**: 部署前 `curl /QueueStatus` 确认无排队请求
+4. **回滚**: 保留旧二进制为 `.bak`，出问题立即 `mv .bak` 回滚
 
 ```bash
-# 生产 + localhost 调试（当前 DK2 配置）
+# 完整生产部署流程
+cd kms/
+
+# 1. 确认无进行中的 TEE 操作
+curl -s http://192.168.7.2:3000/QueueStatus
+
+# 2. 构建
+./scripts/build.sh ca
+
+# 3. 优雅部署（自动 pre-stage + swap + verify）
+./scripts/deploy.sh ca
+
+# 4. 验证
+curl -s http://192.168.7.2:3000/version
+curl -s https://kms1.aastar.io/health
+```
+
+---
+
+## WebAuthn Origin 配置
+
+`KMS_ORIGIN` 控制 WebAuthn 允许的 origin 列表，**不需要重新编译**：
+
+```bash
+# 通配符：接受所有 *.aastar.io 子域名 + localhost（当前配置）
 Environment=KMS_ORIGIN=https://*.aastar.io,http://localhost:5173
 
-# 仅生产（关闭 localhost）
+# 仅生产（关闭 localhost 调试）
 Environment=KMS_ORIGIN=https://*.aastar.io
 
 # 不设置时默认 https://{KMS_RP_ID}（即 https://aastar.io）
 ```
 
-修改后需要：
+修改后：
 ```bash
-# 在 DK2 上
-vi /etc/systemd/system/kms.service   # 编辑 KMS_ORIGIN 行
-systemctl daemon-reload
-systemctl restart kms
-journalctl -u kms | grep "Allowed origins"  # 确认生效
+vi /etc/systemd/system/kms.service
+systemctl daemon-reload && systemctl restart kms
+journalctl -u kms | grep "Allowed origins"
 ```
 
-QEMU 直接在启动命令中设置：
+---
+
+## Docker Build Environment (DK2)
+
+**统一使用 `stm32-builder` 容器**
+
 ```bash
-KMS_DB_PATH=/data/kms/kms.db KMS_ORIGIN="https://kms.aastar.io,http://localhost:5173" /root/shared/kms-api-server
+docker start stm32-builder
+docker exec -it stm32-builder bash
 ```
 
-## Testing
+> 挂载：`-v /Volumes/UltraDisk/Dev2/aastar/AirAccount:/workspace`
+> SDK：`/opt/st/stm32mp1/6.6-v26.02.18/`
+> 工具链：`nightly-2024-05-15` (rustc 1.80.0) + `xargo 0.3.26`
+
+### Container Setup (one-time)
 
 ```bash
-# Health check
-curl http://192.168.7.2:3000/health
+ln -sf /workspace/sdks/rust-sdk/optee-utee-build /optee-utee-build
+pip3 install cryptography
 
-# Create wallet (fast, entropy only)
-curl -X POST http://192.168.7.2:3000/CreateKey \
-  -H "Content-Type: application/json" \
-  -H "x-amz-target: TrentService.CreateKey" \
-  -d '{"Description":"test","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
+# TA GCC wrapper
+cat > /tmp/arm-wrapper-gcc << 'EOF'
+#!/bin/bash
+exec /opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-gcc \
+  -nostartfiles \
+  --sysroot=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi \
+  -mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mcpu=cortex-a7 "$@"
+EOF
+chmod +x /tmp/arm-wrapper-gcc
 
-# Derive address (slow, BIP39+BIP32+secp256k1 on 650MHz ARM)
-curl -X POST http://192.168.7.2:3000/DeriveAddress \
-  -H "Content-Type: application/json" \
-  -H "x-amz-target: TrentService.DeriveAddress" \
-  -d '{"KeyId":"<wallet-id>","DerivationPath":"m/44h/60h/0h/0/0"}'
-
-# CLI
-ssh root@192.168.7.2 "kms create-wallet"
-ssh root@192.168.7.2 "kms derive-address --wallet-id <id> --hd-path m/44h/60h/0h/0/0"
+# CA GCC wrapper
+cat > /tmp/arm-ca-gcc << 'EOF'
+#!/bin/bash
+exec /opt/st/stm32mp1/6.6-v26.02.18/sysroots/aarch64-ostl_sdk-linux/usr/bin/arm-ostl-linux-gnueabi/arm-ostl-linux-gnueabi-gcc \
+  --sysroot=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi \
+  -mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mcpu=cortex-a7 "$@"
+EOF
+chmod +x /tmp/arm-ca-gcc
 ```
+
+---
+
+## Build Commands
+
+### build.sh（推荐）
+
+```bash
+cd kms/
+./scripts/build.sh           # TA + CA
+./scripts/build.sh ca        # 只 CA
+./scripts/build.sh ta        # 只 TA
+```
+
+### 手动构建
+
+```bash
+# DK2 CA
+docker exec stm32-builder bash -c '
+source /root/.cargo/env
+export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=/tmp/arm-ca-gcc
+export CC=/tmp/arm-ca-gcc
+export OPTEE_CLIENT_EXPORT=/opt/st/stm32mp1/6.6-v26.02.18/sysroots/cortexa7t2hf-neon-vfpv4-ostl-linux-gnueabi
+cd /workspace/kms/host
+cargo build --target armv7-unknown-linux-gnueabihf --release --bin kms-api-server
+'
+
+# QEMU CA（Mac 编辑后容器内直接编译）
+docker exec teaclave_dev_env bash -lc "
+cd /root/teaclave_sdk_src/projects/web3/kms/host
+cargo build --target aarch64-unknown-linux-gnu --release --bin kms-api-server
+"
+```
+
+Output:
+- DK2 CA: `kms/host/target/armv7-unknown-linux-gnueabihf/release/kms-api-server`
+- QEMU CA: 容器内 `target/aarch64-unknown-linux-gnu/release/kms-api-server` → 复制到 `/opt/teaclave/shared/`
+
+### 构建常见问题
+
+| 错误 | 原因 | 解决 |
+|------|------|------|
+| `cannot represent machine 'aarch64'` | `TARGET_TA` 未设置 | `export TARGET_TA=arm-unknown-optee` |
+| `xargo: command not found` | 用错了容器 | 用 `stm32-builder` |
+| `OPTEE_CLIENT_EXPORT is not set` | CA 缺环境变量 | build.sh 自动设置 |
+| `file in wrong format` | linker 不匹配 | 检查 `.cargo/config.toml` 或 `CC` 环境变量 |
+| `xShmMap not supported` (QEMU) | 9p 不支持 SQLite WAL | `KMS_DB_PATH=/data/kms/kms.db` |
+
+---
+
+## 平台对比
+
+| | DK2 (当前) | QEMU (测试) | i.MX 95 (未来) |
+|---|---|---|---|
+| CPU | Cortex-A7 650MHz | QEMU virt aarch64 | Cortex-A55 2.0GHz |
+| Arch | ARMv7 32-bit | AArch64 64-bit | AArch64 64-bit |
+| TA target | `arm-unknown-optee` | `aarch64-unknown-optee` | `aarch64-unknown-optee` |
+| CA target | `armv7-unknown-linux-gnueabihf` | `aarch64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu` |
+| Build container | `stm32-builder` | `teaclave_dev_env` | 新容器（待建） |
+| 代码 | 完全一样 | 完全一样 | 完全一样 |
+
+i.MX 95 迁移只需：新建 Docker 编译容器 + 调整 deploy.sh 的 SSH 地址。代码零修改。
+
+---
+
+## Performance (DK2, p256-m, 2026-03-03)
+
+| 操作 | 耗时 |
+|------|------|
+| health / QueueStatus | 3-5ms |
+| ListKeys / DescribeKey | 5-6ms |
+| GetPublicKey | 4ms |
+| **DeriveAddress** | **1.16s** |
+| **SignHash** | **1.26s** |
+| **Sign (message)** | **1.27s** |
+| **Sign (transaction)** | **1.93s** |
+| CreateKey | 2.46s |
+| ChangePasskey | 2.68s |
+| DeleteKey | 2.88s |
+
+---
 
 ## Key Fixes Applied
 
 1. **ta_head at vaddr 0** — linker script places `.ta_head` before `.text`
-2. **DT_HASH required** — `--hash-style=both` linker flag (OP-TEE 3.16 needs DT_HASH, not just GNU_HASH)
+2. **DT_HASH required** — `--hash-style=both` (OP-TEE 3.16 needs DT_HASH)
 3. **No NOTE segment** — `/DISCARD/` for `.note` sections
-4. **No build-id** — `--build-id=none` removes PT_NOTE from build-id
-5. **GNU_STACK RWE** — `fix_ta_elf.py` patches flags from RW (6) to RWE (7)
-
-## Performance Notes
-
-Seed caching 已实现，PBKDF2 只在首次操作时运行，结果缓存在 secure storage。
-
-| 操作 | 首次 (PBKDF2) | 后续 (有缓存) | 提速 |
-|------|---------------|---------------|------|
-| CreateKey | ~4s | ~4s | - |
-| DeriveAddress | ~71s | **~7s** | 10x |
-| Sign | ~80s | **~7s** | 11x |
-| SignHash | ~83s | **~7s** | 12x |
-
-- 首次 auto-derive 后 seed 自动缓存
-- ~7s 主要消耗在 BIP32 derivation + secp256k1 signing（纯 Rust on ARMv7）
-- TEE concurrency: limited to 1 concurrent operation (semaphore)
+4. **GNU_STACK RWE** — `fix_ta_elf.py` patches flags from RW (6) to RWE (7)
+5. **p256-m aarch64** — `!defined(__aarch64__)` guard skips ARM32 inline ASM on 64-bit
+6. **Wildcard origin** — `https://*.aastar.io` matches any subdomain
