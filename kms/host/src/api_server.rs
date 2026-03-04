@@ -386,18 +386,21 @@ pub struct KmsApiServer {
     tee: TeeHandle,
     rate_limiter: RateLimiter,
     rp_name: String,
-    rp_id: String,
+    rp_ids: Vec<String>,
     expected_origins: Vec<String>,
 }
 
 impl KmsApiServer {
     pub fn new(db: KmsDb) -> Self {
-        let rp_id = std::env::var("KMS_RP_ID").unwrap_or_else(|_| "aastar.io".to_string());
+        let rp_ids: Vec<String> = std::env::var("KMS_RP_ID")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| vec!["aastar.io".to_string()]);
         let rp_name = std::env::var("KMS_RP_NAME").unwrap_or_else(|_| "AirAccount KMS".to_string());
         let expected_origins: Vec<String> = std::env::var("KMS_ORIGIN")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec![format!("https://{}", rp_id)]);
+            .unwrap_or_else(|_| vec![format!("https://{}", rp_ids[0])]);
         println!("🌐 Allowed origins: {:?}", expected_origins);
+        println!("🔑 Allowed rpIds: {:?}", rp_ids);
         let rate_limiter = RateLimiter::from_env();
         println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
         Self {
@@ -405,7 +408,7 @@ impl KmsApiServer {
             tee: TeeHandle::new(),
             rate_limiter,
             rp_name,
-            rp_id,
+            rp_ids,
             expected_origins,
         }
     }
@@ -748,7 +751,7 @@ impl KmsApiServer {
                 &wa.credential,
                 &challenge_row.challenge,
                 &self.expected_origins,
-                &self.rp_id,
+                &challenge_row.rp_id,
                 &pk_bytes,
                 w.sign_count,
             )?;
@@ -952,15 +955,38 @@ impl KmsApiServer {
 
     // ── WebAuthn ceremonies ──
 
-    pub async fn begin_registration(&self, req: webauthn::BeginRegistrationRequest) -> Result<webauthn::RegistrationOptionsResponse> {
+    /// Pick rpId from configured KMS_RP_ID list based on caller's HTTP Origin header.
+    /// e.g. origin "http://localhost:5173" → matches "localhost" if in list.
+    /// Falls back to first configured rpId.
+    fn resolve_rp_id(&self, caller_origin: Option<&str>) -> String {
+        if let Some(origin) = caller_origin {
+            let host = origin
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split(':')
+                .next()
+                .unwrap_or("");
+            // Check if any configured rpId matches (exact or suffix)
+            for rp in &self.rp_ids {
+                if host == rp.as_str() || host.ends_with(&format!(".{}", rp)) {
+                    return rp.clone();
+                }
+            }
+        }
+        self.rp_ids[0].clone()
+    }
+
+    pub async fn begin_registration(&self, req: webauthn::BeginRegistrationRequest, origin_header: Option<&str>) -> Result<webauthn::RegistrationOptionsResponse> {
         let user_name = req.user_name.as_deref().unwrap_or("wallet-user");
         let user_display = req.user_display_name.as_deref().unwrap_or("AirAccount Wallet");
+        let rp_id = self.resolve_rp_id(origin_header);
+        println!("🔑 WebAuthn rpId resolved: {} (from origin: {:?})", rp_id, req.origin);
 
         let (challenge_id, challenge_bytes, resp) = webauthn::generate_registration_options(
-            &self.rp_name, &self.rp_id, user_name, user_display, vec![],
+            &self.rp_name, &rp_id, user_name, user_display, vec![],
         );
 
-        self.db.store_challenge(&challenge_id, &challenge_bytes, None, "registration", &self.rp_id, 300)?;
+        self.db.store_challenge(&challenge_id, &challenge_bytes, None, "registration", &rp_id, 300)?;
 
         // Stash description/key_usage/etc in challenge metadata (store as JSON in key_id field)
         let meta_json = serde_json::to_string(&serde_json::json!({
@@ -972,7 +998,7 @@ impl KmsApiServer {
         // Re-store with metadata in key_id field
         self.db.store_challenge(
             &format!("{}_meta", challenge_id),
-            meta_json.as_bytes(), None, "registration_meta", &self.rp_id, 300,
+            meta_json.as_bytes(), None, "registration_meta", &rp_id, 300,
         )?;
 
         println!("📝 WebAuthn BeginRegistration: challenge_id={}", challenge_id);
@@ -1003,9 +1029,10 @@ impl KmsApiServer {
             )
         };
 
-        // 3. Verify attestation
+        // 3. Verify attestation (use rpId from stored challenge, not hardcoded)
+        let rp_id = &challenge_row.rp_id;
         let verified = webauthn::verify_registration_response(
-            &req.credential, &challenge_row.challenge, &self.expected_origins, &self.rp_id,
+            &req.credential, &challenge_row.challenge, &self.expected_origins, rp_id,
         )?;
 
         println!("✅ WebAuthn registration verified, pubkey {} bytes, credential_id {} bytes",
@@ -1063,7 +1090,7 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn begin_authentication(&self, req: webauthn::BeginAuthenticationRequest) -> Result<webauthn::AuthenticationOptionsResponse> {
+    pub async fn begin_authentication(&self, req: webauthn::BeginAuthenticationRequest, origin_header: Option<&str>) -> Result<webauthn::AuthenticationOptionsResponse> {
         // Resolve key_id from KeyId or Address
         let key_id = if let Some(ref kid) = req.key_id {
             kid.clone()
@@ -1088,11 +1115,12 @@ impl KmsApiServer {
             vec![]
         };
 
+        let rp_id = self.resolve_rp_id(origin_header);
         let (challenge_id, challenge_bytes, resp) = webauthn::generate_authentication_options(
-            &self.rp_id, allow_credentials,
+            &rp_id, allow_credentials,
         );
 
-        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(&key_id), "authentication", &self.rp_id, 300)?;
+        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(&key_id), "authentication", &rp_id, 300)?;
 
         println!("📝 WebAuthn BeginAuthentication: challenge_id={}, key_id={}", challenge_id, key_id);
         Ok(resp)
@@ -1103,7 +1131,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.4";
+const KMS_VERSION: &str = "0.16.5";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -1340,8 +1368,9 @@ async fn handle_change_passkey(
 async fn handle_begin_registration(
     body: webauthn::BeginRegistrationRequest,
     server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_registration(body).await {
+    match server.begin_registration(body, origin_header.as_deref()).await {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginRegistration error: {}", e);
@@ -1366,8 +1395,9 @@ async fn handle_complete_registration(
 async fn handle_begin_authentication(
     body: webauthn::BeginAuthenticationRequest,
     server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_authentication(body).await {
+    match server.begin_authentication(body, origin_header.as_deref()).await {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginAuthentication error: {}", e);
@@ -1716,6 +1746,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(api_key_filter.clone())
         .and(aws_kms_body())
         .and(warp::any().map(move || server_br.clone()))
+        .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_registration);
 
     // WebAuthn: CompleteRegistration
@@ -1734,6 +1765,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(api_key_filter.clone())
         .and(aws_kms_body())
         .and(warp::any().map(move || server_ba.clone()))
+        .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_authentication);
 
     let routes = index
