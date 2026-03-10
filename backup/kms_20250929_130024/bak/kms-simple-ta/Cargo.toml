@@ -1,0 +1,12 @@
+[package]
+name = "kms-simple-ta"
+version = "0.1.0"
+authors = ["AirAccount Contributors"]
+edition = "2021"
+
+[dependencies]
+# 使用容器内的本地路径
+serde = { version = "1.0", default-features = false }
+
+[profile.release]
+panic = "abort"

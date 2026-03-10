@@ -1,0 +1,26 @@
+[package]
+name = "kms-ta"
+version = "0.1.0"
+authors = ["AirAccount Contributors"]
+license = "Apache-2.0"
+description = "KMS Trusted Application for OP-TEE."
+edition = "2021"
+
+[dependencies]
+proto = { path = "../proto" }
+optee-utee-sys = { path = "../../../../third_party/incubator-teaclave-trustzone-sdk/optee-utee/optee-utee-sys" }
+optee-utee = { path = "../../../../third_party/incubator-teaclave-trustzone-sdk/optee-utee" }
+
+# 加密库
+secp256k1 = { version = "0.28", default-features = false, features = ["alloc", "recovery"] }
+sha3 = { version = "0.10", default-features = false }
+rand = { version = "0.8", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+proto = { path = "../proto" }
+optee-utee-build = { path = "../../../../third_party/incubator-teaclave-trustzone-sdk/optee-utee-build" }
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 1

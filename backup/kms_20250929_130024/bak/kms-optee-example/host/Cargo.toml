@@ -1,0 +1,12 @@
+[package]
+name = "kms-host"
+version = "0.1.0"
+authors = ["AirAccount Contributors"]
+license = "Apache-2.0"
+description = "KMS Host Application for OP-TEE."
+edition = "2021"
+
+[dependencies]
+proto = { path = "../proto", features = ["std"] }
+optee-teec = { path = "../../../../third_party/incubator-teaclave-trustzone-sdk/optee-teec" }
+uuid = { version = "1.0", features = ["v4"] }

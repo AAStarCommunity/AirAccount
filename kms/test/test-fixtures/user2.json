@@ -1,0 +1,11 @@
+{
+  "label": "test-user-2",
+  "public_key_hex": "0x0491cfcf7c2c0634c748bef27d9bd4deddebe4120550e40df4fc05c36e346a643eae9ab4883db1e063f5a4deb8996c6014119255868384864ee9185ccd18bff9d8",
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyVGVu2dspGgbpTAc\nudK1dGPj9pwmqPEM2hItkidZXt2hRANCAASRz898LAY0x0i+8n2b1N7d6+QSBVDk\nDfT8BcNuNGpkPq6atIg9seBj9aTeuJlsYBQRklWGg4SGTukYXM0Yv/nY\n-----END PRIVATE KEY-----\n",
+  "sample_assertion": {
+    "authenticator_data": "49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d97630500000001",
+    "client_data_hash": "7cce74a5d4b67c85050a9ed09f1066ce7b7b3f0c214ca3d2fa99f4241b8c490f",
+    "signature_r": "28b8f5f691088360cde01fa1376a8d8577c0e84e00219d6ab60d68424c8000c8",
+    "signature_s": "1530abc6967a368953090d4858c29e761fbf20706bf6da48c0188b8c0c015c3d"
+  }
+}
