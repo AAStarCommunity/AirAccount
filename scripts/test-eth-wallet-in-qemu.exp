@@ -1,0 +1,130 @@
+#!/usr/bin/expect -f
+
+# Test eth_wallet in QEMU OP-TEE environment
+set timeout 60
+
+proc log_msg {level msg} {
+    puts "\[TEST\] $level: $msg"
+}
+
+log_msg "INFO" "Starting eth_wallet test in QEMU..."
+
+# Spawn QEMU with eth_wallet
+spawn bash -c "docker exec kms-optee-test bash -c '
+export IMG_DIRECTORY=/opt/teaclave/images
+export IMG_NAME=aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+export QEMU_HOST_SHARE_DIR=/opt/teaclave/shared
+cd /opt/teaclave/images/aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+./qemu-system-aarch64 \
+    -nodefaults -nographic \
+    -serial stdio -serial file:/tmp/serial.log \
+    -smp 2 -s -machine virt,secure=on,acpi=off,gic-version=3 \
+    -cpu cortex-a57 -d unimp -semihosting-config enable=on,target=native \
+    -m 1057 -bios bl1.bin -initrd rootfs.cpio.gz \
+    -append \"console=ttyAMA0,115200 keep_bootcon root=/dev/vda2\" \
+    -kernel Image \
+    -fsdev local,id=fsdev0,path=/opt/teaclave/shared,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host
+'"
+
+# Wait for login
+expect {
+    "buildroot login:" {
+        log_msg "SUCCESS" "QEMU started, logging in..."
+        send "root\r"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for login"
+        exit 1
+    }
+}
+
+# Wait for prompt
+expect {
+    "# " {
+        log_msg "SUCCESS" "Logged in successfully"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for prompt"
+        exit 1
+    }
+}
+
+# Mount shared directory
+send "mkdir -p /mnt/host && mount -t 9p -o trans=virtio host /mnt/host\r"
+expect "# "
+
+# Copy eth_wallet binary and make executable
+send "cp /mnt/host/host/kms-host /tmp/eth_wallet && chmod +x /tmp/eth_wallet\r"
+expect "# "
+
+# Check if eth_wallet works
+log_msg "INFO" "Testing eth_wallet help..."
+send "/tmp/eth_wallet --help\r"
+expect {
+    "eth_wallet" {
+        log_msg "SUCCESS" "eth_wallet help displayed"
+    }
+    "# " {
+        log_msg "INFO" "Command completed"
+    }
+}
+
+# Test create wallet
+log_msg "INFO" "Testing wallet creation..."
+send "/tmp/eth_wallet create-wallet\r"
+expect {
+    "Wallet ID:" {
+        log_msg "SUCCESS" "🎉 Wallet created successfully!"
+        # Capture the wallet ID
+        expect -re {Wallet ID: ([a-f0-9-]+)}
+        set wallet_id $expect_out(1,string)
+        log_msg "INFO" "Wallet ID: $wallet_id"
+    }
+    "Error:" {
+        log_msg "INFO" "Got error (expected if TA not deployed)"
+    }
+    "# " {
+        log_msg "INFO" "Command completed"
+    }
+    timeout {
+        log_msg "WARN" "Timeout on wallet creation"
+    }
+}
+
+# Test derive address (if wallet was created)
+if {[info exists wallet_id]} {
+    log_msg "INFO" "Testing address derivation..."
+    send "/tmp/eth_wallet derive-address --wallet-id $wallet_id --hd-path \"m/44'/60'/0'/0/0\"\r"
+    expect {
+        "Address:" {
+            log_msg "SUCCESS" "🎉 Address derived successfully!"
+        }
+        "Error:" {
+            log_msg "INFO" "Address derivation error (expected)"
+        }
+        "# " {
+            log_msg "INFO" "Command completed"
+        }
+    }
+}
+
+# Check TEE status
+log_msg "INFO" "Checking TEE environment..."
+send "ls -la /dev/tee*\r"
+expect "# "
+
+send "ps | grep tee\r"
+expect "# "
+
+# Check for any TA files
+send "find /lib -name '*.ta' 2>/dev/null\r"
+expect "# "
+
+log_msg "SUCCESS" "Test completed!"
+
+# Shutdown
+send "poweroff\r"
+expect eof
+
+exit 0

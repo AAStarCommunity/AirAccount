@@ -1,0 +1,70 @@
+#!/usr/bin/expect -f
+
+# 设置超时时间为10分钟
+set timeout 600
+
+# 启动Docker容器中的QEMU（使用Teaclave的干净环境，不加载我们的TA和host）
+spawn docker exec -it kms-test-std bash -c "
+export IMG_DIRECTORY='/opt/teaclave/images'
+export IMG_NAME='x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory'
+export QEMU_HOST_SHARE_DIR='/tmp'
+/opt/teaclave/bin/start_qemuv8
+"
+
+# 期望看到BL1启动信息
+expect {
+    "NOTICE:  Booting Trusted Firmware" {
+        puts "✅ ARM TrustZone Firmware启动成功"
+        exp_continue
+    }
+    "NOTICE:  BL1:" {
+        puts "✅ BL1 bootloader启动"
+        exp_continue
+    }
+    "NOTICE:  BL2:" {
+        puts "✅ BL2 bootloader启动"
+        exp_continue
+    }
+    "NOTICE:  BL31:" {
+        puts "✅ BL31 bootloader启动"
+        exp_continue
+    }
+    "Starting kernel" {
+        puts "✅ Linux内核开始启动"
+        exp_continue
+    }
+    "Linux version" {
+        puts "✅ Linux内核版本信息显示"
+        exp_continue
+    }
+    "login:" {
+        puts "✅ 系统启动完成，到达登录界面"
+        send "root\r"
+        expect "#"
+        puts "✅ 成功登录系统"
+
+        # 测试系统基本功能
+        send "uname -a\r"
+        expect "#"
+        send "cat /proc/version\r"
+        expect "#"
+        send "ls /lib/optee_armtz/ || echo 'No TAs loaded'\r"
+        expect "#"
+        puts "✅ 干净的QEMU系统测试完成"
+
+        # 退出
+        send "halt\r"
+        expect eof
+        exit 0
+    }
+    timeout {
+        puts "❌ 超时：QEMU启动超过10分钟"
+        exit 1
+    }
+    eof {
+        puts "❌ QEMU进程意外终止"
+        exit 1
+    }
+}
+
+puts "测试结束"

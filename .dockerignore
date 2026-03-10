@@ -1,2 +1,3 @@
-third_party
+# third_party  # 注释掉这一行，因为我们需要在Docker中使用OP-TEE SDK
 out*
+target/

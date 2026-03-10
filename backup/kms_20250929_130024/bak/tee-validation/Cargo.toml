@@ -1,0 +1,16 @@
+[package]
+name = "tee-validation"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+std = ["secp256k1/std", "sha3/std"]
+
+[dependencies]
+# 使用no_std兼容的crypto库
+secp256k1 = { version = "0.28", default-features = false, features = ["alloc"] }
+sha3 = { version = "0.10", default-features = false }
+
+[profile.release]
+panic = "abort"

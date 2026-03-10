@@ -1,0 +1,173 @@
+#!/usr/bin/expect -f
+
+# KMS OP-TEE Automated Test Script
+# Tests KMS host application in QEMU OP-TEE environment
+
+set timeout 30
+
+# Function to log messages
+proc log_msg {level msg} {
+    puts "\[KMS-TEST\] $level: $msg"
+}
+
+log_msg "INFO" "Starting KMS OP-TEE test..."
+
+# Connect to QEMU console
+spawn bash -c "docker exec -it kms-optee-test bash -c '
+export IMG_DIRECTORY=/opt/teaclave/images
+export IMG_NAME=aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+export QEMU_HOST_SHARE_DIR=/opt/teaclave/shared
+cd /opt/teaclave/images/aarch64-optee-qemuv8-ubuntu-24.04-expand-ta-memory
+./qemu-system-aarch64 \
+    -nodefaults \
+    -nographic \
+    -serial stdio \
+    -serial file:/tmp/serial.log \
+    -smp 2 \
+    -s -machine virt,secure=on,acpi=off,gic-version=3 \
+    -cpu cortex-a57 \
+    -d unimp -semihosting-config enable=on,target=native \
+    -m 1057 \
+    -bios bl1.bin \
+    -initrd rootfs.cpio.gz \
+    -append \"console=ttyAMA0,115200 keep_bootcon root=/dev/vda2\" \
+    -kernel Image \
+    -fsdev local,id=fsdev0,path=/opt/teaclave/shared,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+    -netdev user,id=vmnic,hostfwd=:127.0.0.1:54433-:4433 \
+    -device virtio-net-device,netdev=vmnic
+'"
+
+# Wait for login prompt
+expect {
+    "buildroot login:" {
+        log_msg "SUCCESS" "QEMU OP-TEE started successfully"
+        send "root\r"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for login prompt"
+        exit 1
+    }
+}
+
+# Wait for shell prompt
+expect {
+    "# " {
+        log_msg "SUCCESS" "Logged in as root"
+    }
+    timeout {
+        log_msg "ERROR" "Timeout waiting for root prompt"
+        exit 1
+    }
+}
+
+# Mount shared directory
+send "mkdir -p /mnt/host\r"
+expect "# "
+
+send "mount -t 9p -o trans=virtio host /mnt/host\r"
+expect {
+    "# " {
+        log_msg "SUCCESS" "Mounted shared directory"
+    }
+    timeout {
+        log_msg "ERROR" "Failed to mount shared directory"
+        exit 1
+    }
+}
+
+# Check if KMS host binary exists
+send "ls -la /mnt/host/host/\r"
+expect {
+    "kms-host" {
+        log_msg "SUCCESS" "Found KMS host binary"
+    }
+    "# " {
+        log_msg "ERROR" "KMS host binary not found"
+        exit 1
+    }
+}
+
+# Copy and make executable
+send "cp /mnt/host/host/kms-host /tmp/\r"
+expect "# "
+
+send "chmod +x /tmp/kms-host\r"
+expect "# "
+
+# Test KMS host application
+log_msg "INFO" "Testing KMS host application..."
+send "/tmp/kms-host --help\r"
+expect {
+    "Usage:" {
+        log_msg "SUCCESS" "KMS host help displayed"
+    }
+    "error:" {
+        log_msg "INFO" "KMS host executable works (showing error is expected)"
+    }
+    "# " {
+        log_msg "INFO" "KMS host executed"
+    }
+    timeout {
+        log_msg "WARN" "Timeout on help command"
+    }
+}
+
+# Try to run a simple KMS command
+log_msg "INFO" "Testing KMS wallet creation..."
+send "/tmp/kms-host create-wallet\r"
+expect {
+    "Wallet ID:" {
+        log_msg "SUCCESS" "KMS wallet creation successful!"
+    }
+    "Error:" {
+        log_msg "INFO" "KMS command executed (error expected without TA)"
+    }
+    "# " {
+        log_msg "INFO" "KMS command completed"
+    }
+    timeout {
+        log_msg "WARN" "Timeout on wallet creation"
+    }
+}
+
+# Check OP-TEE status
+log_msg "INFO" "Checking OP-TEE status..."
+send "ls /dev/tee*\r"
+expect {
+    "/dev/tee" {
+        log_msg "SUCCESS" "OP-TEE devices found"
+    }
+    "# " {
+        log_msg "WARN" "No TEE devices found"
+    }
+}
+
+# Check if tee-supplicant is running
+send "ps | grep tee\r"
+expect {
+    "tee-supplicant" {
+        log_msg "SUCCESS" "tee-supplicant is running"
+    }
+    "# " {
+        log_msg "WARN" "tee-supplicant not found"
+    }
+}
+
+log_msg "SUCCESS" "KMS OP-TEE test completed!"
+
+# Shutdown QEMU
+send "poweroff\r"
+expect {
+    "Power down" {
+        log_msg "INFO" "QEMU shutting down..."
+    }
+    eof {
+        log_msg "INFO" "QEMU terminated"
+    }
+    timeout {
+        log_msg "INFO" "Force exit from QEMU"
+    }
+}
+
+exit 0

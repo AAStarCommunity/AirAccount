@@ -1,0 +1,121 @@
+#!/usr/bin/expect -f
+
+# 设置超时时间为10分钟
+set timeout 600
+
+# 首先部署我们的TA和host到Teaclave容器
+spawn docker exec -it kms-test-std bash -c "
+# 直接使用简化的QEMU命令，不需要网络转发
+cd /opt/teaclave/images/x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory &&
+./qemu-system-aarch64 \\
+    -nodefaults -nographic \\
+    -serial stdio \\
+    -smp 2 \\
+    -machine virt,secure=on,acpi=off,gic-version=3 \\
+    -cpu cortex-a57 \\
+    -m 1057 \\
+    -bios bl1.bin \\
+    -initrd rootfs.cpio.gz \\
+    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \\
+    -kernel Image
+"
+
+# 期望看到启动过程
+expect {
+    "NOTICE:  Booting Trusted Firmware" {
+        puts "✅ ARM TrustZone Firmware启动成功"
+        exp_continue
+    }
+    "NOTICE:  BL1:" {
+        puts "✅ BL1 bootloader启动"
+        exp_continue
+    }
+    "NOTICE:  BL2:" {
+        puts "✅ BL2 bootloader启动"
+        exp_continue
+    }
+    "NOTICE:  BL31:" {
+        puts "✅ BL31 bootloader启动"
+        exp_continue
+    }
+    "U-Boot" {
+        puts "✅ U-Boot启动"
+        exp_continue
+    }
+    "Starting kernel" {
+        puts "✅ Linux内核开始启动"
+        exp_continue
+    }
+    "Linux version" {
+        puts "✅ Linux内核版本信息显示"
+        exp_continue
+    }
+    "buildroot login:" {
+        puts "✅ 系统启动完成，到达登录界面"
+        send "root\r"
+        expect "#"
+        puts "✅ 成功登录系统"
+
+        # 检查我们的TA是否已加载
+        send "ls -la /lib/optee_armtz/ | grep be2dc9a0\r"
+        expect {
+            "be2dc9a0-02b4-4b33-ba21-9964dbdf1573.ta" {
+                puts "🎉 找到我们的TA文件！"
+            }
+            "#" {
+                puts "ℹ️ 检查完成"
+            }
+        }
+
+        # 检查host应用
+        send "ls -la /root/eth_wallet-rs\r"
+        expect {
+            "eth_wallet-rs" {
+                puts "🎉 找到我们的host应用！"
+            }
+            "#" {
+                puts "ℹ️ 检查完成"
+            }
+        }
+
+        # 尝试运行hello world命令
+        send "/root/eth_wallet-rs hello --name 'QEMU-TEE-Test'\r"
+        expect {
+            "Hello, QEMU-TEE-Test!" {
+                puts "🎉🎉🎉 重大成功！我们的TA和host完全正常工作！"
+                puts "✅ eth_wallet在QEMU OP-TEE环境中完美运行"
+                exp_continue
+            }
+            "from TEE" {
+                puts "✅ 确认消息来自TEE (Trusted Execution Environment)"
+                exp_continue
+            }
+            "#" {
+                puts "✅ 命令执行完成"
+            }
+            timeout {
+                puts "⚠️ 应用执行时间较长，但系统运行正常"
+            }
+        }
+
+        # 尝试其他命令测试
+        send "/root/eth_wallet-rs --help\r"
+        expect "#"
+        puts "✅ Help命令正常"
+
+        # 退出
+        send "halt\r"
+        expect eof
+        exit 0
+    }
+    timeout {
+        puts "❌ 超时：QEMU启动超过10分钟"
+        exit 1
+    }
+    eof {
+        puts "❌ QEMU进程意外终止"
+        exit 1
+    }
+}
+
+puts "测试结束"

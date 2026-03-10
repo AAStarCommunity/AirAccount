@@ -1,6 +1,0 @@
-[build]
-target-dir = "target"
-
-[target.aarch64-unknown-optee]
-ar = "aarch64-linux-gnu-ar"
-linker = "aarch64-linux-gnu-gcc"

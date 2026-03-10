@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KMS API Test UI</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+.header{background:#1e293b;border-bottom:1px solid #334155;padding:16px 24px;display:flex;align-items:center;gap:16px}
+.header h1{font-size:20px;font-weight:600}
+.header .version{font-size:13px;color:#64748b;background:#0f172a;padding:2px 8px;border-radius:4px}
+.header .status{margin-left:auto;font-size:13px}
+.status.ok{color:#4ade80}.status.err{color:#f87171}
+.container{max-width:1200px;margin:0 auto;padding:24px;display:grid;grid-template-columns:320px 1fr;gap:20px}
+@media(max-width:900px){.container{grid-template-columns:1fr}}
+.sidebar{display:flex;flex-direction:column;gap:8px}
+.sidebar h3{font-size:12px;text-transform:uppercase;color:#64748b;letter-spacing:1px;padding:8px 0 4px}
+.api-btn{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:10px 12px;cursor:pointer;text-align:left;color:#e2e8f0;font-size:13px;transition:all .15s}
+.api-btn:hover{border-color:#3b82f6;background:#1e3a5f}
+.api-btn.active{border-color:#3b82f6;background:#1e3a5f}
+.api-btn .method{font-weight:700;font-size:11px;display:inline-block;width:40px}
+.method.get{color:#4ade80}.method.post{color:#60a5fa}
+.main{display:flex;flex-direction:column;gap:16px}
+.config{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+.config label{font-size:12px;color:#94a3b8;display:flex;flex-direction:column;gap:4px}
+.config input{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:6px 10px;color:#e2e8f0;font-size:13px;font-family:monospace}
+.config input.wide{width:320px}
+.panel{background:#1e293b;border:1px solid #334155;border-radius:8px;overflow:hidden}
+.panel-header{padding:12px 16px;border-bottom:1px solid #334155;display:flex;align-items:center;gap:12px}
+.panel-header h2{font-size:14px;font-weight:600}
+.panel-body{padding:16px}
+textarea{width:100%;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:12px;color:#e2e8f0;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:1.5;resize:vertical;min-height:120px}
+textarea:focus{outline:none;border-color:#3b82f6}
+.btn{background:#3b82f6;color:white;border:none;border-radius:6px;padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}
+.btn:hover{background:#2563eb}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.danger{background:#dc2626}.btn.danger:hover{background:#b91c1c}
+.response{margin-top:12px}
+.response pre{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:12px;font-size:12px;line-height:1.5;overflow-x:auto;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.response .meta{font-size:11px;color:#64748b;margin-bottom:6px;display:flex;gap:16px}
+.meta .ok{color:#4ade80}.meta .err{color:#f87171}
+.passkey-section{margin-top:12px;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:6px}
+.passkey-section h4{font-size:12px;color:#94a3b8;margin-bottom:8px}
+.passkey-section input{width:100%;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:6px 10px;color:#e2e8f0;font-size:12px;font-family:monospace;margin-bottom:6px}
+.help{font-size:11px;color:#64748b;margin-top:4px}
+.badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+.badge.auth{background:#7c3aed22;color:#a78bfa;border:1px solid #7c3aed44}
+.badge.noauth{background:#16a34a22;color:#4ade80;border:1px solid #16a34a44}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>KMS API Test UI</h1>
+  <span class="version" id="ver">...</span>
+  <span class="status" id="health-status">checking...</span>
+</div>
+
+<div class="container">
+  <div class="sidebar">
+    <h3>Infrastructure</h3>
+    <button class="api-btn" onclick="loadApi('health')"><span class="method get">GET</span> /health <span class="badge noauth">no auth</span></button>
+    <button class="api-btn" onclick="loadApi('version')"><span class="method get">GET</span> /version <span class="badge noauth">no auth</span></button>
+    <button class="api-btn" onclick="loadApi('queue')"><span class="method get">GET</span> /QueueStatus <span class="badge noauth">no auth</span></button>
+
+    <h3>Wallet</h3>
+    <button class="api-btn" onclick="loadApi('createKey')"><span class="method post">POST</span> /CreateKey</button>
+    <button class="api-btn" onclick="loadApi('listKeys')"><span class="method post">POST</span> /ListKeys</button>
+    <button class="api-btn" onclick="loadApi('describeKey')"><span class="method post">POST</span> /DescribeKey</button>
+    <button class="api-btn" onclick="loadApi('getPublicKey')"><span class="method post">POST</span> /GetPublicKey</button>
+    <button class="api-btn" onclick="loadApi('keyStatus')"><span class="method get">GET</span> /KeyStatus <span class="badge noauth">no auth</span></button>
+    <button class="api-btn" onclick="loadApi('deleteKey')"><span class="method post">POST</span> /DeleteKey <span class="badge auth">passkey</span></button>
+
+    <h3>Signing</h3>
+    <button class="api-btn" onclick="loadApi('signHash')"><span class="method post">POST</span> /SignHash <span class="badge auth">passkey</span></button>
+    <button class="api-btn" onclick="loadApi('signMessage')"><span class="method post">POST</span> /Sign (msg) <span class="badge auth">passkey</span></button>
+    <button class="api-btn" onclick="loadApi('signTx')"><span class="method post">POST</span> /Sign (tx) <span class="badge auth">passkey</span></button>
+    <button class="api-btn" onclick="loadApi('deriveAddress')"><span class="method post">POST</span> /DeriveAddress <span class="badge auth">passkey</span></button>
+
+    <h3>WebAuthn</h3>
+    <button class="api-btn" onclick="loadApi('beginReg')"><span class="method post">POST</span> /BeginRegistration</button>
+    <button class="api-btn" onclick="loadApi('beginAuth')"><span class="method post">POST</span> /BeginAuthentication</button>
+    <button class="api-btn" onclick="loadApi('changePasskey')"><span class="method post">POST</span> /ChangePasskey <span class="badge auth">passkey</span></button>
+  </div>
+
+  <div class="main">
+    <div class="config">
+      <label>API Key<input id="apiKey" class="wide" placeholder="kms_..." value=""></label>
+      <label>KeyId<input id="keyId" placeholder="uuid" value=""></label>
+    </div>
+
+    <div class="passkey-section">
+      <h4>PassKey P-256 (for signing operations)</h4>
+      <label style="font-size:11px;color:#64748b">Private Key Hex (used to generate assertions client-side)</label>
+      <input id="passkeyPriv" placeholder="0x... (P-256 private key hex)">
+      <div class="help">Assertion is generated in-browser using SubtleCrypto. Private key never leaves the page.</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2 id="reqTitle">Select an API</h2>
+        <button class="btn" id="sendBtn" onclick="sendRequest()" disabled>Send</button>
+      </div>
+      <div class="panel-body">
+        <textarea id="reqBody" rows="8" placeholder="Request body (JSON)"></textarea>
+        <div class="response" id="respArea" style="display:none">
+          <div class="meta" id="respMeta"></div>
+          <pre id="respBody"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ── State ──
+let currentApi = null;
+
+const APIs = {
+  health:       { method:'GET',  path:'/health', target:null, body:null },
+  version:      { method:'GET',  path:'/version', target:null, body:null },
+  queue:        { method:'GET',  path:'/QueueStatus', target:null, body:null },
+  createKey:    { method:'POST', path:'/CreateKey', target:'TrentService.CreateKey',
+                  body:()=>JSON.stringify({Description:"test-"+Date.now(),KeyUsage:"SIGN_VERIFY",KeySpec:"ECC_SECG_P256K1",Origin:"EXTERNAL_KMS",PasskeyPublicKey:"<FILL_PUBKEY>"},null,2) },
+  listKeys:     { method:'POST', path:'/ListKeys', target:'TrentService.ListKeys', body:()=>'{}' },
+  describeKey:  { method:'POST', path:'/DescribeKey', target:'TrentService.DescribeKey',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>"},null,2) },
+  getPublicKey: { method:'POST', path:'/GetPublicKey', target:'TrentService.GetPublicKey',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>"},null,2) },
+  keyStatus:    { method:'GET',  path:()=>'/KeyStatus?KeyId='+($('keyId').value||'<FILL>'), target:null, body:null },
+  deleteKey:    { method:'POST', path:'/DeleteKey', target:'TrentService.ScheduleKeyDeletion',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",Passkey:"__PASSKEY__"},null,2), passkey:true },
+  signHash:     { method:'POST', path:'/SignHash', target:'TrentService.SignHash',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",DerivationPath:"m/44'/60'/0'/0/0",Hash:"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",Passkey:"__PASSKEY__"},null,2), passkey:true },
+  signMessage:  { method:'POST', path:'/Sign', target:'TrentService.Sign',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",DerivationPath:"m/44'/60'/0'/0/0",Message:"0x48656c6c6f20576f726c64",Passkey:"__PASSKEY__"},null,2), passkey:true },
+  signTx:       { method:'POST', path:'/Sign', target:'TrentService.Sign',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",DerivationPath:"m/44'/60'/0'/0/0",Transaction:{chainId:11155111,nonce:0,to:"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",value:"0xde0b6b3a7640000",gasPrice:"0x4a817c800",gas:21000,data:""},Passkey:"__PASSKEY__"},null,2), passkey:true },
+  deriveAddress:{ method:'POST', path:'/DeriveAddress', target:'TrentService.DeriveAddress',
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",DerivationPath:"m/44'/60'/0'/0/1",Passkey:"__PASSKEY__"},null,2), passkey:true },
+  beginReg:     { method:'POST', path:'/BeginRegistration', target:null,
+                  body:()=>JSON.stringify({Description:"webauthn-test",UserName:"test@example.com"},null,2) },
+  beginAuth:    { method:'POST', path:'/BeginAuthentication', target:null,
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>"},null,2) },
+  changePasskey:{ method:'POST', path:'/ChangePasskey', target:null,
+                  body:()=>JSON.stringify({KeyId:$('keyId').value||"<FILL>",PasskeyPublicKey:"<NEW_PUBKEY>",Passkey:"__PASSKEY__"},null,2), passkey:true },
+};
+
+function loadApi(name) {
+  currentApi = name;
+  const api = APIs[name];
+  document.querySelectorAll('.api-btn').forEach(b=>b.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  const path = typeof api.path === 'function' ? api.path() : api.path;
+  $('reqTitle').textContent = api.method + ' ' + path;
+  $('sendBtn').disabled = false;
+  if (api.body) {
+    $('reqBody').value = api.body();
+    $('reqBody').style.display = '';
+  } else {
+    $('reqBody').value = '';
+    $('reqBody').style.display = 'none';
+  }
+  $('respArea').style.display = 'none';
+}
+
+// ── P-256 ECDSA assertion via SubtleCrypto ──
+async function generatePasskeyAssertion(privKeyHex) {
+  const privHex = privKeyHex.replace(/^0x/,'');
+  const privBytes = hexToBytes(privHex);
+
+  // Import P-256 private key
+  const jwk = await privateKeyToJwk(privBytes);
+  const key = await crypto.subtle.importKey('jwk', jwk, {name:'ECDSA',namedCurve:'P-256'}, false, ['sign']);
+
+  // Build authenticator_data (fake but valid structure)
+  const rpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('aastar.io')));
+  const flags = new Uint8Array([0x05]); // UP + UV
+  const counter = new Uint8Array([0x00,0x00,0x00,0x01]);
+  const authData = new Uint8Array([...rpIdHash, ...flags, ...counter]);
+
+  // Build client_data_hash (random)
+  const clientData = JSON.stringify({type:"webauthn.get",challenge:btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),origin:"https://aastar.io"});
+  const clientDataHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(clientData)));
+
+  // Sign: SHA-256(authData || clientDataHash)
+  const toSign = new Uint8Array([...authData, ...clientDataHash]);
+  const sigDer = new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'}, key, toSign));
+
+  // DER to raw r||s
+  const {r, s} = derToRawRS(sigDer);
+
+  return {
+    AuthenticatorData: bytesToHex(authData),
+    ClientDataHash: bytesToHex(clientDataHash),
+    Signature: bytesToHex(r) + bytesToHex(s)
+  };
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length/2);
+  for(let i=0;i<hex.length;i+=2) bytes[i/2]=parseInt(hex.substr(i,2),16);
+  return bytes;
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function privateKeyToJwk(privBytes) {
+  // Get public key by importing as PKCS8 wrapped key
+  // Simpler: use raw math via a tiny helper
+  // Actually SubtleCrypto needs JWK with x,y,d
+  // We'll derive pubkey by doing a sign+recover trick, or use PKCS8
+  // Easiest: wrap in PKCS8 DER
+  const pkcs8 = buildPkcs8P256(privBytes);
+  const keyPair = await crypto.subtle.importKey('pkcs8', pkcs8, {name:'ECDSA',namedCurve:'P-256'}, true, ['sign']);
+  const exported = await crypto.subtle.exportKey('jwk', keyPair);
+  return exported;
+}
+
+function buildPkcs8P256(privBytes) {
+  // PKCS8 wrapping for P-256 private key (no public key included)
+  const oid = [0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07];
+  const privOctet = [0x04,0x20,...privBytes];
+  const ecPrivKey = [0x30, privOctet.length+2, 0x02,0x01,0x01, ...privOctet];
+  const octetStr = [0x04, ecPrivKey.length, ...ecPrivKey];
+  const seq = [0x30, 2+oid.length+octetStr.length, 0x02,0x01,0x00, ...oid, ...octetStr];
+  return new Uint8Array(seq);
+}
+
+function derToRawRS(der) {
+  // Parse DER ECDSA signature to get r and s as 32-byte big-endian
+  let offset = 0;
+  if(der[offset]!==0x30) throw new Error('not DER sequence');
+  offset++; offset++; // skip seq + len
+  // r
+  if(der[offset]!==0x02) throw new Error('expected integer');
+  offset++;
+  const rLen = der[offset++];
+  let rBytes = der.slice(offset, offset+rLen);
+  offset += rLen;
+  // s
+  if(der[offset]!==0x02) throw new Error('expected integer');
+  offset++;
+  const sLen = der[offset++];
+  let sBytes = der.slice(offset, offset+sLen);
+  // Pad/trim to 32 bytes
+  const r = padTo32(rBytes);
+  const s = padTo32(sBytes);
+  return {r, s};
+}
+
+function padTo32(bytes) {
+  if(bytes.length===33 && bytes[0]===0) bytes = bytes.slice(1);
+  if(bytes.length<32) { const p=new Uint8Array(32); p.set(bytes,32-bytes.length); return p; }
+  return bytes.slice(0,32);
+}
+
+// ── Send Request ──
+async function sendRequest() {
+  const api = APIs[currentApi];
+  if(!api) return;
+  $('sendBtn').disabled = true;
+  $('sendBtn').textContent = 'Sending...';
+  $('respArea').style.display = 'none';
+
+  try {
+    const path = typeof api.path === 'function' ? api.path() : api.path;
+    const url = location.origin + path;
+    const headers = {'Content-Type':'application/json'};
+    const apiKey = $('apiKey').value.trim();
+    if(apiKey) headers['x-api-key'] = apiKey;
+    if(api.target) headers['x-amz-target'] = api.target;
+
+    let bodyStr = $('reqBody').value;
+
+    // Replace __PASSKEY__ placeholder with real assertion
+    if(api.passkey && bodyStr.includes('"__PASSKEY__"')) {
+      const privHex = $('passkeyPriv').value.trim();
+      if(!privHex) {
+        showResponse(0, 0, {error:'Fill in PassKey Private Key hex above to generate assertion'});
+        return;
+      }
+      try {
+        const assertion = await generatePasskeyAssertion(privHex);
+        bodyStr = bodyStr.replace('"__PASSKEY__"', JSON.stringify(assertion));
+      } catch(e) {
+        showResponse(0, 0, {error:'Failed to generate assertion: '+e.message});
+        return;
+      }
+    }
+
+    const opts = {method:api.method, headers};
+    if(api.method==='POST' && bodyStr) opts.body = bodyStr;
+
+    const t0 = performance.now();
+    const resp = await fetch(url, opts);
+    const t1 = performance.now();
+    const elapsed = Math.round(t1-t0);
+
+    let data;
+    const text = await resp.text();
+    try { data = JSON.parse(text); } catch { data = text; }
+
+    showResponse(resp.status, elapsed, data);
+
+    // Auto-fill KeyId from response
+    if(data && data.KeyMetadata && data.KeyMetadata.KeyId) {
+      $('keyId').value = data.KeyMetadata.KeyId;
+    }
+    if(data && data.Keys && data.Keys.length > 0 && !$('keyId').value) {
+      $('keyId').value = data.Keys[0].KeyId;
+    }
+  } catch(e) {
+    showResponse(0, 0, {error:e.message});
+  } finally {
+    $('sendBtn').disabled = false;
+    $('sendBtn').textContent = 'Send';
+  }
+}
+
+function showResponse(status, ms, data) {
+  $('respArea').style.display = '';
+  const ok = status >= 200 && status < 300;
+  const statusClass = status===0 ? 'err' : (ok ? 'ok' : 'err');
+  $('respMeta').innerHTML = `<span class="${statusClass}">HTTP ${status||'ERR'}</span><span>${ms}ms</span>`;
+  $('respBody').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+
+// ── Init: health check ──
+(async function() {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    $('health-status').textContent = d.status === 'healthy' ? 'Connected' : 'Error';
+    $('health-status').className = 'status ' + (d.status === 'healthy' ? 'ok' : 'err');
+    $('ver').textContent = 'v' + (d.version||'?');
+  } catch(e) {
+    $('health-status').textContent = 'Disconnected';
+    $('health-status').className = 'status err';
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,33 +1,59 @@
-# Scripts Directory
+# KMS开发脚本集
 
-This directory contains all build, test, and utility scripts for the AirAccount project.
+## 📁 脚本列表
 
-## Build Scripts
+### 环境管理
+- **`kms-dev-env.sh`** - 主环境管理脚本（STD模式）
+  - 拉取Docker镜像
+  - 启动/停止容器
+  - 构建KMS
+  - 容器shell访问
 
-### TEE Build
-- `build_tee.sh` - Main TEE build script
-- `build_ca.sh` - Client Application build script
-- `build_real_tee.sh` - Real hardware TEE build script
-- `compile_ca_simple.sh` - Simple CA compilation script
+### QEMU运行（三终端）
+- **`kms-qemu-terminal2.sh`** - Guest VM监听器（先启动）
+- **`kms-qemu-terminal3.sh`** - Secure World日志（第二启动）
+- **`kms-qemu-terminal1.sh`** - QEMU启动器（最后启动）
 
-### Test Scripts
-- `test_airaccount_manual.sh` - Manual testing script
-- `test_ca_simple.sh` - Simple CA test script
-- `run_final_validation.sh` - Final validation test suite
-- `create_test_summary.sh` - Generate test summary reports
+### 快速部署
+- **`kms-deploy.sh`** - 增量构建+部署到QEMU
+- **`kms-deploy.sh clean`** - 完整重建+部署
 
-### Utility Scripts
-- `optimize_build_performance.sh` - Build performance optimization
-- `cleanup_rust_cache.sh` - Clean Rust build cache
-- `fly.sh` - Quick deployment script
-- `simple_test.sh` - Simple test runner
-- `verify_build.sh` - Build verification script
+## 🚀 快速开始
 
-## Usage
-
-All scripts are executable. Run from the project root:
+### 首次使用
 
 ```bash
-./scripts/build_tee.sh
-./scripts/test_ca_simple.sh
+# 1. 初始化环境（一次性）
+./scripts/kms-dev-env.sh all
+
+# 2. 启动QEMU（三个终端）
+# Terminal 2:
+./scripts/kms-qemu-terminal2.sh
+
+# Terminal 3:
+./scripts/kms-qemu-terminal3.sh
+
+# Terminal 1:
+./scripts/kms-qemu-terminal1.sh
+
+# 3. 在QEMU中运行（Terminal 2）
+buildroot login: root
+mkdir shared && mount -t 9p -o trans=virtio host shared
+cd shared && ./kms --help
 ```
+
+### 日常开发
+
+```bash
+# 修改代码后快速部署
+./scripts/kms-deploy.sh
+
+# 在QEMU中测试（Terminal 2）
+cd shared
+cp *.ta /lib/optee_armtz/
+./kms create-wallet
+```
+
+## 📖 详细文档
+
+完整工作流程见：[docs/kms-workflow.md](../docs/kms-workflow.md)

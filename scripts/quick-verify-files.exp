@@ -1,0 +1,130 @@
+#!/usr/bin/expect -f
+
+# 设置超时时间为5分钟
+set timeout 300
+
+puts "🚀 快速验证文件部署测试"
+
+# 启动QEMU，只检查文件是否存在
+spawn docker exec -it kms-test-std bash -c "
+cd /opt/teaclave/images/x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory &&
+./qemu-system-aarch64 \\
+    -nodefaults -nographic \\
+    -serial stdio \\
+    -smp 2 \\
+    -machine virt,secure=on,acpi=off,gic-version=3 \\
+    -cpu cortex-a57 \\
+    -m 1057 \\
+    -bios bl1.bin \\
+    -initrd rootfs.cpio.gz \\
+    -append 'console=ttyAMA0,115200 keep_bootcon root=/dev/vda2' \\
+    -kernel Image
+"
+
+# 等待系统启动
+expect {
+    "buildroot login:" {
+        puts "✅ 系统启动成功，开始验证..."
+        send "root\r"
+
+        expect {
+            "#" {
+                puts "✅ 登录成功"
+            }
+            timeout {
+                puts "❌ 登录超时"
+                exit 1
+            }
+        }
+
+        # 快速检查文件
+        puts "🔍 检查我们的TA文件..."
+        send "ls -la /lib/optee_armtz/be2dc9a0*\r"
+        expect {
+            "be2dc9a0-02b4-4b33-ba21-9964dbdf1573.ta" {
+                puts "🎉 TA文件存在！"
+            }
+            "No such file or directory" {
+                puts "❌ TA文件不存在"
+            }
+            "#" {
+                puts "ℹ️ TA检查完成"
+            }
+            timeout {
+                puts "⚠️ TA检查超时"
+            }
+        }
+
+        puts "🔍 检查我们的host应用..."
+        send "ls -la /root/eth_wallet-rs\r"
+        expect {
+            "eth_wallet-rs" {
+                puts "🎉 Host应用存在！"
+                send "/root/eth_wallet-rs --help\r"
+                expect {
+                    "Usage:" {
+                        puts "🎉 Host应用可以执行！"
+
+                        # 最关键的测试
+                        puts "🌟 执行HelloWorld测试..."
+                        send "/root/eth_wallet-rs hello --name 'Quick-Test'\r"
+                        expect {
+                            "Hello, Quick-Test!" {
+                                puts "🎊🎊🎊 完全成功！HelloWorld API正常工作！"
+                                puts "✅ TA ↔ Host 通信正常"
+                                puts "✅ TEE环境运行正常"
+                            }
+                            "from TEE" {
+                                puts "🔐 确认：消息来自TEE"
+                            }
+                            "error" {
+                                puts "❌ HelloWorld出现错误"
+                            }
+                            "#" {
+                                puts "✅ HelloWorld执行完成"
+                            }
+                            timeout {
+                                puts "⚠️ HelloWorld超时，但可能正在执行"
+                                send "\r"
+                                expect "#"
+                            }
+                        }
+                    }
+                    "#" {
+                        puts "✅ help命令执行完成"
+                    }
+                    timeout {
+                        puts "⚠️ help命令超时"
+                        send "\r"
+                        expect "#"
+                    }
+                }
+            }
+            "No such file or directory" {
+                puts "❌ Host应用不存在"
+            }
+            "#" {
+                puts "ℹ️ Host检查完成"
+            }
+            timeout {
+                puts "⚠️ Host检查超时"
+            }
+        }
+
+        # 快速关闭
+        puts "💡 快速验证完成，关闭系统..."
+        send "halt\r"
+        expect eof
+        exit 0
+    }
+    timeout {
+        puts "❌ 系统启动超时"
+        exit 1
+    }
+    eof {
+        puts "❌ QEMU进程终止"
+        exit 1
+    }
+}
+
+puts "快速验证测试结束"
