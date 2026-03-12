@@ -1,6 +1,13 @@
 # KMS Changelog
 
-> Updated: 2026-03-03
+> Updated: 2026-03-12
+
+## 0.16.6 (2026-03-12)
+
+- Stats 页面 Description 字段截断显示（隐私保护）
+- TEE handler 层全面 tx 追踪日志（成功/耗时/webauthn 路径）
+- TA panic 自动识别并标记（`💀 TA PANIC`）
+- Journal 持久化（重启不丢日志）
 
 ## 0.15.22 (2026-03-03)
 
