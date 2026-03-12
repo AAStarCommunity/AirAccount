@@ -79,7 +79,8 @@ has_addr = 1 if addr and addr != '' else 0
 has_pk = 1 if pk and pk != '' else 0
 en = 1 if enabled else 0
 # short_id | has_addr | has_passkey | enabled | created | description
-print(f'{m.get(\"KeyId\",\"?\")[:8]}|{has_addr}|{has_pk}|{en}|{created}|{desc}')
+masked = (desc[:8] + '…') if len(desc) > 8 else desc
+print(f'{m.get(\"KeyId\",\"?\")[:8]}|{has_addr}|{has_pk}|{en}|{created}|{masked}')
 ")
     IFS='|' read -r SHORT HAS_ADDR HAS_PK ENABLED CREATED DESC_TEXT <<< "$META"
     if [ "$HAS_ADDR" = "1" ]; then KEYS_WITH_ADDR=$((KEYS_WITH_ADDR+1)); fi

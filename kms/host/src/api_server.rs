@@ -1151,9 +1151,14 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
+        let masked_desc = if w.description.len() > 8 {
+            format!("{}…", &w.description[..8])
+        } else {
+            w.description.clone()
+        };
         rows.push_str(&format!(
             "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{created}</td><td>{}</td></tr>\n",
-            short_id, w.status, w.description
+            short_id, w.status, masked_desc
         ));
     }
 
