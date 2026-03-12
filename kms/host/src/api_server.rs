@@ -1256,10 +1256,14 @@ async fn handle_create_key(
     body: CreateKeyRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
     match server.create_key(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ CreateKey OK {}ms", t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("CreateKey error: {}", e);
+            eprintln!("CreateKey error: {} {}ms", e, t0.elapsed().as_millis());
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -1295,11 +1299,19 @@ async fn handle_derive_address(
     body: DeriveAddressRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.derive_address(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ DeriveAddress OK key={} {}ms", key, t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("DeriveAddress error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}DeriveAddress error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1308,11 +1320,20 @@ async fn handle_sign(
     body: SignRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let addr = body.address.clone().unwrap_or_default();
+    let path = body.webauthn.is_some();
+    let t0 = std::time::Instant::now();
     match server.sign(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ Sign OK addr={} webauthn={} {}ms", addr, path, t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("Sign error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}Sign error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, t0.elapsed().as_millis());
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1321,11 +1342,20 @@ async fn handle_sign_hash(
     body: SignHashRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let addr = body.address.clone().unwrap_or_default();
+    let path = body.webauthn.is_some();
+    let t0 = std::time::Instant::now();
     match server.sign_hash(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ SignHash OK addr={} webauthn={} {}ms", addr, path, t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("SignHash error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}SignHash error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, t0.elapsed().as_millis());
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1348,11 +1378,19 @@ async fn handle_delete_key(
     body: DeleteKeyRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.delete_key(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ DeleteKey OK key={} {}ms", key, t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("ScheduleKeyDeletion error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}DeleteKey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1361,11 +1399,19 @@ async fn handle_change_passkey(
     body: ChangePasskeyRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.change_passkey(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ ChangePasskey OK key={} {}ms", key, t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("ChangePasskey error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}ChangePasskey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1388,10 +1434,14 @@ async fn handle_complete_registration(
     body: webauthn::CompleteRegistrationRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
     match server.complete_registration(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            println!("✅ CompleteRegistration OK {}ms", t0.elapsed().as_millis());
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("CompleteRegistration error: {}", e);
+            eprintln!("CompleteRegistration error: {} {}ms", e, t0.elapsed().as_millis());
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
