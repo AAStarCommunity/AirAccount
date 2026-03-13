@@ -236,7 +236,6 @@ fn verify_passkey_for_wallet(
     let _assertion =
         assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
 
-    // DEBUG: restore p256-m TA-side ECDSA verify
     // signature = r(32) || s(32) = 64 bytes
     let mut sig_bytes = [0u8; 64];
     sig_bytes[..32].copy_from_slice(&_assertion.signature_r);
@@ -285,7 +284,6 @@ fn verify_passkey_for_wallet(
         ));
     }
 
-    dbg_println!("[+] PassKey verified via p256-m in TA");
     Ok(())
 }
 

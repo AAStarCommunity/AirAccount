@@ -17,7 +17,7 @@
 
 [package]
 name = "kms"
-version = "0.16.4"
+version = "0.16.7"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"

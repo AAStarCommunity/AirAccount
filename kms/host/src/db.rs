@@ -57,10 +57,39 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tx_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    op          TEXT NOT NULL,
+    key_id      TEXT,
+    addr        TEXT,
+    webauthn    INTEGER NOT NULL DEFAULT 0,
+    latency_ms  INTEGER NOT NULL,
+    success     INTEGER NOT NULL DEFAULT 1,
+    is_panic    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_key ON address_index(key_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_credential ON wallets(credential_id);
+CREATE INDEX IF NOT EXISTS idx_tx_log_created ON tx_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_tx_log_op ON tx_log(op);
 "#;
+
+// ── TX stats ──
+
+#[derive(Debug, Default)]
+pub struct TxStats {
+    pub total_sign: i64,
+    pub daily_sign: i64,
+    pub total_ops: i64,
+    pub daily_ops: i64,
+    pub avg_sign_ms: f64,
+    pub avg_derive_ms: f64,
+    pub panic_count: i64,
+    pub error_count: i64,
+    pub webauthn_count: i64,
+}
 
 // ── Row types ──
 
@@ -404,6 +433,86 @@ impl KmsDb {
             params![current_unix()],
         )?;
         Ok(deleted)
+    }
+
+    // ── TX log ──
+
+    pub fn record_tx(
+        &self, op: &str, key_id: Option<&str>, addr: Option<&str>,
+        webauthn: bool, latency_ms: u64, success: bool, is_panic: bool,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tx_log (op, key_id, addr, webauthn, latency_ms, success, is_panic, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![op, key_id, addr, webauthn as i32, latency_ms as i64,
+                    success as i32, is_panic as i32, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_tx_stats(&self) -> Result<TxStats> {
+        let conn = self.lock();
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today_prefix = format!("{}%", today);
+
+        let total_sign: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let daily_sign: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1 AND created_at LIKE ?1",
+            params![&today_prefix], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_ops: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE success=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let daily_ops: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE success=1 AND created_at LIKE ?1",
+            params![&today_prefix], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let avg_sign_ms: f64 = conn.query_row(
+            "SELECT COALESCE(AVG(latency_ms),0) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0.0);
+
+        let avg_derive_ms: f64 = conn.query_row(
+            "SELECT COALESCE(AVG(latency_ms),0) FROM tx_log WHERE op='DeriveAddress' AND success=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0.0);
+
+        let panic_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE is_panic=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let error_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE success=0",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+
+        let webauthn_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tx_log WHERE webauthn=1 AND success=1",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+
+        Ok(TxStats {
+            total_sign,
+            daily_sign,
+            total_ops,
+            daily_ops,
+            avg_sign_ms,
+            avg_derive_ms,
+            panic_count,
+            error_count,
+            webauthn_count,
+        })
     }
 }
 

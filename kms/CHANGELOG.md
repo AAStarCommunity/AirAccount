@@ -1,6 +1,19 @@
 # KMS Changelog
 
-> Updated: 2026-03-03
+> Updated: 2026-03-12
+
+## 0.16.7 (2026-03-13)
+
+- TX 历史统计（累计/每日 签名数、TEE 操作数、WebAuthn 次数、平均延迟、错误/Panic 计数）
+- SQLite tx_log 表持久化所有 TEE 操作记录
+- Wallet 列表新增 Signs 列（per-key 签名次数）
+
+## 0.16.6 (2026-03-12)
+
+- Stats 页面 Description 字段截断显示（隐私保护）
+- TEE handler 层全面 tx 追踪日志（成功/耗时/webauthn 路径）
+- TA panic 自动识别并标记（`💀 TA PANIC`）
+- Journal 持久化（重启不丢日志）
 
 ## 0.15.22 (2026-03-03)
 

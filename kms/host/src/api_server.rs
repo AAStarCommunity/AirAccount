@@ -386,18 +386,21 @@ pub struct KmsApiServer {
     tee: TeeHandle,
     rate_limiter: RateLimiter,
     rp_name: String,
-    rp_id: String,
+    rp_ids: Vec<String>,
     expected_origins: Vec<String>,
 }
 
 impl KmsApiServer {
     pub fn new(db: KmsDb) -> Self {
-        let rp_id = std::env::var("KMS_RP_ID").unwrap_or_else(|_| "aastar.io".to_string());
+        let rp_ids: Vec<String> = std::env::var("KMS_RP_ID")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| vec!["aastar.io".to_string()]);
         let rp_name = std::env::var("KMS_RP_NAME").unwrap_or_else(|_| "AirAccount KMS".to_string());
         let expected_origins: Vec<String> = std::env::var("KMS_ORIGIN")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec![format!("https://{}", rp_id)]);
+            .unwrap_or_else(|_| vec![format!("https://{}", rp_ids[0])]);
         println!("🌐 Allowed origins: {:?}", expected_origins);
+        println!("🔑 Allowed rpIds: {:?}", rp_ids);
         let rate_limiter = RateLimiter::from_env();
         println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
         Self {
@@ -405,7 +408,7 @@ impl KmsApiServer {
             tee: TeeHandle::new(),
             rate_limiter,
             rp_name,
-            rp_id,
+            rp_ids,
             expected_origins,
         }
     }
@@ -748,7 +751,7 @@ impl KmsApiServer {
                 &wa.credential,
                 &challenge_row.challenge,
                 &self.expected_origins,
-                &self.rp_id,
+                &challenge_row.rp_id,
                 &pk_bytes,
                 w.sign_count,
             )?;
@@ -952,15 +955,38 @@ impl KmsApiServer {
 
     // ── WebAuthn ceremonies ──
 
-    pub async fn begin_registration(&self, req: webauthn::BeginRegistrationRequest) -> Result<webauthn::RegistrationOptionsResponse> {
+    /// Pick rpId from configured KMS_RP_ID list based on caller's HTTP Origin header.
+    /// e.g. origin "http://localhost:5173" → matches "localhost" if in list.
+    /// Falls back to first configured rpId.
+    fn resolve_rp_id(&self, caller_origin: Option<&str>) -> String {
+        if let Some(origin) = caller_origin {
+            let host = origin
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split(':')
+                .next()
+                .unwrap_or("");
+            // Check if any configured rpId matches (exact or suffix)
+            for rp in &self.rp_ids {
+                if host == rp.as_str() || host.ends_with(&format!(".{}", rp)) {
+                    return rp.clone();
+                }
+            }
+        }
+        self.rp_ids[0].clone()
+    }
+
+    pub async fn begin_registration(&self, req: webauthn::BeginRegistrationRequest, origin_header: Option<&str>) -> Result<webauthn::RegistrationOptionsResponse> {
         let user_name = req.user_name.as_deref().unwrap_or("wallet-user");
         let user_display = req.user_display_name.as_deref().unwrap_or("AirAccount Wallet");
+        let rp_id = self.resolve_rp_id(origin_header);
+        println!("🔑 WebAuthn rpId resolved: {} (from origin: {:?})", rp_id, req.origin);
 
         let (challenge_id, challenge_bytes, resp) = webauthn::generate_registration_options(
-            &self.rp_name, &self.rp_id, user_name, user_display, vec![],
+            &self.rp_name, &rp_id, user_name, user_display, vec![],
         );
 
-        self.db.store_challenge(&challenge_id, &challenge_bytes, None, "registration", &self.rp_id, 300)?;
+        self.db.store_challenge(&challenge_id, &challenge_bytes, None, "registration", &rp_id, 300)?;
 
         // Stash description/key_usage/etc in challenge metadata (store as JSON in key_id field)
         let meta_json = serde_json::to_string(&serde_json::json!({
@@ -972,7 +998,7 @@ impl KmsApiServer {
         // Re-store with metadata in key_id field
         self.db.store_challenge(
             &format!("{}_meta", challenge_id),
-            meta_json.as_bytes(), None, "registration_meta", &self.rp_id, 300,
+            meta_json.as_bytes(), None, "registration_meta", &rp_id, 300,
         )?;
 
         println!("📝 WebAuthn BeginRegistration: challenge_id={}", challenge_id);
@@ -1003,9 +1029,10 @@ impl KmsApiServer {
             )
         };
 
-        // 3. Verify attestation
+        // 3. Verify attestation (use rpId from stored challenge, not hardcoded)
+        let rp_id = &challenge_row.rp_id;
         let verified = webauthn::verify_registration_response(
-            &req.credential, &challenge_row.challenge, &self.expected_origins, &self.rp_id,
+            &req.credential, &challenge_row.challenge, &self.expected_origins, rp_id,
         )?;
 
         println!("✅ WebAuthn registration verified, pubkey {} bytes, credential_id {} bytes",
@@ -1063,7 +1090,7 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn begin_authentication(&self, req: webauthn::BeginAuthenticationRequest) -> Result<webauthn::AuthenticationOptionsResponse> {
+    pub async fn begin_authentication(&self, req: webauthn::BeginAuthenticationRequest, origin_header: Option<&str>) -> Result<webauthn::AuthenticationOptionsResponse> {
         // Resolve key_id from KeyId or Address
         let key_id = if let Some(ref kid) = req.key_id {
             kid.clone()
@@ -1088,11 +1115,12 @@ impl KmsApiServer {
             vec![]
         };
 
+        let rp_id = self.resolve_rp_id(origin_header);
         let (challenge_id, challenge_bytes, resp) = webauthn::generate_authentication_options(
-            &self.rp_id, allow_credentials,
+            &rp_id, allow_credentials,
         );
 
-        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(&key_id), "authentication", &self.rp_id, 300)?;
+        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(&key_id), "authentication", &rp_id, 300)?;
 
         println!("📝 WebAuthn BeginAuthentication: challenge_id={}, key_id={}", challenge_id, key_id);
         Ok(resp)
@@ -1103,11 +1131,12 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.4";
+const KMS_VERSION: &str = "0.16.7";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
+    let tx = server.db.get_tx_stats().unwrap_or_default();
     let total = wallets.len();
     let with_addr = wallets.iter().filter(|w| w.address.is_some()).count();
     let with_pk = wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count();
@@ -1123,15 +1152,22 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
+        let masked_desc = if w.description.len() > 8 {
+            format!("{}…", &w.description[..8])
+        } else {
+            w.description.clone()
+        };
         rows.push_str(&format!(
-            "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{created}</td><td>{}</td></tr>\n",
-            short_id, w.status, w.description
+            "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{}</td><td>{created}</td><td>{}</td></tr>\n",
+            short_id, w.status, w.sign_count, masked_desc
         ));
     }
 
     let cb = if qs.circuit_breaker_open.unwrap_or(false) { "OPEN" } else { "closed" };
     let cb_cls = if qs.circuit_breaker_open.unwrap_or(false) { "warn" } else { "ok" };
     let fails = qs.consecutive_failures.unwrap_or(0);
+    let panic_cls = if tx.panic_count > 0 { "warn" } else { "ok" };
+    let error_cls = if tx.error_count > 0 { "warn" } else { "ok" };
 
     format!(r#"<!DOCTYPE html>
 <html lang="en">
@@ -1139,17 +1175,18 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KMS Stats</title>
 <style>
-  body {{ font-family: 'SF Mono','Menlo',monospace; background:#0d1117; color:#c9d1d9; max-width:900px; margin:0 auto; padding:24px; }}
+  body {{ font-family: 'SF Mono','Menlo',monospace; background:#0d1117; color:#c9d1d9; max-width:960px; margin:0 auto; padding:24px; }}
   h1 {{ color:#58a6ff; font-size:1.3em; margin-bottom:4px; }}
+  h2 {{ color:#8b949e; font-size:0.9em; margin:16px 0 8px; text-transform:uppercase; letter-spacing:.05em; }}
   .sub {{ color:#8b949e; font-size:0.85em; margin-bottom:24px; }}
   table {{ width:100%; border-collapse:collapse; margin:12px 0; }}
   th {{ text-align:left; color:#8b949e; font-size:0.8em; border-bottom:1px solid #30363d; padding:6px 10px; }}
   td {{ padding:6px 10px; border-bottom:1px solid #21262d; font-size:0.85em; }}
   .card {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:16px; margin:12px 0; }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }}
   .stat {{ text-align:center; }}
-  .stat .val {{ font-size:1.6em; font-weight:bold; color:#58a6ff; }}
-  .stat .lbl {{ font-size:0.75em; color:#8b949e; }}
+  .stat .val {{ font-size:1.5em; font-weight:bold; color:#58a6ff; }}
+  .stat .lbl {{ font-size:0.72em; color:#8b949e; margin-top:2px; }}
   .ok {{ color:#3fb950; }}
   .warn {{ color:#d29922; }}
   .dim {{ color:#484f58; }}
@@ -1162,6 +1199,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 <h1>AirAccount KMS</h1>
 <div class="sub">v{version} &middot; TA mode: real &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
 
+<h2>Keys</h2>
 <div class="card grid">
   <div class="stat"><div class="val">{total}</div><div class="lbl">Total Keys</div></div>
   <div class="stat"><div class="val ok">{enabled}</div><div class="lbl">Ready</div></div>
@@ -1170,12 +1208,26 @@ fn render_stats_page(server: &KmsApiServer) -> String {
   <div class="stat"><div class="val">{api_keys}</div><div class="lbl">API Keys</div></div>
   <div class="stat"><div class="val">{queue}</div><div class="lbl">Queue Depth</div></div>
   <div class="stat"><div class="val {cb_cls}">{cb}</div><div class="lbl">Circuit Breaker</div></div>
-  <div class="stat"><div class="val">{fails}</div><div class="lbl">Failures</div></div>
+  <div class="stat"><div class="val">{fails}</div><div class="lbl">CB Failures</div></div>
 </div>
 
+<h2>TX History</h2>
+<div class="card grid">
+  <div class="stat"><div class="val">{total_sign}</div><div class="lbl">Total Signed</div></div>
+  <div class="stat"><div class="val">{daily_sign}</div><div class="lbl">Signed Today</div></div>
+  <div class="stat"><div class="val">{total_ops}</div><div class="lbl">Total TEE Ops</div></div>
+  <div class="stat"><div class="val">{daily_ops}</div><div class="lbl">TEE Ops Today</div></div>
+  <div class="stat"><div class="val">{webauthn}</div><div class="lbl">WebAuthn Signed</div></div>
+  <div class="stat"><div class="val">{avg_sign}ms</div><div class="lbl">Avg Sign Latency</div></div>
+  <div class="stat"><div class="val">{avg_derive}ms</div><div class="lbl">Avg Derive Latency</div></div>
+  <div class="stat"><div class="val {error_cls}">{errors}</div><div class="lbl">Errors</div></div>
+  <div class="stat"><div class="val {panic_cls}">{panics}</div><div class="lbl">TA Panics</div></div>
+</div>
+
+<h2>Wallets</h2>
 <div class="card">
 <table>
-<tr><th>KeyId</th><th>Addr</th><th>PassKey</th><th>Status</th><th>Created</th><th>Description</th></tr>
+<tr><th>KeyId</th><th>Addr</th><th>PassKey</th><th>Status</th><th>Signs</th><th>Created</th><th>Description</th></tr>
 {rows}
 </table>
 </div>
@@ -1195,6 +1247,17 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         cb_cls = cb_cls,
         cb = cb,
         fails = fails,
+        total_sign = tx.total_sign,
+        daily_sign = tx.daily_sign,
+        total_ops = tx.total_ops,
+        daily_ops = tx.daily_ops,
+        webauthn = tx.webauthn_count,
+        avg_sign = tx.avg_sign_ms as u64,
+        avg_derive = tx.avg_derive_ms as u64,
+        errors = tx.error_count,
+        error_cls = error_cls,
+        panics = tx.panic_count,
+        panic_cls = panic_cls,
         rows = rows,
     )
 }
@@ -1223,10 +1286,18 @@ async fn handle_create_key(
     body: CreateKeyRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
     match server.create_key(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CreateKey OK {}ms", elapsed);
+            let _ = server.db.record_tx("CreateKey", Some(&response.key_metadata.key_id), None, false, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("CreateKey error: {}", e);
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CreateKey error: {} {}ms", e, elapsed);
+            let _ = server.db.record_tx("CreateKey", None, None, false, elapsed as u64, false, false);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -1262,11 +1333,23 @@ async fn handle_derive_address(
     body: DeriveAddressRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.derive_address(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ DeriveAddress OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("DeriveAddress error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}DeriveAddress error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, false, is_panic);
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1275,11 +1358,24 @@ async fn handle_sign(
     body: SignRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let addr = body.address.clone().unwrap_or_default();
+    let path = body.webauthn.is_some();
+    let t0 = std::time::Instant::now();
     match server.sign(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ Sign OK addr={} webauthn={} {}ms", addr, path, elapsed);
+            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("Sign error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}Sign error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
+            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, false, is_panic);
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1288,11 +1384,24 @@ async fn handle_sign_hash(
     body: SignHashRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let addr = body.address.clone().unwrap_or_default();
+    let path = body.webauthn.is_some();
+    let t0 = std::time::Instant::now();
     match server.sign_hash(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignHash OK addr={} webauthn={} {}ms", addr, path, elapsed);
+            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("SignHash error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}SignHash error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
+            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, false, is_panic);
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1315,11 +1424,23 @@ async fn handle_delete_key(
     body: DeleteKeyRequest,
     server: Arc<KmsApiServer>
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.delete_key(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ DeleteKey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("ScheduleKeyDeletion error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}DeleteKey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, false, is_panic);
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1328,11 +1449,23 @@ async fn handle_change_passkey(
     body: ChangePasskeyRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
     match server.change_passkey(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ ChangePasskey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("ChangePasskey error: {}", e);
-            Err(warp::reject::custom(ApiError(e.to_string())))
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
+            eprintln!("{}ChangePasskey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, false, is_panic);
+            Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
@@ -1340,8 +1473,9 @@ async fn handle_change_passkey(
 async fn handle_begin_registration(
     body: webauthn::BeginRegistrationRequest,
     server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_registration(body).await {
+    match server.begin_registration(body, origin_header.as_deref()).await {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginRegistration error: {}", e);
@@ -1354,10 +1488,18 @@ async fn handle_complete_registration(
     body: webauthn::CompleteRegistrationRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
     match server.complete_registration(body).await {
-        Ok(response) => Ok(warp::reply::json(&response)),
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CompleteRegistration OK {}ms", elapsed);
+            let _ = server.db.record_tx("Registration", Some(&response.key_id), None, true, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
         Err(e) => {
-            eprintln!("CompleteRegistration error: {}", e);
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CompleteRegistration error: {} {}ms", e, elapsed);
+            let _ = server.db.record_tx("Registration", None, None, true, elapsed as u64, false, false);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -1366,8 +1508,9 @@ async fn handle_complete_registration(
 async fn handle_begin_authentication(
     body: webauthn::BeginAuthenticationRequest,
     server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_authentication(body).await {
+    match server.begin_authentication(body, origin_header.as_deref()).await {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginAuthentication error: {}", e);
@@ -1716,6 +1859,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(api_key_filter.clone())
         .and(aws_kms_body())
         .and(warp::any().map(move || server_br.clone()))
+        .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_registration);
 
     // WebAuthn: CompleteRegistration
@@ -1734,6 +1878,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(api_key_filter.clone())
         .and(aws_kms_body())
         .and(warp::any().map(move || server_ba.clone()))
+        .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_authentication);
 
     let routes = index
