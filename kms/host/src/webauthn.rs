@@ -647,7 +647,8 @@ mod tests {
             client_extension_results: serde_json::Value::Object(Default::default()),
         };
         let result = verify_registration_response(
-            &fake_response, b"wrong-challenge", "https://example.com", "example.com",
+            &fake_response, b"wrong-challenge",
+            &["https://example.com".to_string()], "example.com",
         );
         assert!(result.is_err());
     }
