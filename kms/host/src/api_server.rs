@@ -1131,11 +1131,12 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.6";
+const KMS_VERSION: &str = "0.16.7";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
+    let tx = server.db.get_tx_stats().unwrap_or_default();
     let total = wallets.len();
     let with_addr = wallets.iter().filter(|w| w.address.is_some()).count();
     let with_pk = wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count();
@@ -1157,14 +1158,16 @@ fn render_stats_page(server: &KmsApiServer) -> String {
             w.description.clone()
         };
         rows.push_str(&format!(
-            "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{created}</td><td>{}</td></tr>\n",
-            short_id, w.status, masked_desc
+            "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{}</td><td>{created}</td><td>{}</td></tr>\n",
+            short_id, w.status, w.sign_count, masked_desc
         ));
     }
 
     let cb = if qs.circuit_breaker_open.unwrap_or(false) { "OPEN" } else { "closed" };
     let cb_cls = if qs.circuit_breaker_open.unwrap_or(false) { "warn" } else { "ok" };
     let fails = qs.consecutive_failures.unwrap_or(0);
+    let panic_cls = if tx.panic_count > 0 { "warn" } else { "ok" };
+    let error_cls = if tx.error_count > 0 { "warn" } else { "ok" };
 
     format!(r#"<!DOCTYPE html>
 <html lang="en">
@@ -1172,17 +1175,18 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KMS Stats</title>
 <style>
-  body {{ font-family: 'SF Mono','Menlo',monospace; background:#0d1117; color:#c9d1d9; max-width:900px; margin:0 auto; padding:24px; }}
+  body {{ font-family: 'SF Mono','Menlo',monospace; background:#0d1117; color:#c9d1d9; max-width:960px; margin:0 auto; padding:24px; }}
   h1 {{ color:#58a6ff; font-size:1.3em; margin-bottom:4px; }}
+  h2 {{ color:#8b949e; font-size:0.9em; margin:16px 0 8px; text-transform:uppercase; letter-spacing:.05em; }}
   .sub {{ color:#8b949e; font-size:0.85em; margin-bottom:24px; }}
   table {{ width:100%; border-collapse:collapse; margin:12px 0; }}
   th {{ text-align:left; color:#8b949e; font-size:0.8em; border-bottom:1px solid #30363d; padding:6px 10px; }}
   td {{ padding:6px 10px; border-bottom:1px solid #21262d; font-size:0.85em; }}
   .card {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:16px; margin:12px 0; }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }}
   .stat {{ text-align:center; }}
-  .stat .val {{ font-size:1.6em; font-weight:bold; color:#58a6ff; }}
-  .stat .lbl {{ font-size:0.75em; color:#8b949e; }}
+  .stat .val {{ font-size:1.5em; font-weight:bold; color:#58a6ff; }}
+  .stat .lbl {{ font-size:0.72em; color:#8b949e; margin-top:2px; }}
   .ok {{ color:#3fb950; }}
   .warn {{ color:#d29922; }}
   .dim {{ color:#484f58; }}
@@ -1195,6 +1199,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 <h1>AirAccount KMS</h1>
 <div class="sub">v{version} &middot; TA mode: real &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
 
+<h2>Keys</h2>
 <div class="card grid">
   <div class="stat"><div class="val">{total}</div><div class="lbl">Total Keys</div></div>
   <div class="stat"><div class="val ok">{enabled}</div><div class="lbl">Ready</div></div>
@@ -1203,12 +1208,26 @@ fn render_stats_page(server: &KmsApiServer) -> String {
   <div class="stat"><div class="val">{api_keys}</div><div class="lbl">API Keys</div></div>
   <div class="stat"><div class="val">{queue}</div><div class="lbl">Queue Depth</div></div>
   <div class="stat"><div class="val {cb_cls}">{cb}</div><div class="lbl">Circuit Breaker</div></div>
-  <div class="stat"><div class="val">{fails}</div><div class="lbl">Failures</div></div>
+  <div class="stat"><div class="val">{fails}</div><div class="lbl">CB Failures</div></div>
 </div>
 
+<h2>TX History</h2>
+<div class="card grid">
+  <div class="stat"><div class="val">{total_sign}</div><div class="lbl">Total Signed</div></div>
+  <div class="stat"><div class="val">{daily_sign}</div><div class="lbl">Signed Today</div></div>
+  <div class="stat"><div class="val">{total_ops}</div><div class="lbl">Total TEE Ops</div></div>
+  <div class="stat"><div class="val">{daily_ops}</div><div class="lbl">TEE Ops Today</div></div>
+  <div class="stat"><div class="val">{webauthn}</div><div class="lbl">WebAuthn Signed</div></div>
+  <div class="stat"><div class="val">{avg_sign}ms</div><div class="lbl">Avg Sign Latency</div></div>
+  <div class="stat"><div class="val">{avg_derive}ms</div><div class="lbl">Avg Derive Latency</div></div>
+  <div class="stat"><div class="val {error_cls}">{errors}</div><div class="lbl">Errors</div></div>
+  <div class="stat"><div class="val {panic_cls}">{panics}</div><div class="lbl">TA Panics</div></div>
+</div>
+
+<h2>Wallets</h2>
 <div class="card">
 <table>
-<tr><th>KeyId</th><th>Addr</th><th>PassKey</th><th>Status</th><th>Created</th><th>Description</th></tr>
+<tr><th>KeyId</th><th>Addr</th><th>PassKey</th><th>Status</th><th>Signs</th><th>Created</th><th>Description</th></tr>
 {rows}
 </table>
 </div>
@@ -1228,6 +1247,17 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         cb_cls = cb_cls,
         cb = cb,
         fails = fails,
+        total_sign = tx.total_sign,
+        daily_sign = tx.daily_sign,
+        total_ops = tx.total_ops,
+        daily_ops = tx.daily_ops,
+        webauthn = tx.webauthn_count,
+        avg_sign = tx.avg_sign_ms as u64,
+        avg_derive = tx.avg_derive_ms as u64,
+        errors = tx.error_count,
+        error_cls = error_cls,
+        panics = tx.panic_count,
+        panic_cls = panic_cls,
         rows = rows,
     )
 }
@@ -1259,11 +1289,15 @@ async fn handle_create_key(
     let t0 = std::time::Instant::now();
     match server.create_key(body).await {
         Ok(response) => {
-            println!("✅ CreateKey OK {}ms", t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CreateKey OK {}ms", elapsed);
+            let _ = server.db.record_tx("CreateKey", Some(&response.key_metadata.key_id), None, false, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
-            eprintln!("CreateKey error: {} {}ms", e, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CreateKey error: {} {}ms", e, elapsed);
+            let _ = server.db.record_tx("CreateKey", None, None, false, elapsed as u64, false, false);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -1303,14 +1337,18 @@ async fn handle_derive_address(
     let t0 = std::time::Instant::now();
     match server.derive_address(body).await {
         Ok(response) => {
-            println!("✅ DeriveAddress OK key={} {}ms", key, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ DeriveAddress OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
             eprintln!("{}DeriveAddress error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, false, is_panic);
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -1325,14 +1363,18 @@ async fn handle_sign(
     let t0 = std::time::Instant::now();
     match server.sign(body).await {
         Ok(response) => {
-            println!("✅ Sign OK addr={} webauthn={} {}ms", addr, path, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ Sign OK addr={} webauthn={} {}ms", addr, path, elapsed);
+            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
             eprintln!("{}Sign error: {} addr={} webauthn={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, t0.elapsed().as_millis());
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
+            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, false, is_panic);
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -1347,14 +1389,18 @@ async fn handle_sign_hash(
     let t0 = std::time::Instant::now();
     match server.sign_hash(body).await {
         Ok(response) => {
-            println!("✅ SignHash OK addr={} webauthn={} {}ms", addr, path, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignHash OK addr={} webauthn={} {}ms", addr, path, elapsed);
+            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
             eprintln!("{}SignHash error: {} addr={} webauthn={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, t0.elapsed().as_millis());
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
+            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, false, is_panic);
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -1382,14 +1428,18 @@ async fn handle_delete_key(
     let t0 = std::time::Instant::now();
     match server.delete_key(body).await {
         Ok(response) => {
-            println!("✅ DeleteKey OK key={} {}ms", key, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ DeleteKey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
             eprintln!("{}DeleteKey error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, false, is_panic);
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -1403,14 +1453,18 @@ async fn handle_change_passkey(
     let t0 = std::time::Instant::now();
     match server.change_passkey(body).await {
         Ok(response) => {
-            println!("✅ ChangePasskey OK key={} {}ms", key, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ ChangePasskey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
             eprintln!("{}ChangePasskey error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, t0.elapsed().as_millis());
+                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
+            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, false, is_panic);
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -1437,11 +1491,15 @@ async fn handle_complete_registration(
     let t0 = std::time::Instant::now();
     match server.complete_registration(body).await {
         Ok(response) => {
-            println!("✅ CompleteRegistration OK {}ms", t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CompleteRegistration OK {}ms", elapsed);
+            let _ = server.db.record_tx("Registration", Some(&response.key_id), None, true, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
-            eprintln!("CompleteRegistration error: {} {}ms", e, t0.elapsed().as_millis());
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CompleteRegistration error: {} {}ms", e, elapsed);
+            let _ = server.db.record_tx("Registration", None, None, true, elapsed as u64, false, false);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
