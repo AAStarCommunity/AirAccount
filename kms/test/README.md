@@ -1,13 +1,31 @@
 # KMS Test Suite
 
-Updated: 2026-03-03
+Updated: 2026-03-04
+
+## Environment Setup
+
+复制 `.env` 并填入 API Key（**已在 .gitignore，不会提交**）：
+```bash
+# kms/test/.env 已存在模板，按需修改
+cat kms/test/.env
+# KMS_HOST=192.168.7.2:3000
+# KMS_API_KEY=kms_xxxx...
+
+# 所有测试脚本自动加载 .env，无需手动 source/export
+./run-api-tests.sh     # 自动读取 .env 中的 KMS_HOST 和 KMS_API_KEY
+./perf-test.sh         # 同上
+```
+
+也可以手动覆盖：
+```bash
+KMS_API_KEY=xxx ./run-api-tests.sh 192.168.7.2:3000
+```
 
 ## Production Environment
 
 | Item | Value |
 |------|-------|
-| Endpoint | `https://kms1.aastar.io` |
-| API Key | `kms_****（run `api-key list` on DK2 to get key）` |
+| Endpoint | `https://kms1.aastar.io` (v0.16.5) |
 | Board | STM32MP157F-DK2 (Cortex-A7 650MHz) |
 | TA Mode | Real OP-TEE Secure World |
 
@@ -17,10 +35,11 @@ Updated: 2026-03-03
 # Health check (no auth)
 curl https://kms1.aastar.io/health
 
-# List wallets (requires API key)
+# List wallets (requires API key from .env)
+source .env
 curl -X POST https://kms1.aastar.io/ListKeys \
   -H "Content-Type: application/json" \
-  -H "x-api-key: kms_****（run `api-key list` on DK2 to get key）" \
+  -H "x-api-key: $KMS_API_KEY" \
   -H "x-amz-target: TrentService.ListKeys" \
   -d '{}'
 ```

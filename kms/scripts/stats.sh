@@ -9,7 +9,10 @@
 
 set -eo pipefail
 
-HOST="${1:-192.168.7.2:3000}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Auto-load .env from test/ if present (KMS_HOST, KMS_API_KEY, etc.)
+[ -f "$SCRIPT_DIR/../test/.env" ] && set -a && source "$SCRIPT_DIR/../test/.env" && set +a
+HOST="${1:-${KMS_HOST:-192.168.7.2:3000}}"
 BASE="http://$HOST"
 API_KEY="${KMS_API_KEY:-}"
 BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -76,7 +79,8 @@ has_addr = 1 if addr and addr != '' else 0
 has_pk = 1 if pk and pk != '' else 0
 en = 1 if enabled else 0
 # short_id | has_addr | has_passkey | enabled | created | description
-print(f'{m.get(\"KeyId\",\"?\")[:8]}|{has_addr}|{has_pk}|{en}|{created}|{desc}')
+masked = (desc[:8] + '…') if len(desc) > 8 else desc
+print(f'{m.get(\"KeyId\",\"?\")[:8]}|{has_addr}|{has_pk}|{en}|{created}|{masked}')
 ")
     IFS='|' read -r SHORT HAS_ADDR HAS_PK ENABLED CREATED DESC_TEXT <<< "$META"
     if [ "$HAS_ADDR" = "1" ]; then KEYS_WITH_ADDR=$((KEYS_WITH_ADDR+1)); fi
