@@ -1131,7 +1131,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.7";
+const KMS_VERSION: &str = "0.16.8";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -1557,6 +1557,9 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
             warp::http::StatusCode::UNAUTHORIZED
         } else if api_error.0.contains("circuit breaker") {
             warp::http::StatusCode::SERVICE_UNAVAILABLE
+        } else if api_error.0.contains("0xffff") || api_error.0.contains("panicked") || api_error.0.contains("TEE error") {
+            // TA / TEE errors are server-side faults, not bad requests
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR
         } else {
             warp::http::StatusCode::BAD_REQUEST
         };

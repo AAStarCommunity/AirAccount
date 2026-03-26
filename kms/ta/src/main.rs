@@ -149,16 +149,22 @@ fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
 
 /// Load wallet + ensure seed cached.
 /// On cache hit with seed already cached: ZERO secure storage I/O.
+///
+/// IMPORTANT: We intentionally do NOT call db.put here, even if the seed
+/// was just computed. OP-TEE secure storage syscalls corrupt the TLS register,
+/// and any thread_local access (including WALLET_CACHE) after db.put will panic.
+/// Since load_wallet_cached is always followed by verify_passkey_for_wallet
+/// (which may use TLS-backed allocators), we must never call db.put in this path.
+/// Seed persistence is handled exclusively by derive_address_auto.
 fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     // Fast path: cache hit
     if let Some(mut w) = cache_get(wallet_id) {
         let changed = w.ensure_seed_cached()?;
-        if !changed {
-            return Ok(w);
+        if changed {
+            // Update in-memory cache only — NO db.put (would corrupt TLS)
+            trace_println!("[!] load_wallet_cached: cold seed computed for {:?}, memory-only cache", wallet_id);
+            cache_put(&w);
         }
-        // Seed was just computed — persist to storage
-        let db = SecureStorageClient::open(DB_NAME)?;
-        save_wallet(&db, &w)?;
         return Ok(w);
     }
 
@@ -169,10 +175,10 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
     let changed = w.ensure_seed_cached()?;
     if changed {
-        save_wallet(&db, &w)?;
-    } else {
-        cache_put(&w);
+        trace_println!("[!] load_wallet_cached: cold seed from storage for {:?}, memory-only cache", wallet_id);
     }
+    // Always cache in memory (NO db.put — avoids TLS corruption in signing path)
+    cache_put(&w);
     Ok(w)
 }
 
