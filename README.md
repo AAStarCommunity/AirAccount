@@ -296,3 +296,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ---
 
 **🚀 Try it now**: https://atom-become-ireland-travels.trycloudflare.com/health
+
+## License
+
+Licensed under the [Apache License, Version 2.0](https://opensource.org/licenses/Apache-2.0). See [LICENSE](./LICENSE) for details.
+
