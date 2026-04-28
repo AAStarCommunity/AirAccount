@@ -296,3 +296,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ---
 
 **🚀 Try it now**: https://atom-become-ireland-travels.trycloudflare.com/health
+
+## License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE).  
+Copyright 2024-present MushroomDAO Contributors. See [NOTICE](./NOTICE) for attribution.
