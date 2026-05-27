@@ -31,6 +31,7 @@ path = "src/api_server.rs"
 [[bin]]
 name = "export_key"
 path = "src/bin/export_key.rs"
+required-features = ["export-secrets"]
 
 [[bin]]
 name = "api-key"
@@ -43,6 +44,9 @@ path = "src/bin/kms_admin.rs"
 [features]
 default = ["tee"]
 tee = ["optee-teec"]
+# DEV/TEST ONLY — gates mnemonic export and passkey-less ExportPrivateKey CLI.
+# Never enable in production builds or CI release pipelines.
+export-secrets = []
 
 [dependencies]
 proto = { path = "../proto" }

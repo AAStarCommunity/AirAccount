@@ -217,6 +217,11 @@ pub struct SignAgentUserOpInput {
     pub wallet_id: Uuid,
     pub agent_index: u32,
     pub user_op_hash: [u8; 32],
+    /// JWT authorization proof verified inside TEE (defense-in-depth against compromised CA).
+    /// Fields extracted from the agent Bearer JWT by the host before calling TA.
+    pub jwt_kid: String,
+    pub jwt_signing_input: Vec<u8>,  // b64url(header).b64url(payload) bytes
+    pub jwt_hmac: Vec<u8>,           // 32 bytes — HMAC-SHA256 from JWT signature field
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

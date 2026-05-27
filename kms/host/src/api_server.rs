@@ -1230,10 +1230,14 @@ impl KmsApiServer {
         let _wallet = self.db.get_wallet(&req.human_key_id)?
             .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
 
-        // Resolve WebAuthn passkey assertion (required)
+        // Agent operations MUST use WebAuthn ceremony (challenge-based) to prevent replay attacks.
+        // Legacy raw passkey assertions lack challenge/origin binding and can be replayed.
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("create-agent-key requires WebAuthn ceremony (BeginAuthentication flow). Legacy passkey assertions are not accepted for agent operations."));
+        }
         let assertion = self.resolve_passkey_assertion(
             &req.human_key_id,
-            req.passkey_assertion.as_ref(),
+            None,  // reject legacy path
             req.webauthn_assertion.as_ref(),
         ).await?;
         if assertion.is_none() {
@@ -1315,8 +1319,15 @@ impl KmsApiServer {
         // Validate userOpHash (exactly 32 bytes)
         let user_op_hash = Self::validate_hash_hex(&req.payload)?;
 
-        // Sign in TEE — EIP-191 prefix applied inside TEE, V normalized to 27/28
-        let sig_bytes = self.tee.sign_agent_user_op(wallet_uuid, agent_index, &user_op_hash).await?;
+        // Extract JWT proof for TA-side authorization (defense-in-depth)
+        let (jwt_kid, jwt_signing_input, jwt_hmac) = agent_jwt::extract_signing_proof(&bearer_jwt)
+            .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+
+        // Sign in TEE — TA re-verifies JWT HMAC before signing; EIP-191 inside TEE; V=27/28
+        let sig_bytes = self.tee.sign_agent_user_op(
+            wallet_uuid, agent_index, &user_op_hash,
+            jwt_kid, jwt_signing_input, jwt_hmac,
+        ).await?;
 
         println!("✅ SignAgent: wallet={} idx={} addr={}", wallet_id_str, agent_index, agent_key.agent_address);
 
@@ -1338,10 +1349,13 @@ impl KmsApiServer {
             return Err(anyhow!("keyId does not match agent credential"));
         }
 
-        // Require WebAuthn passkey (human re-authentication)
+        // Require WebAuthn ceremony for replay protection (no legacy passkey path)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("refresh-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
+        }
         let assertion = self.resolve_passkey_assertion(
             &wallet_id_str,
-            req.passkey_assertion.as_ref(),
+            None,  // reject legacy path
             req.webauthn_assertion.as_ref(),
         ).await?;
         if assertion.is_none() {
@@ -1384,10 +1398,13 @@ impl KmsApiServer {
         let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
         let wallet_id_str = wallet_uuid.to_string();
 
-        // Require WebAuthn passkey
+        // Require WebAuthn ceremony for replay protection (no legacy passkey path)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("revoke-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
+        }
         let assertion = self.resolve_passkey_assertion(
             &wallet_id_str,
-            req.passkey_assertion.as_ref(),
+            None,  // reject legacy path
             req.webauthn_assertion.as_ref(),
         ).await?;
         if assertion.is_none() {

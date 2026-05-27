@@ -400,7 +400,13 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
     let mut wallet = Wallet::new()?;
     wallet.set_passkey(input.passkey_pubkey.clone());
     let wallet_id = wallet.get_id();
+
+    // Mnemonic never crosses TEE boundary in production.
+    // Only populated with the export-secrets feature (dev/test).
+    #[cfg(feature = "export-secrets")]
     let mnemonic = wallet.get_mnemonic()?;
+    #[cfg(not(feature = "export-secrets"))]
+    let mnemonic = String::new();
 
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
@@ -505,12 +511,20 @@ fn export_private_key(
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
-    // CLI admin mode: None assertion = skip passkey verify
-    // API mode (if re-enabled): assertion provided = verify
-    if input.passkey_assertion.is_some() {
+    // In production builds, passkey assertion is ALWAYS required.
+    // The passkey-less admin bypass is only allowed with the export-secrets feature (dev/test).
+    #[cfg(feature = "export-secrets")]
+    {
+        if input.passkey_assertion.is_some() {
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+        } else {
+            dbg_println!("[+] ExportPrivateKey: dev admin mode (no passkey assertion)");
+        }
+    }
+    #[cfg(not(feature = "export-secrets"))]
+    {
+        // Production: always require passkey, no bypass
         verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
-    } else {
-        dbg_println!("[+] ExportPrivateKey: admin mode (no passkey assertion)");
     }
 
     let private_key = wallet.export_private_key(&input.derivation_path)?;
@@ -589,6 +603,18 @@ fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::Sign
         input.wallet_id,
         input.agent_index
     );
+
+    // TA-side JWT authorization: verify HMAC proof before signing.
+    // Prevents a compromised CA from bypassing host-side JWT verification.
+    let jwt_verify_input = proto::JwtHmacVerifyInput {
+        kid: input.jwt_kid.clone(),
+        message: input.jwt_signing_input.clone(),
+        expected_hmac: input.jwt_hmac.clone(),
+    };
+    let verify_result = jwt_hmac_verify(&jwt_verify_input)?;
+    if !verify_result.valid {
+        return Err(anyhow!("TA: agent JWT credential verification failed"));
+    }
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
     let derivation_path = agent_derivation_path(input.agent_index);
