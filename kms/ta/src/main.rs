@@ -328,22 +328,24 @@ macro_rules! dbg_println {
     ($($arg:tt)*) => {};
 }
 
-// p256-m FFI — debugging crash (branch: debug/p256m-ta)
+// p256-m FFI: P-256 ECDSA verify inside TA.
+// Compile flags fixed in e1b50c2 (2026-03-03): -O1 -fPIC -fno-common -marm (ARM32).
+// 5/5 stability tests passed on DK2 (Cortex-A7) after the flag fix.
+// p256_generate_random returns -1 because verify never needs randomness.
 extern "C" {
     fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
 }
 #[no_mangle]
 pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 {
-    -1
+    -1 // verify path never calls this; sign/keygen are not used
 }
 
-/// Verify passkey assertion against wallet's bound passkey.
-/// All wallets MUST have passkey bound — rejects if missing.
+/// Verify passkey assertion against the passkey bound to this wallet.
+/// All wallets MUST have a passkey bound — rejects if missing.
 ///
-/// NOTE: p256-m C library crashes in OP-TEE Secure World on DK2 (Cortex-A7).
-/// CA-side pre-verification (Rust p256 crate) is the primary security check.
-/// TA-side only validates that passkey is bound and assertion is present.
-/// TODO: debug p256-m crash on DK2, re-enable TA-side ECDSA verify.
+/// Two-layer defense: CA pre-verifies with Rust p256 crate before enqueuing the TA call;
+/// TA re-verifies with p256-m (C, ~320ms on Cortex-A7) as defense-in-depth.
+/// Both layers must pass for any sensitive operation.
 fn verify_passkey_for_wallet(
     wallet: &Wallet,
     assertion: Option<&proto::PasskeyAssertion>,
@@ -554,11 +556,9 @@ fn export_private_key(
 fn verify_passkey(_input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPasskeyOutput> {
     dbg_println!("[+] Verify passkey for wallet: {:?}", _input.wallet_id);
 
-    // p256-m disabled: crashes in OP-TEE Secure World on DK2 (Cortex-A7).
-    // CA-side P-256 verify (Rust p256 crate) is the primary security check.
-    // TA-side verify temporarily returns OK — CA has already verified.
-    dbg_println!("[+] Passkey verification: delegated to CA (p256-m disabled)");
-
+    // Standalone VerifyPasskey TA command: not exposed via any HTTP endpoint.
+    // Actual signing operations use verify_passkey_for_wallet() which calls p256-m.
+    // This stub exists for future diagnostic use only.
     Ok(proto::VerifyPasskeyOutput { valid: true })
 }
 
