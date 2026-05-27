@@ -24,17 +24,24 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{Error, ErrorKind, Parameters};
+use optee_utee::{Error, ErrorKind, Parameters, Random};
 use proto::Command;
-use secure_db::SecureStorageClient;
+use secure_db::{SecureStorageClient, Storable};
 
 use anyhow::{anyhow, bail, Result};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use sha3::{Digest, Keccak256};
 use std::cell::RefCell;
 use std::io::Write;
 use uuid::Uuid;
 use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
+const JWT_SECRET_STORE_ID: &str = "jwt_hmac";
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ========================================
 // LRU Wallet Cache (TA is single-threaded)
@@ -116,6 +123,88 @@ impl WalletLruCache {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct JwtSecretEntry {
+    kid: String,
+    secret: Vec<u8>,
+    current: bool,
+    retired_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct JwtSecretStore {
+    id: String,
+    entries: Vec<JwtSecretEntry>,
+}
+
+impl Storable for JwtSecretStore {
+    type Key = String;
+
+    fn unique_id(&self) -> Self::Key {
+        self.id.clone()
+    }
+}
+
+impl JwtSecretStore {
+    fn new() -> Self {
+        Self {
+            id: JWT_SECRET_STORE_ID.to_string(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn load(db: &SecureStorageClient) -> Self {
+        db.get::<JwtSecretStore>(&JWT_SECRET_STORE_ID.to_string())
+            .unwrap_or_else(|_| Self::new())
+    }
+
+    fn save(&self, db: &SecureStorageClient) -> Result<()> {
+        db.put(self)
+    }
+
+    fn current(&self) -> Option<&JwtSecretEntry> {
+        self.entries.iter().find(|entry| entry.current)
+    }
+
+    fn find(&self, kid: &str) -> Option<&JwtSecretEntry> {
+        self.entries.iter().find(|entry| entry.kid == kid)
+    }
+
+    fn ensure_current(&mut self) -> Result<&JwtSecretEntry> {
+        if self.current().is_none() {
+            self.rotate()?;
+        }
+        self.current()
+            .ok_or_else(|| anyhow!("JWT HMAC secret store has no current secret"))
+    }
+
+    fn rotate(&mut self) -> Result<(String, Option<String>)> {
+        let retired_kid = self.current().map(|entry| entry.kid.clone());
+        for entry in self.entries.iter_mut() {
+            if entry.current {
+                entry.current = false;
+                entry.retired_at = Some(0);
+            }
+        }
+
+        let mut secret = vec![0u8; 32];
+        Random::generate(secret.as_mut_slice());
+
+        let mut kid_bytes = [0u8; 8];
+        Random::generate(&mut kid_bytes);
+        let kid = format!("v{}", hex::encode(kid_bytes));
+
+        self.entries.push(JwtSecretEntry {
+            kid: kid.clone(),
+            secret,
+            current: true,
+            retired_at: None,
+        });
+
+        Ok((kid, retired_kid))
+    }
+}
+
 thread_local! {
     static WALLET_CACHE: RefCell<WalletLruCache> = RefCell::new(WalletLruCache::new());
 }
@@ -162,7 +251,10 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         let changed = w.ensure_seed_cached()?;
         if changed {
             // Update in-memory cache only — NO db.put (would corrupt TLS)
-            trace_println!("[!] load_wallet_cached: cold seed computed for {:?}, memory-only cache", wallet_id);
+            trace_println!(
+                "[!] load_wallet_cached: cold seed computed for {:?}, memory-only cache",
+                wallet_id
+            );
             cache_put(&w);
         }
         return Ok(w);
@@ -175,7 +267,10 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
     let changed = w.ensure_seed_cached()?;
     if changed {
-        trace_println!("[!] load_wallet_cached: cold seed from storage for {:?}, memory-only cache", wallet_id);
+        trace_println!(
+            "[!] load_wallet_cached: cold seed from storage for {:?}, memory-only cache",
+            wallet_id
+        );
     }
     // Always cache in memory (NO db.put — avoids TLS corruption in signing path)
     cache_put(&w);
@@ -467,6 +562,116 @@ fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOut
     })
 }
 
+fn agent_derivation_path(agent_index: u32) -> String {
+    format!("m/44'/60'/0'/1/{}", agent_index)
+}
+
+fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
+    dbg_println!(
+        "[+] Create agent key for wallet: {:?}, agent_index: {}",
+        input.wallet_id,
+        input.agent_index
+    );
+
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    let derivation_path = agent_derivation_path(input.agent_index);
+    let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
+
+    Ok(proto::CreateAgentKeyOutput {
+        agent_address,
+        public_key_compressed,
+    })
+}
+
+fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::SignAgentUserOpOutput> {
+    dbg_println!(
+        "[+] Sign agent user op for wallet: {:?}, agent_index: {}",
+        input.wallet_id,
+        input.agent_index
+    );
+
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    let derivation_path = agent_derivation_path(input.agent_index);
+    let private_key = wallet.export_private_key(&derivation_path)?;
+
+    let mut eip191 = b"\x19Ethereum Signed Message:\n32".to_vec();
+    eip191.extend_from_slice(&input.user_op_hash);
+    let digest = Keccak256::digest(&eip191);
+
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let message = secp256k1::Message::from_slice(&digest[..])?;
+    let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignAgentUserOpOutput { signature })
+}
+
+fn hmac_sha256(secret: &[u8], message: &[u8]) -> Result<[u8; 32]> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| anyhow!("Invalid JWT HMAC secret"))?;
+    mac.update(message);
+    let bytes = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let current = store.ensure_current()?.clone();
+    store.save(&db)?;
+
+    Ok(proto::JwtHmacSignOutput {
+        hmac: hmac_sha256(&current.secret, &input.message)?,
+        kid: current.kid,
+    })
+}
+
+fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let store = JwtSecretStore::load(&db);
+    let valid = match store.find(&input.kid) {
+        Some(entry) => {
+            let mut mac = HmacSha256::new_from_slice(&entry.secret)
+                .map_err(|_| anyhow!("Invalid JWT HMAC secret"))?;
+            mac.update(&input.message);
+            mac.verify_slice(&input.expected_hmac).is_ok()
+        }
+        None => false,
+    };
+
+    Ok(proto::JwtHmacVerifyOutput { valid })
+}
+
+fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRotateSecretOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let had_current = store.current().is_some();
+
+    if !input.force && !had_current {
+        let current = store.ensure_current()?.clone();
+        store.save(&db)?;
+        return Ok(proto::JwtRotateSecretOutput {
+            new_kid: current.kid,
+            retired_kid: None,
+        });
+    }
+
+    let (new_kid, retired_kid) = store.rotate()?;
+    store.save(&db)?;
+
+    Ok(proto::JwtRotateSecretOutput {
+        new_kid,
+        retired_kid,
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -490,6 +695,11 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::VerifyPasskey => process(serialized_input, verify_passkey),
         Command::WarmupCache => process(serialized_input, warmup_cache),
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
+        Command::CreateAgentKey => process(serialized_input, create_agent_key),
+        Command::SignAgentUserOp => process(serialized_input, sign_agent_user_op),
+        Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
+        Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
+        Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
         _ => bail!("Unsupported command"),
     }
 }

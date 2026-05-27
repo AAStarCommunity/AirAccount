@@ -3,11 +3,11 @@
 //! All wallet metadata, address index, and WebAuthn challenges are stored here.
 //! If the DB is lost, wallets can be recovered from TA secure storage.
 
-use anyhow::{Result, Context};
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result};
+use chrono::Utc;
+use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use chrono::Utc;
 
 const DEFAULT_DB_PATH: &str = "/root/shared/kms.db";
 
@@ -69,11 +69,39 @@ CREATE TABLE IF NOT EXISTS tx_log (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_keys (
+    wallet_id               TEXT NOT NULL,
+    agent_index             INTEGER NOT NULL,
+    human_id                TEXT NOT NULL,
+    agent_address           TEXT NOT NULL,
+    public_key_compressed   TEXT NOT NULL,
+    credential_hash         TEXT,
+    credential_jwt          TEXT,
+    credential_expires_at   INTEGER,
+    status                  TEXT NOT NULL DEFAULT 'active',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    revoked_at              TEXT,
+    PRIMARY KEY (wallet_id, agent_index),
+    FOREIGN KEY (wallet_id) REFERENCES wallets(key_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS jwt_secret_meta (
+    kid          TEXT PRIMARY KEY,
+    status       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    retired_at   TEXT,
+    expires_at   INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_key ON address_index(key_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_credential ON wallets(credential_id);
 CREATE INDEX IF NOT EXISTS idx_tx_log_created ON tx_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_tx_log_op ON tx_log(op);
+CREATE INDEX IF NOT EXISTS idx_agent_keys_human ON agent_keys(human_id);
+CREATE INDEX IF NOT EXISTS idx_agent_keys_address ON agent_keys(agent_address);
+CREATE INDEX IF NOT EXISTS idx_jwt_secret_meta_status ON jwt_secret_meta(status);
 "#;
 
 // ── TX stats ──
@@ -130,6 +158,31 @@ pub struct ChallengeRow {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentKeyRow {
+    pub wallet_id: String,
+    pub agent_index: u32,
+    pub human_id: String,
+    pub agent_address: String,
+    pub public_key_compressed: String,
+    pub credential_hash: Option<String>,
+    pub credential_jwt: Option<String>,
+    pub credential_expires_at: Option<i64>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JwtSecretMetaRow {
+    pub kid: String,
+    pub status: String,
+    pub created_at: String,
+    pub retired_at: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
 // ── KmsDb ──
 
 #[derive(Clone)]
@@ -144,7 +197,9 @@ impl KmsDb {
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
         println!("📦 SQLite DB opened: {}", path);
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn open_default() -> Result<Self> {
@@ -169,11 +224,23 @@ impl KmsDb {
              key_usage, key_spec, origin, passkey_pubkey, credential_id, sign_count, status, \
              error_msg, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
-                w.key_id, w.address, w.public_key, w.derivation_path, w.description,
-                w.key_usage, w.key_spec, w.origin, w.passkey_pubkey, w.credential_id,
-                w.sign_count, w.status, w.error_msg, w.created_at,
+                w.key_id,
+                w.address,
+                w.public_key,
+                w.derivation_path,
+                w.description,
+                w.key_usage,
+                w.key_spec,
+                w.origin,
+                w.passkey_pubkey,
+                w.credential_id,
+                w.sign_count,
+                w.status,
+                w.error_msg,
+                w.created_at,
             ],
-        ).context("insert_wallet")?;
+        )
+        .context("insert_wallet")?;
         Ok(())
     }
 
@@ -182,7 +249,7 @@ impl KmsDb {
         let mut stmt = conn.prepare(
             "SELECT key_id, address, public_key, derivation_path, description, key_usage, \
              key_spec, origin, passkey_pubkey, credential_id, sign_count, status, error_msg, \
-             created_at FROM wallets WHERE key_id = ?1"
+             created_at FROM wallets WHERE key_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![key_id], |row| {
             Ok(WalletRow {
@@ -219,8 +286,12 @@ impl KmsDb {
     }
 
     pub fn update_wallet_derived(
-        &self, key_id: &str, address: &str, public_key: &str,
-        derivation_path: &str, status: &str,
+        &self,
+        key_id: &str,
+        address: &str,
+        public_key: &str,
+        derivation_path: &str,
+        status: &str,
     ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
@@ -231,7 +302,12 @@ impl KmsDb {
         Ok(())
     }
 
-    pub fn update_wallet_status(&self, key_id: &str, status: &str, error_msg: Option<&str>) -> Result<()> {
+    pub fn update_wallet_status(
+        &self,
+        key_id: &str,
+        status: &str,
+        error_msg: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "UPDATE wallets SET status=?2, error_msg=?3 WHERE key_id=?1",
@@ -240,7 +316,12 @@ impl KmsDb {
         Ok(())
     }
 
-    pub fn update_wallet_passkey(&self, key_id: &str, passkey_pubkey: &str, credential_id: Option<&str>) -> Result<()> {
+    pub fn update_wallet_passkey(
+        &self,
+        key_id: &str,
+        passkey_pubkey: &str,
+        credential_id: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "UPDATE wallets SET passkey_pubkey=?2, credential_id=?3 WHERE key_id=?1",
@@ -269,7 +350,7 @@ impl KmsDb {
         let mut stmt = conn.prepare(
             "SELECT key_id, address, public_key, derivation_path, description, key_usage, \
              key_spec, origin, passkey_pubkey, credential_id, sign_count, status, error_msg, \
-             created_at FROM wallets ORDER BY created_at"
+             created_at FROM wallets ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(WalletRow {
@@ -294,7 +375,13 @@ impl KmsDb {
 
     // ── Address index ──
 
-    pub fn upsert_address(&self, address: &str, key_id: &str, derivation_path: &str, public_key: Option<&str>) -> Result<()> {
+    pub fn upsert_address(
+        &self,
+        address: &str,
+        key_id: &str,
+        derivation_path: &str,
+        public_key: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "INSERT OR REPLACE INTO address_index (address, key_id, derivation_path, public_key) \
@@ -323,11 +410,211 @@ impl KmsDb {
         }
     }
 
+    // ── Agent keys ──
+
+    fn map_agent_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentKeyRow> {
+        Ok(AgentKeyRow {
+            wallet_id: row.get(0)?,
+            agent_index: row.get::<_, i64>(1)? as u32,
+            human_id: row.get(2)?,
+            agent_address: row.get(3)?,
+            public_key_compressed: row.get(4)?,
+            credential_hash: row.get(5)?,
+            credential_jwt: row.get(6)?,
+            credential_expires_at: row.get(7)?,
+            status: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            revoked_at: row.get(11)?,
+        })
+    }
+
+    pub fn insert_agent_key(&self, row: &AgentKeyRow) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO agent_keys (wallet_id, agent_index, human_id, agent_address, \
+             public_key_compressed, credential_hash, credential_jwt, credential_expires_at, \
+             status, created_at, updated_at, revoked_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                row.wallet_id,
+                row.agent_index as i64,
+                row.human_id,
+                row.agent_address,
+                row.public_key_compressed,
+                row.credential_hash,
+                row.credential_jwt,
+                row.credential_expires_at,
+                row.status,
+                row.created_at,
+                row.updated_at,
+                row.revoked_at,
+            ],
+        )
+        .context("insert_agent_key")?;
+        Ok(())
+    }
+
+    pub fn get_agent_key(&self, wallet_id: &str, agent_index: u32) -> Result<Option<AgentKeyRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT wallet_id, agent_index, human_id, agent_address, public_key_compressed, \
+             credential_hash, credential_jwt, credential_expires_at, status, created_at, \
+             updated_at, revoked_at FROM agent_keys WHERE wallet_id=?1 AND agent_index=?2",
+        )?;
+        let mut rows = stmt.query_map(
+            params![wallet_id, agent_index as i64],
+            Self::map_agent_key_row,
+        )?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_agent_keys_for_human(&self, human_id: &str) -> Result<Vec<AgentKeyRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT wallet_id, agent_index, human_id, agent_address, public_key_compressed, \
+             credential_hash, credential_jwt, credential_expires_at, status, created_at, \
+             updated_at, revoked_at FROM agent_keys WHERE human_id=?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![human_id], Self::map_agent_key_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn count_agent_keys_for_human(&self, human_id: &str) -> Result<i64> {
+        let conn = self.lock();
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM agent_keys WHERE human_id=?1 AND status='active'",
+            params![human_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn update_agent_credential(
+        &self,
+        wallet_id: &str,
+        agent_index: u32,
+        credential_hash: &str,
+        credential_jwt: &str,
+        credential_expires_at: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE agent_keys SET credential_hash=?3, credential_jwt=?4, \
+             credential_expires_at=?5, updated_at=?6 WHERE wallet_id=?1 AND agent_index=?2",
+            params![
+                wallet_id,
+                agent_index as i64,
+                credential_hash,
+                credential_jwt,
+                credential_expires_at,
+                now,
+            ],
+        )
+        .context("update_agent_credential")?;
+        Ok(())
+    }
+
+    pub fn revoke_agent_key(&self, wallet_id: &str, agent_index: u32) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE agent_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
+             WHERE wallet_id=?1 AND agent_index=?2 AND status != 'revoked'",
+            params![wallet_id, agent_index as i64, now],
+        )?;
+        Ok(updated > 0)
+    }
+
+    // ── JWT secret metadata ──
+
+    fn map_jwt_secret_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JwtSecretMetaRow> {
+        Ok(JwtSecretMetaRow {
+            kid: row.get(0)?,
+            status: row.get(1)?,
+            created_at: row.get(2)?,
+            retired_at: row.get(3)?,
+            expires_at: row.get(4)?,
+        })
+    }
+
+    pub fn upsert_jwt_secret_meta(&self, row: &JwtSecretMetaRow) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO jwt_secret_meta (kid, status, created_at, retired_at, expires_at) \
+             VALUES (?1,?2,?3,?4,?5) \
+             ON CONFLICT(kid) DO UPDATE SET status=excluded.status, \
+             retired_at=excluded.retired_at, expires_at=excluded.expires_at",
+            params![
+                row.kid,
+                row.status,
+                row.created_at,
+                row.retired_at,
+                row.expires_at
+            ],
+        )
+        .context("upsert_jwt_secret_meta")?;
+        Ok(())
+    }
+
+    pub fn list_jwt_secret_meta(&self) -> Result<Vec<JwtSecretMetaRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT kid, status, created_at, retired_at, expires_at \
+             FROM jwt_secret_meta ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], Self::map_jwt_secret_meta_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_current_jwt_kid(&self) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT kid FROM jwt_secret_meta WHERE status='current' ORDER BY created_at DESC LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_all_agent_keys(&self) -> Result<Vec<AgentKeyRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT wallet_id, agent_index, human_id, agent_address, public_key_compressed, \
+             credential_hash, credential_jwt, credential_expires_at, status, created_at, \
+             updated_at, revoked_at FROM agent_keys ORDER BY human_id, agent_index",
+        )?;
+        let rows = stmt.query_map([], Self::map_agent_key_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE jwt_secret_meta SET status='retired', retired_at=?2 \
+             WHERE expires_at IS NOT NULL AND expires_at <= ?1 AND status != 'retired'",
+            params![now_unix, now],
+        )?;
+        Ok(updated)
+    }
+
     // ── Challenge management ──
 
     pub fn store_challenge(
-        &self, id: &str, challenge: &[u8], key_id: Option<&str>,
-        purpose: &str, rp_id: &str, ttl_secs: i64,
+        &self,
+        id: &str,
+        challenge: &[u8],
+        key_id: Option<&str>,
+        purpose: &str,
+        rp_id: &str,
+        ttl_secs: i64,
     ) -> Result<()> {
         let now = current_unix();
         let conn = self.lock();
@@ -345,7 +632,7 @@ impl KmsDb {
         let now = current_unix();
         let mut stmt = conn.prepare(
             "SELECT id, challenge, key_id, purpose, rp_id, created_at, expires_at \
-             FROM challenges WHERE id=?1 AND expires_at > ?2"
+             FROM challenges WHERE id=?1 AND expires_at > ?2",
         )?;
         let mut rows = stmt.query_map(params![id, now], |row| {
             Ok(ChallengeRow {
@@ -380,7 +667,8 @@ impl KmsDb {
         conn.execute(
             "INSERT INTO api_keys (api_key, label, created_at) VALUES (?1, ?2, ?3)",
             params![key, label, now],
-        ).context("generate_api_key")?;
+        )
+        .context("generate_api_key")?;
         Ok(key)
     }
 
@@ -398,11 +686,14 @@ impl KmsDb {
     /// List all API keys (returns key, label, created_at).
     pub fn list_api_keys(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT api_key, label, created_at FROM api_keys ORDER BY created_at"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT api_key, label, created_at FROM api_keys ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -410,19 +701,14 @@ impl KmsDb {
     /// Revoke (delete) an API key.
     pub fn revoke_api_key(&self, key: &str) -> Result<bool> {
         let conn = self.lock();
-        let deleted = conn.execute(
-            "DELETE FROM api_keys WHERE api_key = ?1",
-            params![key],
-        )?;
+        let deleted = conn.execute("DELETE FROM api_keys WHERE api_key = ?1", params![key])?;
         Ok(deleted > 0)
     }
 
     /// Check if any API keys exist in DB.
     pub fn has_api_keys(&self) -> Result<bool> {
         let conn = self.lock();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM api_keys", [], |row| row.get(0),
-        )?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM api_keys", [], |row| row.get(0))?;
         Ok(count > 0)
     }
 
@@ -438,8 +724,14 @@ impl KmsDb {
     // ── TX log ──
 
     pub fn record_tx(
-        &self, op: &str, key_id: Option<&str>, addr: Option<&str>,
-        webauthn: bool, latency_ms: u64, success: bool, is_panic: bool,
+        &self,
+        op: &str,
+        key_id: Option<&str>,
+        addr: Option<&str>,
+        webauthn: bool,
+        latency_ms: u64,
+        success: bool,
+        is_panic: bool,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock();
@@ -457,25 +749,32 @@ impl KmsDb {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let today_prefix = format!("{}%", today);
 
-        let total_sign: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1",
-            [], |r| r.get(0),
-        ).unwrap_or(0);
+        let total_sign: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
 
         let daily_sign: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1 AND created_at LIKE ?1",
             params![&today_prefix], |r| r.get(0),
         ).unwrap_or(0);
 
-        let total_ops: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE success=1",
-            [], |r| r.get(0),
-        ).unwrap_or(0);
+        let total_ops: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tx_log WHERE success=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
 
-        let daily_ops: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE success=1 AND created_at LIKE ?1",
-            params![&today_prefix], |r| r.get(0),
-        ).unwrap_or(0);
+        let daily_ops: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tx_log WHERE success=1 AND created_at LIKE ?1",
+                params![&today_prefix],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
 
         let avg_sign_ms: f64 = conn.query_row(
             "SELECT COALESCE(AVG(latency_ms),0) FROM tx_log WHERE op IN ('Sign','SignHash') AND success=1",
@@ -487,20 +786,25 @@ impl KmsDb {
             [], |r| r.get(0),
         ).unwrap_or(0.0);
 
-        let panic_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE is_panic=1",
-            [], |r| r.get(0),
-        ).unwrap_or(0);
+        let panic_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tx_log WHERE is_panic=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
 
-        let error_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE success=0",
-            [], |r| r.get(0),
-        ).unwrap_or(0);
+        let error_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tx_log WHERE success=0", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
 
-        let webauthn_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tx_log WHERE webauthn=1 AND success=1",
-            [], |r| r.get(0),
-        ).unwrap_or(0);
+        let webauthn_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tx_log WHERE webauthn=1 AND success=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
 
         Ok(TxStats {
             total_sign,
@@ -579,7 +883,8 @@ mod tests {
     fn update_wallet_derived() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
-        db.update_wallet_derived("w1", "0xaddr", "0xpub", "m/44'/60'/0'/0/0", "ready").unwrap();
+        db.update_wallet_derived("w1", "0xaddr", "0xpub", "m/44'/60'/0'/0/0", "ready")
+            .unwrap();
         let got = db.get_wallet("w1").unwrap().unwrap();
         assert_eq!(got.address.as_deref(), Some("0xaddr"));
         assert_eq!(got.status, "ready");
@@ -606,7 +911,8 @@ mod tests {
     fn address_upsert_and_lookup() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
-        db.upsert_address("0xaaaa", "w1", "m/44'/60'/0'/0/0", Some("0xpub")).unwrap();
+        db.upsert_address("0xaaaa", "w1", "m/44'/60'/0'/0/0", Some("0xpub"))
+            .unwrap();
         let row = db.lookup_address("0xaaaa").unwrap().unwrap();
         assert_eq!(row.key_id, "w1");
         assert_eq!(row.public_key.as_deref(), Some("0xpub"));
@@ -616,7 +922,8 @@ mod tests {
     fn challenge_store_and_consume() {
         let db = test_db();
         let challenge = vec![1u8, 2, 3, 4];
-        db.store_challenge("c1", &challenge, None, "registration", "example.com", 300).unwrap();
+        db.store_challenge("c1", &challenge, None, "registration", "example.com", 300)
+            .unwrap();
         let got = db.consume_challenge("c1").unwrap().unwrap();
         assert_eq!(got.challenge, challenge);
         assert_eq!(got.purpose, "registration");
@@ -656,7 +963,8 @@ mod tests {
     fn update_passkey() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
-        db.update_wallet_passkey("w1", "0x04new", Some("cred-123")).unwrap();
+        db.update_wallet_passkey("w1", "0x04new", Some("cred-123"))
+            .unwrap();
         let got = db.get_wallet("w1").unwrap().unwrap();
         assert_eq!(got.passkey_pubkey.as_deref(), Some("0x04new"));
         assert_eq!(got.credential_id.as_deref(), Some("cred-123"));
@@ -668,14 +976,17 @@ mod tests {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w-concurrent")).unwrap();
 
-        let handles: Vec<_> = (0..10).map(|i| {
-            let db = db.clone();
-            thread::spawn(move || {
-                let addr = format!("0xaddr{}", i);
-                db.upsert_address(&addr, "w-concurrent", &format!("m/0/{}", i), None).unwrap();
-                db.get_wallet("w-concurrent").unwrap().unwrap();
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let db = db.clone();
+                thread::spawn(move || {
+                    let addr = format!("0xaddr{}", i);
+                    db.upsert_address(&addr, "w-concurrent", &format!("m/0/{}", i), None)
+                        .unwrap();
+                    db.get_wallet("w-concurrent").unwrap().unwrap();
+                })
             })
-        }).collect();
+            .collect();
 
         for h in handles {
             h.join().unwrap();
@@ -691,7 +1002,8 @@ mod tests {
     fn update_wallet_status_with_error() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w-err")).unwrap();
-        db.update_wallet_status("w-err", "error", Some("PBKDF2 timeout")).unwrap();
+        db.update_wallet_status("w-err", "error", Some("PBKDF2 timeout"))
+            .unwrap();
         let got = db.get_wallet("w-err").unwrap().unwrap();
         assert_eq!(got.status, "error");
         assert_eq!(got.error_msg.as_deref(), Some("PBKDF2 timeout"));
@@ -710,8 +1022,10 @@ mod tests {
     fn cleanup_expired_challenges() {
         let db = test_db();
         // Store a challenge with -1 second TTL (already expired)
-        db.store_challenge("c-expired", &[1,2,3], None, "auth", "localhost", -1).unwrap();
-        db.store_challenge("c-valid", &[4,5,6], None, "auth", "localhost", 300).unwrap();
+        db.store_challenge("c-expired", &[1, 2, 3], None, "auth", "localhost", -1)
+            .unwrap();
+        db.store_challenge("c-valid", &[4, 5, 6], None, "auth", "localhost", 300)
+            .unwrap();
 
         let cleaned = db.cleanup_expired_challenges().unwrap();
         assert_eq!(cleaned, 1);
