@@ -17,7 +17,7 @@
 
 [package]
 name = "kms"
-version = "0.16.8"
+version = "0.17.0"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
@@ -36,13 +36,17 @@ path = "src/bin/export_key.rs"
 name = "api-key"
 path = "src/bin/api_key.rs"
 
+[[bin]]
+name = "kms-admin"
+path = "src/bin/kms_admin.rs"
+
 [features]
 default = ["tee"]
 tee = ["optee-teec"]
 
 [dependencies]
 proto = { path = "../proto" }
-optee-teec = { path = "../../../../optee-teec", optional = true }
+optee-teec = { path = "../../third_party/teaclave-trustzone-sdk/optee-teec", optional = true }
 
 # CLI dependencies
 structopt = "0.3"
