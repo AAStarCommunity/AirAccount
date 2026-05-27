@@ -417,23 +417,42 @@ fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
 /// Parse DER-encoded ECDSA signature into (r, s) 32-byte arrays
 fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     if der.len() < 8 || der[0] != 0x30 {
-        return Err(anyhow!("Invalid DER signature"));
+        return Err(anyhow!("Invalid DER signature: bad header"));
     }
-    let mut pos = 2; // skip 0x30 + total_len
-    if der[pos] != 0x02 {
-        return Err(anyhow!("Expected INTEGER tag for r"));
+    let total_len = der[1] as usize;
+    if total_len > 0x7F {
+        return Err(anyhow!("Invalid DER signature: long-form length not supported"));
+    }
+    if 2 + total_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: declared length {} exceeds data {}", total_len, der.len()));
+    }
+    let mut pos = 2;
+    if pos >= der.len() || der[pos] != 0x02 {
+        return Err(anyhow!("Invalid DER signature: expected INTEGER tag for r"));
     }
     pos += 1;
+    if pos >= der.len() {
+        return Err(anyhow!("Invalid DER signature: missing r_len byte"));
+    }
     let r_len = der[pos] as usize;
     pos += 1;
+    if pos + r_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: r overflows buffer (r_len={} pos={} len={})", r_len, pos, der.len()));
+    }
     let r_raw = &der[pos..pos + r_len];
     pos += r_len;
-    if der[pos] != 0x02 {
-        return Err(anyhow!("Expected INTEGER tag for s"));
+    if pos >= der.len() || der[pos] != 0x02 {
+        return Err(anyhow!("Invalid DER signature: expected INTEGER tag for s"));
     }
     pos += 1;
+    if pos >= der.len() {
+        return Err(anyhow!("Invalid DER signature: missing s_len byte"));
+    }
     let s_len = der[pos] as usize;
     pos += 1;
+    if pos + s_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: s overflows buffer (s_len={} pos={} len={})", s_len, pos, der.len()));
+    }
     let s_raw = &der[pos..pos + s_len];
 
     // Pad/trim to 32 bytes (DER integers may have leading zero for sign)
@@ -854,7 +873,10 @@ impl KmsApiServer {
 
             Ok(Some(verified.proto_assertion))
         } else if raw.is_some() {
-            // Legacy hex path
+            // Legacy hex path: DEPRECATED — raw ECDSA bytes with no challenge or origin binding.
+            // Vulnerable to replay if an attacker captures a valid assertion.
+            // Retained for backward compatibility only; new clients should use WebAuthn ceremony.
+            eprintln!("⚠️  DEPRECATED: legacy passkey assertion (no challenge binding) for key_id={}. Migrate to WebAuthn ceremony.", key_id);
             let assertion = Self::parse_passkey_assertion(raw)?;
             self.pre_verify_passkey(key_id, &assertion).await?;
             Ok(assertion)
@@ -928,8 +950,11 @@ impl KmsApiServer {
             } else {
                 hex::decode(&transaction.to)
             }?;
+            if to_bytes.len() != 20 {
+                return Err(anyhow!("Transaction.to must be 20 bytes (40 hex chars), got {} bytes", to_bytes.len()));
+            }
             let mut to_array = [0u8; 20];
-            to_array.copy_from_slice(&to_bytes[..20]);
+            to_array.copy_from_slice(&to_bytes);
 
             let data = if transaction.data.is_empty() {
                 vec![]
@@ -1244,8 +1269,9 @@ impl KmsApiServer {
             return Err(anyhow!("Passkey assertion required to create agent key"));
         }
 
-        // Get next agent index for this human account
-        let agent_index = self.db.count_agent_keys_for_human(&req.human_key_id)? as u32;
+        // Atomically allocate the next agent_index (MAX+1 in a single lock acquire).
+        // Avoids the race between count() and insert() that could yield duplicate indices.
+        let agent_index = self.db.next_agent_index_for_wallet(&req.human_key_id)?;
 
         // Derive agent key in TEE (secp256k1, BIP44 m/44'/60'/0'/1/<index>)
         let tee_result = self.tee.create_agent_key(wallet_id, agent_index).await?;
@@ -1964,12 +1990,20 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
 // Custom body filter for AWS KMS content-type
 // ========================================
 
+const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024; // 256 KB
+
 fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
 ) -> impl Filter<Extract = (T,), Error = warp::Rejection> + Clone {
     warp::body::bytes()
         .or(warp::any().map(|| bytes::Bytes::new()))
         .unify()
         .and_then(|bytes: bytes::Bytes| async move {
+            if bytes.len() > MAX_REQUEST_BODY_BYTES {
+                return Err(warp::reject::custom(ApiError(format!(
+                    "Request body too large: {} bytes (max {}KB)",
+                    bytes.len(), MAX_REQUEST_BODY_BYTES / 1024
+                ))));
+            }
             let data: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
             serde_json::from_slice(data)
                 .map_err(|e| {
@@ -2066,20 +2100,26 @@ pub async fn start_kms_server() -> Result<()> {
 
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
-    // API Key guard: enabled if DB has keys or KMS_API_KEY env var is set
+    // API Key guard.
+    // Enabled if DB has keys OR KMS_API_KEY env var is set.
+    // If neither is configured, access is open unless KMS_REQUIRE_API_KEY=1 is set.
+    // In production, set KMS_REQUIRE_API_KEY=1 to fail-closed even before key provisioning.
     let legacy_key = std::env::var("KMS_API_KEY").ok();
     let has_db_keys = db.has_api_keys().unwrap_or(false);
-    let api_key_enabled = has_db_keys || legacy_key.is_some();
+    let force_required = std::env::var("KMS_REQUIRE_API_KEY").map(|v| v == "1").unwrap_or(false);
+    let api_key_enabled = has_db_keys || legacy_key.is_some() || force_required;
     if api_key_enabled {
-        let source = match (has_db_keys, legacy_key.is_some()) {
-            (true, true) => "DB + env",
-            (true, false) => "DB",
-            (false, true) => "env (KMS_API_KEY)",
+        let source = match (has_db_keys, legacy_key.is_some(), force_required) {
+            (true, true, _) => "DB + env",
+            (true, false, _) => "DB",
+            (false, true, _) => "env (KMS_API_KEY)",
+            (false, false, true) => "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)",
             _ => unreachable!(),
         };
         println!("🔑 API Key authentication: ENABLED (source: {})", source);
     } else {
-        println!("⚠️  API Key authentication: DISABLED (run `api-key generate` to enable)");
+        println!("⚠️  API Key authentication: DISABLED — all requests are unauthenticated.");
+        println!("⚠️  To enable: run `kms-admin api-key generate` or set KMS_API_KEY / KMS_REQUIRE_API_KEY=1");
     }
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
     let rl_filter = rate_limit_filter(server.rate_limiter.clone());

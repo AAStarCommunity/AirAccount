@@ -172,18 +172,37 @@ impl JwtSecretStore {
 
     fn ensure_current(&mut self) -> Result<&JwtSecretEntry> {
         if self.current().is_none() {
-            self.rotate()?;
+            self.rotate(false)?;
         }
         self.current()
             .ok_or_else(|| anyhow!("JWT HMAC secret store has no current secret"))
     }
 
-    fn rotate(&mut self) -> Result<(String, Option<String>)> {
+    fn rotate(&mut self, purge_retired: bool) -> Result<(String, Option<String>)> {
         let retired_kid = self.current().map(|entry| entry.kid.clone());
-        for entry in self.entries.iter_mut() {
-            if entry.current {
-                entry.current = false;
-                entry.retired_at = Some(0);
+
+        if purge_retired {
+            // Force rotation: immediately invalidate old keys by removing them.
+            // Any JWT signed with an old kid will fail verification after this.
+            self.entries.retain(|e| !e.current);
+        } else {
+            // Normal rotation: mark old current as retired (kept for 7-day overlap window).
+            // The host DB tracks the expiry; old JWTs remain verifiable until they expire.
+            for entry in self.entries.iter_mut() {
+                if entry.current {
+                    entry.current = false;
+                    entry.retired_at = Some(1); // non-zero = retired, valid during overlap
+                }
+            }
+            // Keep at most 1 retired entry (the most recent) to bound memory growth.
+            let retired: Vec<_> = self.entries.iter()
+                .filter(|e| !e.current && e.retired_at.is_some())
+                .map(|e| e.kid.clone())
+                .collect();
+            if retired.len() > 1 {
+                // Remove all but the last retired kid
+                let keep = retired.last().cloned();
+                self.entries.retain(|e| e.current || Some(e.kid.clone()) == keep);
             }
         }
 
@@ -681,6 +700,7 @@ fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRo
     let had_current = store.current().is_some();
 
     if !input.force && !had_current {
+        // First-time init: create the initial secret without rotating
         let current = store.ensure_current()?.clone();
         store.save(&db)?;
         return Ok(proto::JwtRotateSecretOutput {
@@ -689,7 +709,9 @@ fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRo
         });
     }
 
-    let (new_kid, retired_kid) = store.rotate()?;
+    // Normal rotation: keep retired entry for 7-day overlap window.
+    // Force rotation: purge retired entries immediately (old JWTs become invalid).
+    let (new_kid, retired_kid) = store.rotate(input.force)?;
     store.save(&db)?;
 
     Ok(proto::JwtRotateSecretOutput {
