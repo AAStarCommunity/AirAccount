@@ -107,6 +107,25 @@ pub fn credential_hash(jwt: &str) -> String {
     hex::encode(Sha256::digest(jwt.as_bytes()))
 }
 
+/// Extract (kid, signing_input_bytes, hmac_bytes) from a JWT for TA-side verification.
+/// `signing_input` = the bytes of `header_b64.payload_b64` (what was HMAC'd).
+/// `hmac_bytes` = the raw signature bytes (32 bytes after base64url decode).
+pub fn extract_signing_proof(jwt: &str) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() != 3 {
+        return Err(anyhow::anyhow!("Invalid JWT format"));
+    }
+    let header: JwtHeader = decode_json(parts[0])?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]).into_bytes();
+    let hmac_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|e| anyhow::anyhow!("JWT signature base64url decode: {}", e))?;
+    if hmac_bytes.len() != 32 {
+        return Err(anyhow::anyhow!("JWT HMAC must be 32 bytes, got {}", hmac_bytes.len()));
+    }
+    Ok((header.kid, signing_input, hmac_bytes))
+}
+
 fn b64_json<T: Serialize>(value: &T) -> Result<String> {
     let json = serde_json::to_vec(value)?;
     Ok(URL_SAFE_NO_PAD.encode(json))

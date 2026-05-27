@@ -691,11 +691,17 @@ impl TeeHandle {
         wallet_id: uuid::Uuid,
         agent_index: u32,
         user_op_hash: &[u8; 32],
+        jwt_kid: String,
+        jwt_signing_input: Vec<u8>,
+        jwt_hmac: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::SignAgentUserOpInput {
             wallet_id,
             agent_index,
             user_op_hash: *user_op_hash,
+            jwt_kid,
+            jwt_signing_input,
+            jwt_hmac,
         })
         .context("Failed to serialize SignAgentUserOpInput")?;
         let out = self.call(proto::Command::SignAgentUserOp, input).await?;
