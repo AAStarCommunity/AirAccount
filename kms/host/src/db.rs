@@ -493,6 +493,19 @@ impl KmsDb {
         Ok(count)
     }
 
+    /// Atomically allocate the next agent_index for a wallet.
+    /// Uses MAX(agent_index)+1 within a single mutex acquisition so that
+    /// concurrent requests cannot race to the same index.
+    pub fn next_agent_index_for_wallet(&self, wallet_id: &str) -> Result<u32> {
+        let conn = self.lock();
+        let max_idx: Option<i64> = conn.query_row(
+            "SELECT MAX(agent_index) FROM agent_keys WHERE wallet_id=?1",
+            params![wallet_id],
+            |row| row.get(0),
+        )?;
+        Ok(max_idx.map(|m| (m + 1) as u32).unwrap_or(0))
+    }
+
     pub fn update_agent_credential(
         &self,
         wallet_id: &str,
