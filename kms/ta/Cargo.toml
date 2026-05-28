@@ -24,6 +24,11 @@ repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
 description = "An example of Ethereum wallet TA."
 edition = "2018"
 
+[features]
+# DEV/TEST ONLY — never enable in production builds.
+# Allows mnemonic export from CreateWallet and passkey-less ExportPrivateKey.
+export-secrets = []
+
 [dependencies]
 libc = { path = "../../../../rust/libc" }
 proto = { path = "../proto" }

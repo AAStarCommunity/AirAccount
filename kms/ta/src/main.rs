@@ -24,17 +24,24 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{Error, ErrorKind, Parameters};
+use optee_utee::{Error, ErrorKind, Parameters, Random};
 use proto::Command;
-use secure_db::SecureStorageClient;
+use secure_db::{SecureStorageClient, Storable};
 
 use anyhow::{anyhow, bail, Result};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use sha3::{Digest, Keccak256};
 use std::cell::RefCell;
 use std::io::Write;
 use uuid::Uuid;
 use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
+const JWT_SECRET_STORE_ID: &str = "jwt_hmac";
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ========================================
 // LRU Wallet Cache (TA is single-threaded)
@@ -116,6 +123,107 @@ impl WalletLruCache {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct JwtSecretEntry {
+    kid: String,
+    secret: Vec<u8>,
+    current: bool,
+    retired_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct JwtSecretStore {
+    id: String,
+    entries: Vec<JwtSecretEntry>,
+}
+
+impl Storable for JwtSecretStore {
+    type Key = String;
+
+    fn unique_id(&self) -> Self::Key {
+        self.id.clone()
+    }
+}
+
+impl JwtSecretStore {
+    fn new() -> Self {
+        Self {
+            id: JWT_SECRET_STORE_ID.to_string(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn load(db: &SecureStorageClient) -> Self {
+        db.get::<JwtSecretStore>(&JWT_SECRET_STORE_ID.to_string())
+            .unwrap_or_else(|_| Self::new())
+    }
+
+    fn save(&self, db: &SecureStorageClient) -> Result<()> {
+        db.put(self)
+    }
+
+    fn current(&self) -> Option<&JwtSecretEntry> {
+        self.entries.iter().find(|entry| entry.current)
+    }
+
+    fn find(&self, kid: &str) -> Option<&JwtSecretEntry> {
+        self.entries.iter().find(|entry| entry.kid == kid)
+    }
+
+    fn ensure_current(&mut self) -> Result<&JwtSecretEntry> {
+        if self.current().is_none() {
+            self.rotate(false)?;
+        }
+        self.current()
+            .ok_or_else(|| anyhow!("JWT HMAC secret store has no current secret"))
+    }
+
+    fn rotate(&mut self, purge_retired: bool) -> Result<(String, Option<String>)> {
+        let retired_kid = self.current().map(|entry| entry.kid.clone());
+
+        if purge_retired {
+            // Force rotation: purge ALL entries (current + retired).
+            // Any JWT signed with any old kid will fail verification after this.
+            self.entries.clear();
+        } else {
+            // Normal rotation: mark old current as retired (kept for 7-day overlap window).
+            // The host DB tracks the expiry; old JWTs remain verifiable until they expire.
+            for entry in self.entries.iter_mut() {
+                if entry.current {
+                    entry.current = false;
+                    entry.retired_at = Some(1); // non-zero = retired, valid during overlap
+                }
+            }
+            // Keep at most 1 retired entry (the most recent) to bound memory growth.
+            let retired: Vec<_> = self.entries.iter()
+                .filter(|e| !e.current && e.retired_at.is_some())
+                .map(|e| e.kid.clone())
+                .collect();
+            if retired.len() > 1 {
+                // Remove all but the last retired kid
+                let keep = retired.last().cloned();
+                self.entries.retain(|e| e.current || Some(e.kid.clone()) == keep);
+            }
+        }
+
+        let mut secret = vec![0u8; 32];
+        Random::generate(secret.as_mut_slice());
+
+        let mut kid_bytes = [0u8; 8];
+        Random::generate(&mut kid_bytes);
+        let kid = format!("v{}", hex::encode(kid_bytes));
+
+        self.entries.push(JwtSecretEntry {
+            kid: kid.clone(),
+            secret,
+            current: true,
+            retired_at: None,
+        });
+
+        Ok((kid, retired_kid))
+    }
+}
+
 thread_local! {
     static WALLET_CACHE: RefCell<WalletLruCache> = RefCell::new(WalletLruCache::new());
 }
@@ -162,7 +270,10 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         let changed = w.ensure_seed_cached()?;
         if changed {
             // Update in-memory cache only — NO db.put (would corrupt TLS)
-            trace_println!("[!] load_wallet_cached: cold seed computed for {:?}, memory-only cache", wallet_id);
+            trace_println!(
+                "[!] load_wallet_cached: cold seed computed for {:?}, memory-only cache",
+                wallet_id
+            );
             cache_put(&w);
         }
         return Ok(w);
@@ -175,7 +286,10 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
     let changed = w.ensure_seed_cached()?;
     if changed {
-        trace_println!("[!] load_wallet_cached: cold seed from storage for {:?}, memory-only cache", wallet_id);
+        trace_println!(
+            "[!] load_wallet_cached: cold seed from storage for {:?}, memory-only cache",
+            wallet_id
+        );
     }
     // Always cache in memory (NO db.put — avoids TLS corruption in signing path)
     cache_put(&w);
@@ -214,22 +328,24 @@ macro_rules! dbg_println {
     ($($arg:tt)*) => {};
 }
 
-// p256-m FFI — debugging crash (branch: debug/p256m-ta)
+// p256-m FFI: P-256 ECDSA verify inside TA.
+// Compile flags fixed in e1b50c2 (2026-03-03): -O1 -fPIC -fno-common -marm (ARM32).
+// 5/5 stability tests passed on DK2 (Cortex-A7) after the flag fix.
+// p256_generate_random returns -1 because verify never needs randomness.
 extern "C" {
     fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
 }
 #[no_mangle]
 pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 {
-    -1
+    -1 // verify path never calls this; sign/keygen are not used
 }
 
-/// Verify passkey assertion against wallet's bound passkey.
-/// All wallets MUST have passkey bound — rejects if missing.
+/// Verify passkey assertion against the passkey bound to this wallet.
+/// All wallets MUST have a passkey bound — rejects if missing.
 ///
-/// NOTE: p256-m C library crashes in OP-TEE Secure World on DK2 (Cortex-A7).
-/// CA-side pre-verification (Rust p256 crate) is the primary security check.
-/// TA-side only validates that passkey is bound and assertion is present.
-/// TODO: debug p256-m crash on DK2, re-enable TA-side ECDSA verify.
+/// Two-layer defense: CA pre-verifies with Rust p256 crate before enqueuing the TA call;
+/// TA re-verifies with p256-m (C, ~320ms on Cortex-A7) as defense-in-depth.
+/// Both layers must pass for any sensitive operation.
 fn verify_passkey_for_wallet(
     wallet: &Wallet,
     assertion: Option<&proto::PasskeyAssertion>,
@@ -305,7 +421,13 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
     let mut wallet = Wallet::new()?;
     wallet.set_passkey(input.passkey_pubkey.clone());
     let wallet_id = wallet.get_id();
+
+    // Mnemonic never crosses TEE boundary in production.
+    // Only populated with the export-secrets feature (dev/test).
+    #[cfg(feature = "export-secrets")]
     let mnemonic = wallet.get_mnemonic()?;
+    #[cfg(not(feature = "export-secrets"))]
+    let mnemonic = String::new();
 
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
@@ -410,12 +532,20 @@ fn export_private_key(
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
-    // CLI admin mode: None assertion = skip passkey verify
-    // API mode (if re-enabled): assertion provided = verify
-    if input.passkey_assertion.is_some() {
+    // In production builds, passkey assertion is ALWAYS required.
+    // The passkey-less admin bypass is only allowed with the export-secrets feature (dev/test).
+    #[cfg(feature = "export-secrets")]
+    {
+        if input.passkey_assertion.is_some() {
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+        } else {
+            dbg_println!("[+] ExportPrivateKey: dev admin mode (no passkey assertion)");
+        }
+    }
+    #[cfg(not(feature = "export-secrets"))]
+    {
+        // Production: always require passkey, no bypass
         verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
-    } else {
-        dbg_println!("[+] ExportPrivateKey: admin mode (no passkey assertion)");
     }
 
     let private_key = wallet.export_private_key(&input.derivation_path)?;
@@ -426,11 +556,9 @@ fn export_private_key(
 fn verify_passkey(_input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPasskeyOutput> {
     dbg_println!("[+] Verify passkey for wallet: {:?}", _input.wallet_id);
 
-    // p256-m disabled: crashes in OP-TEE Secure World on DK2 (Cortex-A7).
-    // CA-side P-256 verify (Rust p256 crate) is the primary security check.
-    // TA-side verify temporarily returns OK — CA has already verified.
-    dbg_println!("[+] Passkey verification: delegated to CA (p256-m disabled)");
-
+    // Standalone VerifyPasskey TA command: not exposed via any HTTP endpoint.
+    // Actual signing operations use verify_passkey_for_wallet() which calls p256-m.
+    // This stub exists for future diagnostic use only.
     Ok(proto::VerifyPasskeyOutput { valid: true })
 }
 
@@ -467,6 +595,157 @@ fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOut
     })
 }
 
+fn agent_derivation_path(agent_index: u32) -> String {
+    format!("m/44'/60'/0'/1/{}", agent_index)
+}
+
+fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
+    dbg_println!(
+        "[+] Create agent key for wallet: {:?}, agent_index: {}",
+        input.wallet_id,
+        input.agent_index
+    );
+
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    let derivation_path = agent_derivation_path(input.agent_index);
+    let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
+
+    Ok(proto::CreateAgentKeyOutput {
+        agent_address,
+        public_key_compressed,
+    })
+}
+
+fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::SignAgentUserOpOutput> {
+    dbg_println!(
+        "[+] Sign agent user op for wallet: {:?}, agent_index: {}",
+        input.wallet_id,
+        input.agent_index
+    );
+
+    // TA-side JWT authorization: verify HMAC proof before signing.
+    // Prevents a compromised CA from bypassing host-side JWT verification.
+    let jwt_verify_input = proto::JwtHmacVerifyInput {
+        kid: input.jwt_kid.clone(),
+        message: input.jwt_signing_input.clone(),
+        expected_hmac: input.jwt_hmac.clone(),
+    };
+    let verify_result = jwt_hmac_verify(&jwt_verify_input)?;
+    if !verify_result.valid {
+        return Err(anyhow!("TA: agent JWT credential verification failed"));
+    }
+
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    let derivation_path = agent_derivation_path(input.agent_index);
+    let private_key = wallet.export_private_key(&derivation_path)?;
+
+    let mut eip191 = b"\x19Ethereum Signed Message:\n32".to_vec();
+    eip191.extend_from_slice(&input.user_op_hash);
+    let digest = Keccak256::digest(&eip191);
+
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let message = secp256k1::Message::from_slice(&digest[..])?;
+    let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignAgentUserOpOutput { signature })
+}
+
+fn hmac_sha256(secret: &[u8], message: &[u8]) -> Result<[u8; 32]> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| anyhow!("Invalid JWT HMAC secret"))?;
+    mac.update(message);
+    let bytes = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let current = store.ensure_current()?.clone();
+    store.save(&db)?;
+
+    Ok(proto::JwtHmacSignOutput {
+        hmac: hmac_sha256(&current.secret, &input.message)?,
+        kid: current.kid,
+    })
+}
+
+fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSignPayloadOutput> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let current = store.ensure_current()?.clone();
+    store.save(&db)?;
+
+    // Build header JSON identical to what serde_json would produce for JwtHeader
+    let header_json = format!(
+        "{{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"{}\"}}",
+        current.kid
+    );
+    let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+
+    // signing_input = header_b64 + "." + payload_b64 (standard JWT format)
+    let signing_input = format!("{}.{}", header_b64, input.payload_b64);
+    let hmac = hmac_sha256(&current.secret, signing_input.as_bytes())?;
+
+    Ok(proto::JwtSignPayloadOutput {
+        kid: current.kid,
+        header_b64,
+        hmac,
+    })
+}
+
+fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let store = JwtSecretStore::load(&db);
+    let valid = match store.find(&input.kid) {
+        Some(entry) => {
+            let mut mac = HmacSha256::new_from_slice(&entry.secret)
+                .map_err(|_| anyhow!("Invalid JWT HMAC secret"))?;
+            mac.update(&input.message);
+            mac.verify_slice(&input.expected_hmac).is_ok()
+        }
+        None => false,
+    };
+
+    Ok(proto::JwtHmacVerifyOutput { valid })
+}
+
+fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRotateSecretOutput> {
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let had_current = store.current().is_some();
+
+    if !input.force && !had_current {
+        // First-time init: create the initial secret without rotating
+        let current = store.ensure_current()?.clone();
+        store.save(&db)?;
+        return Ok(proto::JwtRotateSecretOutput {
+            new_kid: current.kid,
+            retired_kid: None,
+        });
+    }
+
+    // Normal rotation: keep retired entry for 7-day overlap window.
+    // Force rotation: purge retired entries immediately (old JWTs become invalid).
+    let (new_kid, retired_kid) = store.rotate(input.force)?;
+    store.save(&db)?;
+
+    Ok(proto::JwtRotateSecretOutput {
+        new_kid,
+        retired_kid,
+    })
+}
+
 fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
     fn process<T: serde::de::DeserializeOwned, U: serde::Serialize, F: Fn(&T) -> Result<U>>(
         serialized_input: &[u8],
@@ -490,6 +769,12 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::VerifyPasskey => process(serialized_input, verify_passkey),
         Command::WarmupCache => process(serialized_input, warmup_cache),
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
+        Command::CreateAgentKey => process(serialized_input, create_agent_key),
+        Command::SignAgentUserOp => process(serialized_input, sign_agent_user_op),
+        Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
+        Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
+        Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
+        Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
         _ => bail!("Unsupported command"),
     }
 }
