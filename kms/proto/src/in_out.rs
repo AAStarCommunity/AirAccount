@@ -144,7 +144,7 @@ pub struct ExportPrivateKeyInput {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ExportPrivateKeyOutput {
-    pub private_key: Vec<u8>,  // 32 bytes
+    pub private_key: Vec<u8>, // 32 bytes
 }
 
 /// WebAuthn PassKey (P-256/secp256r1) ECDSA verification
@@ -196,4 +196,84 @@ pub struct WarmupCacheInput {
 pub struct WarmupCacheOutput {
     pub cached: bool,
     pub cache_size: u32,
+}
+
+// Agent Key Commands
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CreateAgentKeyInput {
+    pub wallet_id: Uuid,
+    pub agent_index: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CreateAgentKeyOutput {
+    pub agent_address: [u8; 20],
+    pub public_key_compressed: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignAgentUserOpInput {
+    pub wallet_id: Uuid,
+    pub agent_index: u32,
+    pub user_op_hash: [u8; 32],
+    /// JWT authorization proof verified inside TEE (defense-in-depth against compromised CA).
+    /// Fields extracted from the agent Bearer JWT by the host before calling TA.
+    pub jwt_kid: String,
+    pub jwt_signing_input: Vec<u8>,  // b64url(header).b64url(payload) bytes
+    pub jwt_hmac: Vec<u8>,           // 32 bytes — HMAC-SHA256 from JWT signature field
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignAgentUserOpOutput {
+    pub signature: Vec<u8>,
+}
+
+// JWT HMAC Commands
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtHmacSignInput {
+    pub message: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtHmacSignOutput {
+    pub hmac: [u8; 32],
+    pub kid: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtHmacVerifyInput {
+    pub kid: String,
+    pub message: Vec<u8>,
+    pub expected_hmac: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtHmacVerifyOutput {
+    pub valid: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtRotateSecretInput {
+    pub force: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtRotateSecretOutput {
+    pub new_kid: String,
+    pub retired_kid: Option<String>,
+}
+
+// Single-call payload signing — atomically picks current kid, builds header, signs
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtSignPayloadInput {
+    pub payload_b64: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtSignPayloadOutput {
+    pub kid: String,
+    pub header_b64: String,
+    pub hmac: [u8; 32],
 }

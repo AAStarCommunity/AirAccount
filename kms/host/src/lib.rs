@@ -27,6 +27,7 @@ pub mod address_cache;
 pub mod db;
 pub mod rate_limit;
 pub mod webauthn;
+pub mod agent_jwt;
 
 // Re-export commonly used items
 #[cfg(feature = "tee")]
