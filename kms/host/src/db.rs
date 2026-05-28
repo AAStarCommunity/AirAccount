@@ -511,19 +511,17 @@ impl KmsDb {
         wallet_id: &str,
         agent_index: u32,
         credential_hash: &str,
-        credential_jwt: &str,
         credential_expires_at: i64,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock();
         conn.execute(
-            "UPDATE agent_keys SET credential_hash=?3, credential_jwt=?4, \
-             credential_expires_at=?5, updated_at=?6 WHERE wallet_id=?1 AND agent_index=?2",
+            "UPDATE agent_keys SET credential_hash=?3, \
+             credential_expires_at=?4, updated_at=?5 WHERE wallet_id=?1 AND agent_index=?2",
             params![
                 wallet_id,
                 agent_index as i64,
                 credential_hash,
-                credential_jwt,
                 credential_expires_at,
                 now,
             ],

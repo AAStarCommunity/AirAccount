@@ -497,6 +497,7 @@ pub struct KmsApiServer {
     db: KmsDb,
     tee: TeeHandle,
     rate_limiter: RateLimiter,
+    agent_rate_limiter: RateLimiter,
     rp_name: String,
     rp_ids: Vec<String>,
     expected_origins: Vec<String>,
@@ -515,10 +516,17 @@ impl KmsApiServer {
         println!("🔑 Allowed rpIds: {:?}", rp_ids);
         let rate_limiter = RateLimiter::from_env();
         println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
+        let agent_rl_limit = std::env::var("KMS_AGENT_RATE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let agent_rate_limiter = RateLimiter::new(agent_rl_limit);
+        println!("⏱️  Agent rate limiter: {}/min per credential", agent_rl_limit);
         Self {
             db,
             tee: TeeHandle::new(),
             rate_limiter,
+            agent_rate_limiter,
             rp_name,
             rp_ids,
             expected_origins,
@@ -1331,6 +1339,12 @@ impl KmsApiServer {
             return Err(anyhow!("keyId does not match agent credential"));
         }
 
+        // Per-credential rate limit (design §2.2): prevents single compromised key from
+        // flooding TEE signing. Keyed by wallet_id/agent_index — independent of global API key limit.
+        let cred_rl_key = format!("{}/{}", wallet_id_str, agent_index);
+        self.agent_rate_limiter.check(&cred_rl_key)
+            .map_err(|limit| anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit))?;
+
         // Check agent key is active in DB + credential_hash matches
         let agent_key = self.db.get_agent_key(&wallet_id_str, agent_index)?
             .ok_or_else(|| anyhow!("Agent key not found: {}", req.key_id))?;
@@ -1406,7 +1420,7 @@ impl KmsApiServer {
         ).await?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
-        self.db.update_agent_credential(&wallet_id_str, agent_index, &cred_hash, "", expires_at)?;
+        self.db.update_agent_credential(&wallet_id_str, agent_index, &cred_hash, expires_at)?;
 
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
         println!("✅ RefreshAgentCredential: wallet={} idx={}", wallet_id_str, agent_index);
