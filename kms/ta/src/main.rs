@@ -182,9 +182,9 @@ impl JwtSecretStore {
         let retired_kid = self.current().map(|entry| entry.kid.clone());
 
         if purge_retired {
-            // Force rotation: immediately invalidate old keys by removing them.
-            // Any JWT signed with an old kid will fail verification after this.
-            self.entries.retain(|e| !e.current);
+            // Force rotation: purge ALL entries (current + retired).
+            // Any JWT signed with any old kid will fail verification after this.
+            self.entries.clear();
         } else {
             // Normal rotation: mark old current as retired (kept for 7-day overlap window).
             // The host DB tracks the expiry; old JWTs remain verifiable until they expire.
@@ -678,6 +678,32 @@ fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOu
     })
 }
 
+fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSignPayloadOutput> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let mut store = JwtSecretStore::load(&db);
+    let current = store.ensure_current()?.clone();
+    store.save(&db)?;
+
+    // Build header JSON identical to what serde_json would produce for JwtHeader
+    let header_json = format!(
+        "{{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"{}\"}}",
+        current.kid
+    );
+    let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+
+    // signing_input = header_b64 + "." + payload_b64 (standard JWT format)
+    let signing_input = format!("{}.{}", header_b64, input.payload_b64);
+    let hmac = hmac_sha256(&current.secret, signing_input.as_bytes())?;
+
+    Ok(proto::JwtSignPayloadOutput {
+        kid: current.kid,
+        header_b64,
+        hmac,
+    })
+}
+
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
     let db = SecureStorageClient::open(DB_NAME)?;
     let store = JwtSecretStore::load(&db);
@@ -748,6 +774,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
         Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
+        Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
         _ => bail!("Unsupported command"),
     }
 }

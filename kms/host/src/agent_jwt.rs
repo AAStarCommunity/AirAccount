@@ -38,12 +38,6 @@ pub async fn issue_credential(
     let now = Utc::now().timestamp();
     let exp = now + ttl_secs;
 
-    let probe = tee.jwt_hmac_sign(b"kid-probe").await?;
-    let header = JwtHeader {
-        alg: "HS256".to_string(),
-        typ: "JWT".to_string(),
-        kid: probe.kid,
-    };
     let payload = JwtPayload {
         sub: subject.to_string(),
         wallet_id: wallet_id.to_string(),
@@ -52,21 +46,11 @@ pub async fn issue_credential(
         iat: now,
         exp,
     };
-
-    let mut header_b64 = b64_json(&header)?;
     let payload_b64 = b64_json(&payload)?;
-    let mut signing_input = format!("{}.{}", header_b64, payload_b64);
-    let mut sig = tee.jwt_hmac_sign(signing_input.as_bytes()).await?;
-    if sig.kid != header.kid {
-        let header = JwtHeader {
-            alg: "HS256".to_string(),
-            typ: "JWT".to_string(),
-            kid: sig.kid.clone(),
-        };
-        header_b64 = b64_json(&header)?;
-        signing_input = format!("{}.{}", header_b64, payload_b64);
-        sig = tee.jwt_hmac_sign(signing_input.as_bytes()).await?;
-    }
+
+    // Single atomic TA call: TA picks current kid, builds header, signs — no kid race possible
+    let sig = tee.jwt_sign_payload(&payload_b64).await?;
+    let signing_input = format!("{}.{}", sig.header_b64, payload_b64);
     let signature_b64 = URL_SAFE_NO_PAD.encode(sig.hmac);
 
     Ok((format!("{}.{}", signing_input, signature_b64), exp))

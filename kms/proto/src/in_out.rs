@@ -264,3 +264,16 @@ pub struct JwtRotateSecretOutput {
     pub new_kid: String,
     pub retired_kid: Option<String>,
 }
+
+// Single-call payload signing — atomically picks current kid, builds header, signs
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtSignPayloadInput {
+    pub payload_b64: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JwtSignPayloadOutput {
+    pub kid: String,
+    pub header_b64: String,
+    pub hmac: [u8; 32],
+}

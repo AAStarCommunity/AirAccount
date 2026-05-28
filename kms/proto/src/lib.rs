@@ -39,6 +39,7 @@ pub enum Command {
     JwtHmacSign = 13,
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
+    JwtSignPayload = 16,
     #[default]
     Unknown,
 }
@@ -81,6 +82,7 @@ mod tests {
         assert_eq!(u32::from(Command::JwtHmacSign), 13);
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
+        assert_eq!(u32::from(Command::JwtSignPayload), 16);
     }
 
     #[test]
@@ -98,7 +100,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=15u32 {
+        for i in 0..=16u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -352,6 +354,9 @@ mod tests {
             wallet_id: test_uuid(),
             agent_index: 3,
             user_op_hash: [0xcc; 32],
+            jwt_kid: "v1234".to_string(),
+            jwt_signing_input: b"header.payload".to_vec(),
+            jwt_hmac: vec![0xaa; 32],
         });
         bincode_roundtrip(&SignAgentUserOpOutput {
             signature: vec![0u8; 65],
@@ -381,6 +386,14 @@ mod tests {
         bincode_roundtrip(&JwtRotateSecretOutput {
             new_kid: "v1".to_string(),
             retired_kid: None,
+        });
+        bincode_roundtrip(&JwtSignPayloadInput {
+            payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+        });
+        bincode_roundtrip(&JwtSignPayloadOutput {
+            kid: "v1234".to_string(),
+            header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
+            hmac: [0xbb; 32],
         });
     }
 

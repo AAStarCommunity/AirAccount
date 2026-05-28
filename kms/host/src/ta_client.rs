@@ -739,6 +739,17 @@ impl TeeHandle {
         Ok(output.valid)
     }
 
+    pub async fn jwt_sign_payload(&self, payload_b64: &str) -> Result<proto::JwtSignPayloadOutput> {
+        let input = bincode::serialize(&proto::JwtSignPayloadInput {
+            payload_b64: payload_b64.to_string(),
+        })
+        .context("Failed to serialize JwtSignPayloadInput")?;
+        let out = self.call(proto::Command::JwtSignPayload, input).await?;
+        let output: proto::JwtSignPayloadOutput =
+            bincode::deserialize(&out).context("Failed to deserialize JwtSignPayloadOutput")?;
+        Ok(output)
+    }
+
     pub async fn jwt_rotate_secret(&self, force: bool) -> Result<proto::JwtRotateSecretOutput> {
         let input = bincode::serialize(&proto::JwtRotateSecretInput { force })
             .context("Failed to serialize JwtRotateSecretInput")?;
