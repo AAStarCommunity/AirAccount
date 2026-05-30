@@ -14,9 +14,10 @@ use p256::EncodedPoint;
 
 // Import from kms library and proto
 use kms::ta_client::TeeHandle;
-use kms::db::{KmsDb, WalletRow};
+use kms::db::{AgentKeyRow, KmsDb, WalletRow};
 use kms::rate_limit::RateLimiter;
 use kms::webauthn;
+use kms::agent_jwt;
 use proto;
 
 /// Estimated seconds per TEE operation with persistent session
@@ -321,26 +322,142 @@ pub struct WebAuthnAssertion {
     pub credential: webauthn::AuthenticationResponseJSON,
 }
 
+// ========================================
+// Agent Key Request/Response Structs
+// ========================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateAgentKeyRequest {
+    #[serde(rename = "humanKeyId")]
+    pub human_key_id: String,
+    #[serde(rename = "label", default)]
+    pub label: String,
+    #[serde(rename = "passkeyAssertion", skip_serializing_if = "Option::is_none")]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", skip_serializing_if = "Option::is_none")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateAgentKeyResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "agentAddress")]
+    pub agent_address: String,
+    #[serde(rename = "derivationPath")]
+    pub derivation_path: String,
+    #[serde(rename = "agentCredential")]
+    pub agent_credential: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignAgentRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "payload")]
+    pub payload: String,
+    #[serde(rename = "algorithm", default = "default_secp256k1")]
+    pub algorithm: String,
+    /// Smart Account contract address bound to this session key (v0.17.2+).
+    /// Embedded in the 106-byte signature: [0x08][account(20)][key(20)][ECDSA(65)].
+    /// Must be the ERC-4337 account that will call SessionKeyValidator.validateUserOp.
+    #[serde(rename = "accountAddress")]
+    pub account_address: String,
+}
+
+fn default_secp256k1() -> String { "secp256k1".to_string() }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignAgentResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "agentAddress")]
+    pub agent_address: String,
+    #[serde(rename = "signature")]
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefreshAgentCredentialRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "passkeyAssertion", skip_serializing_if = "Option::is_none")]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", skip_serializing_if = "Option::is_none")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevokeAgentCredentialRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "passkeyAssertion", skip_serializing_if = "Option::is_none")]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", skip_serializing_if = "Option::is_none")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevokeAgentCredentialResponse {
+    pub success: bool,
+    #[serde(rename = "revokedAt")]
+    pub revoked_at: i64,
+}
+
+/// Parse compound agent keyId "wallet_uuid:agent_index"
+fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
+    let parts: Vec<&str> = key_id.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(anyhow!("Invalid agent keyId format (expected wallet_id:index): {}", key_id));
+    }
+    let wallet_id = Uuid::parse_str(parts[0])
+        .map_err(|_| anyhow!("Invalid wallet_id in agent keyId: {}", parts[0]))?;
+    let agent_index: u32 = parts[1].parse()
+        .map_err(|_| anyhow!("Invalid agent_index in keyId: {}", parts[1]))?;
+    Ok((wallet_id, agent_index))
+}
+
 /// Parse DER-encoded ECDSA signature into (r, s) 32-byte arrays
 fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     if der.len() < 8 || der[0] != 0x30 {
-        return Err(anyhow!("Invalid DER signature"));
+        return Err(anyhow!("Invalid DER signature: bad header"));
     }
-    let mut pos = 2; // skip 0x30 + total_len
-    if der[pos] != 0x02 {
-        return Err(anyhow!("Expected INTEGER tag for r"));
+    let total_len = der[1] as usize;
+    if total_len > 0x7F {
+        return Err(anyhow!("Invalid DER signature: long-form length not supported"));
+    }
+    if 2 + total_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: declared length {} exceeds data {}", total_len, der.len()));
+    }
+    let mut pos = 2;
+    if pos >= der.len() || der[pos] != 0x02 {
+        return Err(anyhow!("Invalid DER signature: expected INTEGER tag for r"));
     }
     pos += 1;
+    if pos >= der.len() {
+        return Err(anyhow!("Invalid DER signature: missing r_len byte"));
+    }
     let r_len = der[pos] as usize;
     pos += 1;
+    if pos + r_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: r overflows buffer (r_len={} pos={} len={})", r_len, pos, der.len()));
+    }
     let r_raw = &der[pos..pos + r_len];
     pos += r_len;
-    if der[pos] != 0x02 {
-        return Err(anyhow!("Expected INTEGER tag for s"));
+    if pos >= der.len() || der[pos] != 0x02 {
+        return Err(anyhow!("Invalid DER signature: expected INTEGER tag for s"));
     }
     pos += 1;
+    if pos >= der.len() {
+        return Err(anyhow!("Invalid DER signature: missing s_len byte"));
+    }
     let s_len = der[pos] as usize;
     pos += 1;
+    if pos + s_len > der.len() {
+        return Err(anyhow!("Invalid DER signature: s overflows buffer (s_len={} pos={} len={})", s_len, pos, der.len()));
+    }
     let s_raw = &der[pos..pos + s_len];
 
     // Pad/trim to 32 bytes (DER integers may have leading zero for sign)
@@ -385,6 +502,7 @@ pub struct KmsApiServer {
     db: KmsDb,
     tee: TeeHandle,
     rate_limiter: RateLimiter,
+    agent_rate_limiter: RateLimiter,
     rp_name: String,
     rp_ids: Vec<String>,
     expected_origins: Vec<String>,
@@ -403,10 +521,17 @@ impl KmsApiServer {
         println!("🔑 Allowed rpIds: {:?}", rp_ids);
         let rate_limiter = RateLimiter::from_env();
         println!("⏱️  Rate limiter: {}/min per API key", rate_limiter.limit());
+        let agent_rl_limit = std::env::var("KMS_AGENT_RATE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let agent_rate_limiter = RateLimiter::new(agent_rl_limit);
+        println!("⏱️  Agent rate limiter: {}/min per credential", agent_rl_limit);
         Self {
             db,
             tee: TeeHandle::new(),
             rate_limiter,
+            agent_rate_limiter,
             rp_name,
             rp_ids,
             expected_origins,
@@ -444,6 +569,18 @@ impl KmsApiServer {
     }
 
     /// Validate hex-encoded hash (must be exactly 32 bytes = 64 hex chars).
+    fn parse_address_hex(addr: &str) -> Result<[u8; 20]> {
+        let hex_str = addr.trim_start_matches("0x");
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow!("Invalid address hex: {}", e))?;
+        if bytes.len() != 20 {
+            return Err(anyhow!("Address must be exactly 20 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
     fn validate_hash_hex(hash: &str) -> Result<[u8; 32]> {
         let hex_str = hash.trim_start_matches("0x");
         let bytes = hex::decode(hex_str)
@@ -761,7 +898,10 @@ impl KmsApiServer {
 
             Ok(Some(verified.proto_assertion))
         } else if raw.is_some() {
-            // Legacy hex path
+            // Legacy hex path: DEPRECATED — raw ECDSA bytes with no challenge or origin binding.
+            // Vulnerable to replay if an attacker captures a valid assertion.
+            // Retained for backward compatibility only; new clients should use WebAuthn ceremony.
+            eprintln!("⚠️  DEPRECATED: legacy passkey assertion (no challenge binding) for key_id={}. Migrate to WebAuthn ceremony.", key_id);
             let assertion = Self::parse_passkey_assertion(raw)?;
             self.pre_verify_passkey(key_id, &assertion).await?;
             Ok(assertion)
@@ -835,8 +975,11 @@ impl KmsApiServer {
             } else {
                 hex::decode(&transaction.to)
             }?;
+            if to_bytes.len() != 20 {
+                return Err(anyhow!("Transaction.to must be 20 bytes (40 hex chars), got {} bytes", to_bytes.len()));
+            }
             let mut to_array = [0u8; 20];
-            to_array.copy_from_slice(&to_bytes[..20]);
+            to_array.copy_from_slice(&to_bytes);
 
             let data = if transaction.data.is_empty() {
                 vec![]
@@ -1125,13 +1268,230 @@ impl KmsApiServer {
         println!("📝 WebAuthn BeginAuthentication: challenge_id={}, key_id={}", challenge_id, key_id);
         Ok(resp)
     }
+
+    // ========================================
+    // Agent Key methods
+    // ========================================
+
+    pub async fn create_agent_key(&self, req: CreateAgentKeyRequest) -> Result<CreateAgentKeyResponse> {
+        let wallet_id = Self::validate_key_id(&req.human_key_id)?;
+
+        // Verify human wallet exists
+        let _wallet = self.db.get_wallet(&req.human_key_id)?
+            .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
+
+        // Agent operations MUST use WebAuthn ceremony (challenge-based) to prevent replay attacks.
+        // Legacy raw passkey assertions lack challenge/origin binding and can be replayed.
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("create-agent-key requires WebAuthn ceremony (BeginAuthentication flow). Legacy passkey assertions are not accepted for agent operations."));
+        }
+        let assertion = self.resolve_passkey_assertion(
+            &req.human_key_id,
+            None,  // reject legacy path
+            req.webauthn_assertion.as_ref(),
+        ).await?;
+        if assertion.is_none() {
+            return Err(anyhow!("Passkey assertion required to create agent key"));
+        }
+
+        // Atomically allocate the next agent_index (MAX+1 in a single lock acquire).
+        // Avoids the race between count() and insert() that could yield duplicate indices.
+        let agent_index = self.db.next_agent_index_for_wallet(&req.human_key_id)?;
+
+        // Derive agent key in TEE (secp256k1, BIP44 m/44'/60'/0'/1/<index>)
+        let tee_result = self.tee.create_agent_key(wallet_id, agent_index).await?;
+        let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
+        let pubkey_hex = hex::encode(&tee_result.public_key_compressed);
+        let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
+
+        // Issue JWT credential (3-day TTL), EIP-191 wrapping done inside TEE
+        let (jwt, expires_at) = agent_jwt::issue_credential(
+            &self.tee,
+            &req.human_key_id,
+            wallet_id,
+            agent_index,
+            &agent_address,
+            3 * 24 * 3600,
+        ).await?;
+
+        // Store in DB — only credential_hash, never the full JWT
+        let now = Utc::now().to_rfc3339();
+        let cred_hash = agent_jwt::credential_hash(&jwt);
+        self.db.insert_agent_key(&AgentKeyRow {
+            wallet_id: req.human_key_id.clone(),
+            agent_index,
+            human_id: req.human_key_id.clone(),
+            agent_address: agent_address.clone(),
+            public_key_compressed: pubkey_hex,
+            credential_hash: Some(cred_hash),
+            credential_jwt: None,
+            credential_expires_at: Some(expires_at),
+            status: "active".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            revoked_at: None,
+        })?;
+
+        let key_id = format!("{}:{}", req.human_key_id, agent_index);
+        println!("✅ CreateAgentKey: wallet={} idx={} addr={}", req.human_key_id, agent_index, agent_address);
+
+        Ok(CreateAgentKeyResponse {
+            key_id,
+            agent_address,
+            derivation_path,
+            agent_credential: jwt,
+            expires_at,
+        })
+    }
+
+    pub async fn sign_agent(&self, bearer_jwt: String, req: SignAgentRequest) -> Result<SignAgentResponse> {
+        // Verify JWT via TEE HMAC
+        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
+            .map_err(|e| anyhow!("Invalid agent credential: {}", e))?;
+
+        // Validate keyId matches JWT payload
+        let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_uuid.to_string();
+        if payload.wallet_id != wallet_id_str || payload.agent_index != agent_index {
+            return Err(anyhow!("keyId does not match agent credential"));
+        }
+
+        // Per-credential rate limit (design §2.2): prevents single compromised key from
+        // flooding TEE signing. Keyed by wallet_id/agent_index — independent of global API key limit.
+        let cred_rl_key = format!("{}/{}", wallet_id_str, agent_index);
+        self.agent_rate_limiter.check(&cred_rl_key)
+            .map_err(|limit| anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit))?;
+
+        // Check agent key is active in DB + credential_hash matches
+        let agent_key = self.db.get_agent_key(&wallet_id_str, agent_index)?
+            .ok_or_else(|| anyhow!("Agent key not found: {}", req.key_id))?;
+        if agent_key.status != "active" {
+            return Err(anyhow!("Agent key is revoked"));
+        }
+        let current_hash = agent_jwt::credential_hash(&bearer_jwt);
+        if agent_key.credential_hash.as_deref() != Some(current_hash.as_str()) {
+            return Err(anyhow!("Agent credential has been superseded or revoked"));
+        }
+
+        // Validate userOpHash (exactly 32 bytes)
+        let user_op_hash = Self::validate_hash_hex(&req.payload)?;
+
+        // Parse accountAddress — must be a 20-byte hex string (with or without 0x prefix)
+        let account_address = Self::parse_address_hex(&req.account_address)
+            .map_err(|e| anyhow!("Invalid accountAddress: {}", e))?;
+
+        // Extract JWT proof for TA-side authorization (defense-in-depth)
+        let (jwt_kid, jwt_signing_input, jwt_hmac) = agent_jwt::extract_signing_proof(&bearer_jwt)
+            .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+
+        // Sign in TEE — TA re-verifies JWT HMAC before signing; EIP-191 inside TEE; V=27/28
+        // Returns 106-byte v0.17.2 format: [0x08][account(20)][key(20)][ECDSA(65)]
+        let sig_bytes = self.tee.sign_agent_user_op(
+            wallet_uuid, agent_index, &user_op_hash,
+            jwt_kid, jwt_signing_input, jwt_hmac,
+            account_address,
+        ).await?;
+
+        println!("✅ SignAgent: wallet={} idx={} addr={}", wallet_id_str, agent_index, agent_key.agent_address);
+
+        Ok(SignAgentResponse {
+            key_id: req.key_id,
+            agent_address: agent_key.agent_address,
+            signature: format!("0x{}", hex::encode(&sig_bytes)),
+        })
+    }
+
+    pub async fn refresh_agent_credential(&self, bearer_jwt: String, req: RefreshAgentCredentialRequest) -> Result<CreateAgentKeyResponse> {
+        // Verify current JWT is still valid
+        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
+            .map_err(|e| anyhow!("Invalid agent credential: {}", e))?;
+
+        let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_uuid.to_string();
+        if payload.wallet_id != wallet_id_str || payload.agent_index != agent_index {
+            return Err(anyhow!("keyId does not match agent credential"));
+        }
+
+        // Require WebAuthn ceremony for replay protection (no legacy passkey path)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("refresh-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
+        }
+        let assertion = self.resolve_passkey_assertion(
+            &wallet_id_str,
+            None,  // reject legacy path
+            req.webauthn_assertion.as_ref(),
+        ).await?;
+        if assertion.is_none() {
+            return Err(anyhow!("Passkey assertion required to refresh agent credential"));
+        }
+
+        // Check agent key is active
+        let agent_key = self.db.get_agent_key(&wallet_id_str, agent_index)?
+            .ok_or_else(|| anyhow!("Agent key not found: {}", req.key_id))?;
+        if agent_key.status != "active" {
+            return Err(anyhow!("Agent key is revoked"));
+        }
+
+        // Issue new JWT (old JWT is implicitly superseded via credential_hash update)
+        let (new_jwt, expires_at) = agent_jwt::issue_credential(
+            &self.tee,
+            &wallet_id_str,
+            wallet_uuid,
+            agent_index,
+            &agent_key.agent_address,
+            3 * 24 * 3600,
+        ).await?;
+
+        let cred_hash = agent_jwt::credential_hash(&new_jwt);
+        self.db.update_agent_credential(&wallet_id_str, agent_index, &cred_hash, expires_at)?;
+
+        let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
+        println!("✅ RefreshAgentCredential: wallet={} idx={}", wallet_id_str, agent_index);
+
+        Ok(CreateAgentKeyResponse {
+            key_id: req.key_id,
+            agent_address: agent_key.agent_address,
+            derivation_path,
+            agent_credential: new_jwt,
+            expires_at,
+        })
+    }
+
+    pub async fn revoke_agent_credential(&self, req: RevokeAgentCredentialRequest) -> Result<RevokeAgentCredentialResponse> {
+        let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_uuid.to_string();
+
+        // Require WebAuthn ceremony for replay protection (no legacy passkey path)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("revoke-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
+        }
+        let assertion = self.resolve_passkey_assertion(
+            &wallet_id_str,
+            None,  // reject legacy path
+            req.webauthn_assertion.as_ref(),
+        ).await?;
+        if assertion.is_none() {
+            return Err(anyhow!("Passkey assertion required to revoke agent key"));
+        }
+
+        // Revoke in DB
+        let revoked = self.db.revoke_agent_key(&wallet_id_str, agent_index)?;
+        if !revoked {
+            return Err(anyhow!("Agent key not found or already revoked: {}", req.key_id));
+        }
+
+        let revoked_at = Utc::now().timestamp();
+        println!("✅ RevokeAgentCredential: wallet={} idx={}", wallet_id_str, agent_index);
+
+        Ok(RevokeAgentCredentialResponse { success: true, revoked_at })
+    }
 }
 
 // ========================================
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.16.8";
+const KMS_VERSION: &str = "0.17.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -1538,6 +1898,90 @@ async fn handle_queue_status(
     Ok(warp::reply::json(&server.queue_status()))
 }
 
+async fn handle_create_agent_key(
+    body: CreateAgentKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.create_agent_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CreateAgentKey OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CreateAgentKey error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_agent(
+    auth_header: String,
+    body: SignAgentRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let jwt = auth_header.strip_prefix("Bearer ")
+        .ok_or_else(|| warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string())))?
+        .to_string();
+    let t0 = std::time::Instant::now();
+    match server.sign_agent(jwt, body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignAgent OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignAgent error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_refresh_agent_credential(
+    auth_header: String,
+    body: RefreshAgentCredentialRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let jwt = auth_header.strip_prefix("Bearer ")
+        .ok_or_else(|| warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string())))?
+        .to_string();
+    let t0 = std::time::Instant::now();
+    match server.refresh_agent_credential(jwt, body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ RefreshAgentCredential OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("RefreshAgentCredential error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_revoke_agent_credential(
+    body: RevokeAgentCredentialRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.revoke_agent_credential(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ RevokeAgentCredential OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("RevokeAgentCredential error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ApiError(String);
 
@@ -1583,12 +2027,20 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
 // Custom body filter for AWS KMS content-type
 // ========================================
 
+const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024; // 256 KB
+
 fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
 ) -> impl Filter<Extract = (T,), Error = warp::Rejection> + Clone {
     warp::body::bytes()
         .or(warp::any().map(|| bytes::Bytes::new()))
         .unify()
         .and_then(|bytes: bytes::Bytes| async move {
+            if bytes.len() > MAX_REQUEST_BODY_BYTES {
+                return Err(warp::reject::custom(ApiError(format!(
+                    "Request body too large: {} bytes (max {}KB)",
+                    bytes.len(), MAX_REQUEST_BODY_BYTES / 1024
+                ))));
+            }
             let data: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
             serde_json::from_slice(data)
                 .map_err(|e| {
@@ -1685,20 +2137,26 @@ pub async fn start_kms_server() -> Result<()> {
 
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
-    // API Key guard: enabled if DB has keys or KMS_API_KEY env var is set
+    // API Key guard.
+    // Enabled if DB has keys OR KMS_API_KEY env var is set.
+    // If neither is configured, access is open unless KMS_REQUIRE_API_KEY=1 is set.
+    // In production, set KMS_REQUIRE_API_KEY=1 to fail-closed even before key provisioning.
     let legacy_key = std::env::var("KMS_API_KEY").ok();
     let has_db_keys = db.has_api_keys().unwrap_or(false);
-    let api_key_enabled = has_db_keys || legacy_key.is_some();
+    let force_required = std::env::var("KMS_REQUIRE_API_KEY").map(|v| v == "1").unwrap_or(false);
+    let api_key_enabled = has_db_keys || legacy_key.is_some() || force_required;
     if api_key_enabled {
-        let source = match (has_db_keys, legacy_key.is_some()) {
-            (true, true) => "DB + env",
-            (true, false) => "DB",
-            (false, true) => "env (KMS_API_KEY)",
+        let source = match (has_db_keys, legacy_key.is_some(), force_required) {
+            (true, true, _) => "DB + env",
+            (true, false, _) => "DB",
+            (false, true, _) => "env (KMS_API_KEY)",
+            (false, false, true) => "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)",
             _ => unreachable!(),
         };
         println!("🔑 API Key authentication: ENABLED (source: {})", source);
     } else {
-        println!("⚠️  API Key authentication: DISABLED (run `api-key generate` to enable)");
+        println!("⚠️  API Key authentication: DISABLED — all requests are unauthenticated.");
+        println!("⚠️  To enable: run `kms-admin api-key generate` or set KMS_API_KEY / KMS_REQUIRE_API_KEY=1");
     }
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
     let rl_filter = rate_limit_filter(server.rate_limiter.clone());
@@ -1884,6 +2342,83 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_authentication);
 
+    // Agent Key endpoints (POST /kms/create-agent-key, /kms/sign-agent, etc.)
+    let server_cak = server.clone();
+    let create_agent_key = warp::path("kms")
+        .and(warp::path("create-agent-key"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_cak.clone()))
+        .and_then(handle_create_agent_key);
+
+    let server_sa = server.clone();
+    let sign_agent = warp::path("kms")
+        .and(warp::path("sign-agent"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sa.clone()))
+        .and_then(handle_sign_agent);
+
+    let server_rac = server.clone();
+    let refresh_agent_credential = warp::path("kms")
+        .and(warp::path("refresh-agent-credential"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_rac.clone()))
+        .and_then(handle_refresh_agent_credential);
+
+    let server_revoke = server.clone();
+    let revoke_agent_credential = warp::path("kms")
+        .and(warp::path("revoke-agent-credential"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_revoke.clone()))
+        .and_then(handle_revoke_agent_credential);
+
+    // JWT secret auto-rotation background task (runs every 24h)
+    let server_rot = server.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(24 * 3600));
+        interval.tick().await; // Skip immediate first tick
+        loop {
+            interval.tick().await;
+            match server_rot.tee.jwt_rotate_secret(false).await {
+                Ok(result) => {
+                    let now = Utc::now().to_rfc3339();
+                    let _ = server_rot.db.upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
+                        kid: result.new_kid.clone(),
+                        status: "current".to_string(),
+                        created_at: now.clone(),
+                        retired_at: None,
+                        expires_at: None,
+                    });
+                    if let Some(old_kid) = result.retired_kid {
+                        let retire_ts = Utc::now().timestamp() + 7 * 24 * 3600;
+                        let _ = server_rot.db.upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
+                            kid: old_kid,
+                            status: "verify-only".to_string(),
+                            created_at: now,
+                            retired_at: None,
+                            expires_at: Some(retire_ts),
+                        });
+                    }
+                    println!("🔑 JWT secret auto-rotated: new kid={}", result.new_kid);
+                }
+                Err(e) => eprintln!("JWT rotation error: {}", e),
+            }
+        }
+    });
+
     let routes = index
         .or(test_ui)
         .or(health)
@@ -1902,9 +2437,13 @@ pub async fn start_kms_server() -> Result<()> {
         .or(begin_registration)
         .or(complete_registration)
         .or(begin_authentication)
+        .or(create_agent_key)
+        .or(sign_agent)
+        .or(refresh_agent_credential)
+        .or(revoke_agent_credential)
         .recover(handle_rejection);
 
-    println!("🚀 KMS API Server starting on http://0.0.0.0:3000");
+    println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);
     println!("📚 Supported APIs:");
     println!("   GET  /              - Welcome page");
     println!("   GET  /test          - Interactive test UI");
@@ -1923,6 +2462,10 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   GET  /KeyStatus             - Key derivation status (polling)");
     println!("   GET  /QueueStatus           - TEE queue depth");
     println!("   GET  /health                - Health check");
+    println!("   POST /kms/create-agent-key       - Create AI agent key (WebAuthn)");
+    println!("   POST /kms/sign-agent             - Agent sign userOpHash (Bearer JWT)");
+    println!("   POST /kms/refresh-agent-credential - Refresh agent JWT (Bearer + WebAuthn)");
+    println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
