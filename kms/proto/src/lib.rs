@@ -357,9 +357,10 @@ mod tests {
             jwt_kid: "v1234".to_string(),
             jwt_signing_input: b"header.payload".to_vec(),
             jwt_hmac: vec![0xaa; 32],
+            account_address: [0xab; 20],
         });
         bincode_roundtrip(&SignAgentUserOpOutput {
-            signature: vec![0u8; 65],
+            signature: vec![0u8; 106],  // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
         });
     }
 

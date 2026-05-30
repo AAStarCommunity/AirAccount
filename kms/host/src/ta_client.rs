@@ -694,6 +694,7 @@ impl TeeHandle {
         jwt_kid: String,
         jwt_signing_input: Vec<u8>,
         jwt_hmac: Vec<u8>,
+        account_address: [u8; 20],
     ) -> Result<Vec<u8>> {
         let input = bincode::serialize(&proto::SignAgentUserOpInput {
             wallet_id,
@@ -702,6 +703,7 @@ impl TeeHandle {
             jwt_kid,
             jwt_signing_input,
             jwt_hmac,
+            account_address,
         })
         .context("Failed to serialize SignAgentUserOpInput")?;
         let out = self.call(proto::Command::SignAgentUserOp, input).await?;

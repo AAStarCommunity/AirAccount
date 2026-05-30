@@ -639,6 +639,9 @@ fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::Sign
     let derivation_path = agent_derivation_path(input.agent_index);
     let private_key = wallet.export_private_key(&derivation_path)?;
 
+    // Derive the agent key's Ethereum address from its public key (inside TEE, safe).
+    let (agent_key_address, _) = wallet.derive_address(&derivation_path)?;
+
     let mut eip191 = b"\x19Ethereum Signed Message:\n32".to_vec();
     eip191.extend_from_slice(&input.user_op_hash);
     let digest = Keccak256::digest(&eip191);
@@ -649,7 +652,13 @@ fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::Sign
     let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
     let (recovery_id, sig_bytes) = sig.serialize_compact();
 
-    let mut signature = Vec::with_capacity(65);
+    // v0.17.2 wire format: [0x08][account(20)][key(20)][r(32)][s(32)][v(1)] = 106 bytes
+    // account = Smart Account contract address (prevents cross-account session-key abuse)
+    // key     = agent secp256k1 EOA address (derived from private key inside TEE)
+    let mut signature = Vec::with_capacity(106);
+    signature.push(0x08u8);
+    signature.extend_from_slice(&input.account_address);
+    signature.extend_from_slice(&agent_key_address);
     signature.extend_from_slice(&sig_bytes);
     signature.push(recovery_id.to_i32() as u8 + 27);
 
