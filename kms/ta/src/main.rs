@@ -720,7 +720,7 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
         .ok_or_else(|| anyhow!("Primary type '{}' not found in types list", input.primary_type))?;
 
     // Compute EIP-712 digest entirely inside TEE
-    let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message);
+    let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
     let private_key = wallet.export_private_key(&input.hd_path)?;
