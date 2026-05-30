@@ -222,6 +222,10 @@ pub struct SignAgentUserOpInput {
     pub jwt_kid: String,
     pub jwt_signing_input: Vec<u8>,  // b64url(header).b64url(payload) bytes
     pub jwt_hmac: Vec<u8>,           // 32 bytes — HMAC-SHA256 from JWT signature field
+    /// Smart Account contract address that this session key is bound to.
+    /// Embedded in the v0.17.2 signature wire format: [0x08][account(20)][key(20)][ECDSA(65)].
+    /// Verified on-chain by SessionKeyValidator to prevent cross-account session-key abuse.
+    pub account_address: [u8; 20],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

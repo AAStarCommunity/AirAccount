@@ -360,6 +360,11 @@ pub struct SignAgentRequest {
     pub payload: String,
     #[serde(rename = "algorithm", default = "default_secp256k1")]
     pub algorithm: String,
+    /// Smart Account contract address bound to this session key (v0.17.2+).
+    /// Embedded in the 106-byte signature: [0x08][account(20)][key(20)][ECDSA(65)].
+    /// Must be the ERC-4337 account that will call SessionKeyValidator.validateUserOp.
+    #[serde(rename = "accountAddress")]
+    pub account_address: String,
 }
 
 fn default_secp256k1() -> String { "secp256k1".to_string() }
@@ -564,6 +569,18 @@ impl KmsApiServer {
     }
 
     /// Validate hex-encoded hash (must be exactly 32 bytes = 64 hex chars).
+    fn parse_address_hex(addr: &str) -> Result<[u8; 20]> {
+        let hex_str = addr.trim_start_matches("0x");
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow!("Invalid address hex: {}", e))?;
+        if bytes.len() != 20 {
+            return Err(anyhow!("Address must be exactly 20 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
     fn validate_hash_hex(hash: &str) -> Result<[u8; 32]> {
         let hex_str = hash.trim_start_matches("0x");
         let bytes = hex::decode(hex_str)
@@ -1359,14 +1376,20 @@ impl KmsApiServer {
         // Validate userOpHash (exactly 32 bytes)
         let user_op_hash = Self::validate_hash_hex(&req.payload)?;
 
+        // Parse accountAddress — must be a 20-byte hex string (with or without 0x prefix)
+        let account_address = Self::parse_address_hex(&req.account_address)
+            .map_err(|e| anyhow!("Invalid accountAddress: {}", e))?;
+
         // Extract JWT proof for TA-side authorization (defense-in-depth)
         let (jwt_kid, jwt_signing_input, jwt_hmac) = agent_jwt::extract_signing_proof(&bearer_jwt)
             .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
 
         // Sign in TEE — TA re-verifies JWT HMAC before signing; EIP-191 inside TEE; V=27/28
+        // Returns 106-byte v0.17.2 format: [0x08][account(20)][key(20)][ECDSA(65)]
         let sig_bytes = self.tee.sign_agent_user_op(
             wallet_uuid, agent_index, &user_op_hash,
             jwt_kid, jwt_signing_input, jwt_hmac,
+            account_address,
         ).await?;
 
         println!("✅ SignAgent: wallet={} idx={} addr={}", wallet_id_str, agent_index, agent_key.agent_address);
