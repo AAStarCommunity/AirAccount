@@ -277,3 +277,70 @@ pub struct JwtSignPayloadOutput {
     pub header_b64: String,
     pub hmac: [u8; 32],
 }
+
+// EIP-712 Typed Data Signing
+
+/// EIP-712 domain separator fields (all optional per spec)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Eip712Domain {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub chain_id: Option<u64>,
+    pub verifying_contract: Option<[u8; 20]>,
+}
+
+/// A single field definition in an EIP-712 type
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Eip712TypeField {
+    pub name: String,
+    pub field_type: String,
+}
+
+/// A named struct type with its field definitions
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Eip712TypeDef {
+    pub name: String,
+    pub fields: Vec<Eip712TypeField>,
+}
+
+/// A typed value for EIP-712 message fields.
+/// v0.18.1 scope: flat primitive types only (no array, no nested struct).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum Eip712Value {
+    Address([u8; 20]),
+    /// Big-endian unsigned integer, 1–32 bytes (uint8 through uint256)
+    Uint(Vec<u8>),
+    Bytes32([u8; 32]),
+    Bool(bool),
+    Str(String),
+    Bytes(Vec<u8>),
+}
+
+/// A named field-value pair in the EIP-712 message
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Eip712FieldValue {
+    pub name: String,
+    pub value: Eip712Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignTypedDataInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    /// EIP-712 domain separator
+    pub domain: Eip712Domain,
+    /// Primary type name (the type being signed)
+    pub primary_type: String,
+    /// All type definitions referenced (primary type + any referenced types)
+    pub types: Vec<Eip712TypeDef>,
+    /// The message values for the primary type
+    pub message: Vec<Eip712FieldValue>,
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignTypedDataOutput {
+    /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
+    pub signature: Vec<u8>,
+}

@@ -40,6 +40,7 @@ pub enum Command {
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
     JwtSignPayload = 16,
+    SignTypedData = 17,
     #[default]
     Unknown,
 }
@@ -83,6 +84,7 @@ mod tests {
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
         assert_eq!(u32::from(Command::JwtSignPayload), 16);
+        assert_eq!(u32::from(Command::SignTypedData), 17);
     }
 
     #[test]
@@ -90,6 +92,7 @@ mod tests {
         assert!(matches!(Command::from(0u32), Command::CreateWallet));
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
+        assert!(matches!(Command::from(17u32), Command::SignTypedData));
     }
 
     #[test]
@@ -100,7 +103,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=16u32 {
+        for i in 0..=17u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -488,6 +491,76 @@ mod tests {
             hd_path: "m/44'/60'/0'/0/0".into(),
             hash: [0xff; 32],
             passkey_assertion: Some(assertion),
+        });
+    }
+
+    // ── EIP-712 SignTypedData ──
+
+    #[test]
+    fn sign_typed_data_roundtrip() {
+        let input = SignTypedDataInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            domain: Eip712Domain {
+                name: Some("MyDApp".into()),
+                version: Some("1".into()),
+                chain_id: Some(1),
+                verifying_contract: Some([0xde; 20]),
+            },
+            primary_type: "Transfer".into(),
+            types: vec![Eip712TypeDef {
+                name: "Transfer".into(),
+                fields: vec![
+                    Eip712TypeField { name: "to".into(), field_type: "address".into() },
+                    Eip712TypeField { name: "amount".into(), field_type: "uint256".into() },
+                    Eip712TypeField { name: "memo".into(), field_type: "string".into() },
+                ],
+            }],
+            message: vec![
+                Eip712FieldValue {
+                    name: "to".into(),
+                    value: Eip712Value::Address([0xab; 20]),
+                },
+                Eip712FieldValue {
+                    name: "amount".into(),
+                    value: Eip712Value::Uint(vec![0x00, 0x0f, 0x42, 0x40]), // 1000000
+                },
+                Eip712FieldValue {
+                    name: "memo".into(),
+                    value: Eip712Value::Str("hello".into()),
+                },
+            ],
+            passkey_assertion: None,
+        };
+        bincode_roundtrip(&input);
+        bincode_roundtrip(&SignTypedDataOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    #[test]
+    fn eip712_domain_minimal_roundtrip() {
+        bincode_roundtrip(&Eip712Domain {
+            name: None,
+            version: None,
+            chain_id: Some(137),
+            verifying_contract: None,
+        });
+    }
+
+    #[test]
+    fn eip712_value_variants_roundtrip() {
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "flag".into(),
+            value: Eip712Value::Bool(true),
+        });
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "data".into(),
+            value: Eip712Value::Bytes(vec![0xca, 0xfe, 0xba, 0xbe]),
+        });
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "hash".into(),
+            value: Eip712Value::Bytes32([0x11; 32]),
         });
     }
 }

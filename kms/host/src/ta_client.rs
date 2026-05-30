@@ -758,6 +758,18 @@ impl TeeHandle {
             bincode::deserialize(&out).context("Failed to deserialize JwtRotateSecretOutput")?;
         Ok(output)
     }
+
+    pub async fn sign_typed_data(
+        &self,
+        input: proto::SignTypedDataInput,
+    ) -> Result<proto::SignTypedDataOutput> {
+        let serialized =
+            bincode::serialize(&input).context("Failed to serialize SignTypedDataInput")?;
+        let out = self.call(proto::Command::SignTypedData, serialized).await?;
+        let output: proto::SignTypedDataOutput =
+            bincode::deserialize(&out).context("Failed to deserialize SignTypedDataOutput")?;
+        Ok(output)
+    }
 }
 
 // ---- TEE worker thread ----

@@ -18,6 +18,7 @@
 #![no_main]
 
 mod bip32_secp;
+mod eip712;
 mod hash;
 mod wallet;
 
@@ -704,6 +705,39 @@ fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSign
     })
 }
 
+fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
+    dbg_println!(
+        "[+] EIP-712 sign typed data for wallet: {:?}, primary_type: {}",
+        input.wallet_id,
+        input.primary_type
+    );
+
+    // Resolve the primary type definition from the provided type list
+    let primary_type_def = input
+        .types
+        .iter()
+        .find(|td| td.name == input.primary_type)
+        .ok_or_else(|| anyhow!("Primary type '{}' not found in types list", input.primary_type))?;
+
+    // Compute EIP-712 digest entirely inside TEE
+    let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message);
+
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    let private_key = wallet.export_private_key(&input.hd_path)?;
+
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let message = secp256k1::Message::from_slice(&digest)?;
+    let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignTypedDataOutput { signature })
+}
+
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
     let db = SecureStorageClient::open(DB_NAME)?;
     let store = JwtSecretStore::load(&db);
@@ -775,6 +809,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
         Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
+        Command::SignTypedData => process(serialized_input, sign_typed_data),
         _ => bail!("Unsupported command"),
     }
 }
