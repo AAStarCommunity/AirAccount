@@ -20,7 +20,6 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 mod in_out;
 pub use in_out::*;
 
-
 #[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone)]
 #[repr(u32)]
 pub enum Command {
@@ -35,12 +34,18 @@ pub enum Command {
     VerifyPasskey,
     WarmupCache,
     RegisterPasskeyTa,
+    CreateAgentKey = 11,
+    SignAgentUserOp = 12,
+    JwtHmacSign = 13,
+    JwtHmacVerify = 14,
+    JwtRotateSecret = 15,
+    JwtSignPayload = 16,
     #[default]
     Unknown,
 }
 
 // If Uuid::parse_str() returns an InvalidLength error, there may be an extra
-// newline in your uuid.txt file. You can remove it by running 
+// newline in your uuid.txt file. You can remove it by running
 // `truncate -s 36 uuid.txt`.
 pub const UUID: &str = &include_str!("../../uuid.txt");
 
@@ -72,6 +77,12 @@ mod tests {
         assert_eq!(u32::from(Command::VerifyPasskey), 8);
         assert_eq!(u32::from(Command::WarmupCache), 9);
         assert_eq!(u32::from(Command::RegisterPasskeyTa), 10);
+        assert_eq!(u32::from(Command::CreateAgentKey), 11);
+        assert_eq!(u32::from(Command::SignAgentUserOp), 12);
+        assert_eq!(u32::from(Command::JwtHmacSign), 13);
+        assert_eq!(u32::from(Command::JwtHmacVerify), 14);
+        assert_eq!(u32::from(Command::JwtRotateSecret), 15);
+        assert_eq!(u32::from(Command::JwtSignPayload), 16);
     }
 
     #[test]
@@ -89,7 +100,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=10u32 {
+        for i in 0..=16u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -106,7 +117,11 @@ mod tests {
 
     // ── bincode roundtrip helpers ──
 
-    fn bincode_roundtrip<T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq>(val: &T) {
+    fn bincode_roundtrip<
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+    >(
+        val: &T,
+    ) {
         let bytes = bincode::serialize(val).expect("serialize");
         let decoded: T = bincode::deserialize(&bytes).expect("deserialize");
         assert_eq!(val, &decoded);
@@ -134,7 +149,10 @@ mod tests {
 
     #[test]
     fn remove_wallet_roundtrip() {
-        bincode_roundtrip(&RemoveWalletInput { wallet_id: test_uuid(), passkey_assertion: None });
+        bincode_roundtrip(&RemoveWalletInput {
+            wallet_id: test_uuid(),
+            passkey_assertion: None,
+        });
         bincode_roundtrip(&RemoveWalletOutput {});
     }
 
@@ -220,7 +238,9 @@ mod tests {
             passkey_assertion: None,
         };
         bincode_roundtrip(&input);
-        bincode_roundtrip(&SignTransactionOutput { signature: vec![0u8; 65] });
+        bincode_roundtrip(&SignTransactionOutput {
+            signature: vec![0u8; 65],
+        });
     }
 
     // ── SignMessage ──
@@ -233,7 +253,9 @@ mod tests {
             message: b"hello world".to_vec(),
             passkey_assertion: None,
         });
-        bincode_roundtrip(&SignMessageOutput { signature: vec![0u8; 65] });
+        bincode_roundtrip(&SignMessageOutput {
+            signature: vec![0u8; 65],
+        });
     }
 
     // ── SignHash ──
@@ -246,14 +268,18 @@ mod tests {
             hash: [0xaa; 32],
             passkey_assertion: None,
         });
-        bincode_roundtrip(&SignHashOutput { signature: vec![0u8; 65] });
+        bincode_roundtrip(&SignHashOutput {
+            signature: vec![0u8; 65],
+        });
     }
 
     // ── DeriveAddressAuto ──
 
     #[test]
     fn derive_address_auto_roundtrip() {
-        bincode_roundtrip(&DeriveAddressAutoInput { wallet_id: test_uuid() });
+        bincode_roundtrip(&DeriveAddressAutoInput {
+            wallet_id: test_uuid(),
+        });
 
         bincode_roundtrip(&DeriveAddressAutoOutput {
             wallet_id: test_uuid(),
@@ -272,7 +298,9 @@ mod tests {
             derivation_path: "m/44'/60'/0'/0/0".into(),
             passkey_assertion: None,
         });
-        bincode_roundtrip(&ExportPrivateKeyOutput { private_key: vec![0u8; 32] });
+        bincode_roundtrip(&ExportPrivateKeyOutput {
+            private_key: vec![0u8; 32],
+        });
     }
 
     // ── VerifyPasskey ──
@@ -295,9 +323,79 @@ mod tests {
 
     #[test]
     fn warmup_cache_roundtrip() {
-        bincode_roundtrip(&WarmupCacheInput { wallet_id: test_uuid() });
-        bincode_roundtrip(&WarmupCacheOutput { cached: true, cache_size: 200 });
-        bincode_roundtrip(&WarmupCacheOutput { cached: false, cache_size: 0 });
+        bincode_roundtrip(&WarmupCacheInput {
+            wallet_id: test_uuid(),
+        });
+        bincode_roundtrip(&WarmupCacheOutput {
+            cached: true,
+            cache_size: 200,
+        });
+        bincode_roundtrip(&WarmupCacheOutput {
+            cached: false,
+            cache_size: 0,
+        });
+    }
+
+    #[test]
+    fn create_agent_key_roundtrip() {
+        bincode_roundtrip(&CreateAgentKeyInput {
+            wallet_id: test_uuid(),
+            agent_index: 0,
+        });
+        bincode_roundtrip(&CreateAgentKeyOutput {
+            agent_address: [0xab; 20],
+            public_key_compressed: vec![0x02; 33],
+        });
+    }
+
+    #[test]
+    fn sign_agent_user_op_roundtrip() {
+        bincode_roundtrip(&SignAgentUserOpInput {
+            wallet_id: test_uuid(),
+            agent_index: 3,
+            user_op_hash: [0xcc; 32],
+            jwt_kid: "v1234".to_string(),
+            jwt_signing_input: b"header.payload".to_vec(),
+            jwt_hmac: vec![0xaa; 32],
+            account_address: [0xab; 20],
+        });
+        bincode_roundtrip(&SignAgentUserOpOutput {
+            signature: vec![0u8; 106],  // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
+        });
+    }
+
+    #[test]
+    fn jwt_hmac_roundtrip() {
+        bincode_roundtrip(&JwtHmacSignInput {
+            message: b"header.payload".to_vec(),
+        });
+        bincode_roundtrip(&JwtHmacSignOutput {
+            hmac: [0xaa; 32],
+            kid: "v1".to_string(),
+        });
+        bincode_roundtrip(&JwtHmacVerifyInput {
+            kid: "v1".to_string(),
+            message: b"header.payload".to_vec(),
+            expected_hmac: vec![0xaa; 32],
+        });
+        bincode_roundtrip(&JwtHmacVerifyOutput { valid: true });
+        bincode_roundtrip(&JwtRotateSecretInput { force: false });
+        bincode_roundtrip(&JwtRotateSecretOutput {
+            new_kid: "v2".to_string(),
+            retired_kid: Some("v1".to_string()),
+        });
+        bincode_roundtrip(&JwtRotateSecretOutput {
+            new_kid: "v1".to_string(),
+            retired_kid: None,
+        });
+        bincode_roundtrip(&JwtSignPayloadInput {
+            payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+        });
+        bincode_roundtrip(&JwtSignPayloadOutput {
+            kid: "v1234".to_string(),
+            header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
+            hmac: [0xbb; 32],
+        });
     }
 
     // ── JSON compatibility ──

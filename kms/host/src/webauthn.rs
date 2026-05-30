@@ -528,10 +528,14 @@ pub fn verify_authentication_response(
         return Err(anyhow!("rpIdHash mismatch"));
     }
 
-    // 4. Check flags
+    // 4. Check flags: UP (bit 0) + UV (bit 2) are both required.
+    // We request userVerification="required" in the challenge; enforce it here.
     let flags = auth_data[32];
     if flags & 0x01 == 0 {
         return Err(anyhow!("User Presence flag not set"));
+    }
+    if flags & 0x04 == 0 {
+        return Err(anyhow!("User Verification flag not set (UV=0). Authenticator must verify user identity."));
     }
 
     // 5. Check signCount
