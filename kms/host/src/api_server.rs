@@ -508,6 +508,8 @@ pub struct SignGTokenAuthorizationRequest {
     /// GToken ERC-20 contract address (0x…, 20 bytes)
     #[serde(rename = "gTokenAddress")]
     pub gtoken_address: String,
+    /// Transfer sender — MUST equal the Ethereum address derived from keyId+hdPath.
+    /// On-chain EIP-3009 verifies ecrecover(hash,sig) == from; a mismatch causes revert.
     pub from: String,
     pub to: String,
     /// Token amount (decimal or 0x… hex)
@@ -578,11 +580,25 @@ fn parse_hex_bytes32(hex_str: &str) -> Result<[u8; 32]> {
 }
 
 fn parse_uint_str(s: &str) -> Result<Vec<u8>> {
+    if s.is_empty() {
+        return Err(anyhow!("uint value must not be empty"));
+    }
     if s.starts_with("0x") {
-        hex::decode(s.trim_start_matches("0x"))
-            .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))
+        let hex_part = s.trim_start_matches("0x");
+        // "0x" alone (empty hex) → zero; longer → decode normally
+        if hex_part.is_empty() {
+            return Ok(vec![0]);
+        }
+        let bytes = hex::decode(hex_part)
+            .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?;
+        if bytes.len() > 32 {
+            return Err(anyhow!("uint value exceeds uint256 (32 bytes): got {} bytes", bytes.len()));
+        }
+        Ok(bytes)
     } else {
-        let n: u128 = s.parse().map_err(|_| anyhow!("Invalid uint decimal '{}'", s))?;
+        // Decimal string — support up to u128 (covers uint8–uint128 and typical token amounts)
+        let n: u128 = s.parse()
+            .map_err(|_| anyhow!("Invalid uint decimal '{}' (only values up to 2^128-1 are supported as decimal; use 0x prefix for uint256)", s))?;
         Ok(n.to_be_bytes().to_vec())
     }
 }
