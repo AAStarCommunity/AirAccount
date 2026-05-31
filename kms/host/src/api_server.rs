@@ -406,6 +406,75 @@ pub struct RevokeAgentCredentialResponse {
     pub revoked_at: i64,
 }
 
+// ── EIP-712 SignTypedData ──
+
+/// JSON representation of an EIP-712 domain separator.
+/// All fields are optional per EIP-712 spec; only present fields contribute to the domain hash.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonEip712Domain {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    #[serde(rename = "chainId")]
+    pub chain_id: Option<u64>,
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: Option<String>, // "0x..." 20-byte hex
+}
+
+/// JSON representation of a single field type definition.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonEip712TypeField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+}
+
+/// JSON representation of a type definition (name + ordered field list).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonEip712TypeDef {
+    pub name: String,
+    pub fields: Vec<JsonEip712TypeField>,
+}
+
+/// JSON representation of a typed field value.
+/// The `value` carries a JSON value; its interpretation is driven by the declared field type.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonEip712FieldValue {
+    pub name: String,
+    pub value: serde_json::Value,
+}
+
+/// Request body for `POST /kms/SignTypedData`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignTypedDataRequest {
+    /// KMS key ID (wallet UUID)
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    /// BIP-44 derivation path
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    /// EIP-712 domain separator
+    pub domain: JsonEip712Domain,
+    /// Name of the primary struct type being signed
+    #[serde(rename = "primaryType")]
+    pub primary_type: String,
+    /// All referenced type definitions
+    pub types: Vec<JsonEip712TypeDef>,
+    /// Field values for the primary type
+    pub message: Vec<JsonEip712FieldValue>,
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignTypedDataResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    /// Hex-encoded 65-byte ECDSA signature: R(32) || S(32) || V(1), V=27/28
+    pub signature: String,
+}
+
 /// Parse compound agent keyId "wallet_uuid:agent_index"
 fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
     let parts: Vec<&str> = key_id.splitn(2, ':').collect();
@@ -417,6 +486,75 @@ fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
     let agent_index: u32 = parts[1].parse()
         .map_err(|_| anyhow!("Invalid agent_index in keyId: {}", parts[1]))?;
     Ok((wallet_id, agent_index))
+}
+
+/// Convert a JSON value to a proto::Eip712Value using the declared ABI type for guidance.
+///
+/// Supported types: address, uint*, int*, bytes32, bytes*, bool, string
+fn json_to_eip712_value(json_val: &serde_json::Value, declared_type: &str) -> Result<proto::Eip712Value> {
+    let t = declared_type.trim();
+    if t == "address" {
+        let s = json_val.as_str()
+            .ok_or_else(|| anyhow!("address field must be a JSON string"))?;
+        let bytes = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid address hex '{}': {}", s, e))?;
+        if bytes.len() != 20 {
+            return Err(anyhow!("address must be 20 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        return Ok(proto::Eip712Value::Address(arr));
+    }
+    if t == "bool" {
+        let b = json_val.as_bool()
+            .ok_or_else(|| anyhow!("bool field must be a JSON boolean"))?;
+        return Ok(proto::Eip712Value::Bool(b));
+    }
+    if t == "string" {
+        let s = json_val.as_str()
+            .ok_or_else(|| anyhow!("string field must be a JSON string"))?;
+        return Ok(proto::Eip712Value::Str(s.to_string()));
+    }
+    if t == "bytes32" {
+        let s = json_val.as_str()
+            .ok_or_else(|| anyhow!("bytes32 field must be a JSON hex string"))?;
+        let bytes = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid bytes32 hex '{}': {}", s, e))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("bytes32 must be exactly 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        return Ok(proto::Eip712Value::Bytes32(arr));
+    }
+    if t.starts_with("bytes") {
+        let s = json_val.as_str()
+            .ok_or_else(|| anyhow!("bytes field must be a JSON hex string"))?;
+        let bytes = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid bytes hex '{}': {}", s, e))?;
+        return Ok(proto::Eip712Value::Bytes(bytes));
+    }
+    if t.starts_with("uint") || t.starts_with("int") {
+        // Accept JSON number or decimal/hex string
+        let be_bytes = if let Some(n) = json_val.as_u64() {
+            n.to_be_bytes().to_vec()
+        } else if let Some(s) = json_val.as_str() {
+            let hex_str = s.trim_start_matches("0x");
+            if s.starts_with("0x") {
+                hex::decode(hex_str)
+                    .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?
+            } else {
+                // Decimal string — parse as u128 max (covers uint8–uint128)
+                let n: u128 = s.parse()
+                    .map_err(|_| anyhow!("Invalid uint decimal '{}'", s))?;
+                n.to_be_bytes().to_vec()
+            }
+        } else {
+            return Err(anyhow!("uint/int field must be number or string, got {:?}", json_val));
+        };
+        return Ok(proto::Eip712Value::Uint(be_bytes));
+    }
+    Err(anyhow!("Unsupported EIP-712 field type '{}' (v0.18.0 supports: address, bool, string, bytes, bytes32, uint*, int*)", t))
 }
 
 /// Parse DER-encoded ECDSA signature into (r, s) 32-byte arrays
@@ -1401,6 +1539,77 @@ impl KmsApiServer {
         })
     }
 
+    pub async fn sign_typed_data(&self, req: SignTypedDataRequest) -> Result<SignTypedDataResponse> {
+        let wallet_id = Self::validate_key_id(&req.key_id)?;
+
+        // Passkey verification (optional — wallet may or may not have one bound)
+        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
+
+        // Convert domain verifyingContract from hex string to [u8; 20]
+        let verifying_contract = match &req.domain.verifying_contract {
+            Some(hex_str) => {
+                let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+                    .map_err(|e| anyhow!("Invalid verifyingContract hex: {}", e))?;
+                if bytes.len() != 20 {
+                    return Err(anyhow!("verifyingContract must be 20 bytes, got {}", bytes.len()));
+                }
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            }
+            None => None,
+        };
+
+        // Convert JSON types to proto types
+        let domain = proto::Eip712Domain {
+            name: req.domain.name.clone(),
+            version: req.domain.version.clone(),
+            chain_id: req.domain.chain_id,
+            verifying_contract,
+        };
+
+        let types: Vec<proto::Eip712TypeDef> = req.types.iter().map(|td| proto::Eip712TypeDef {
+            name: td.name.clone(),
+            fields: td.fields.iter().map(|f| proto::Eip712TypeField {
+                name: f.name.clone(),
+                field_type: f.field_type.clone(),
+            }).collect(),
+        }).collect();
+
+        // Find the primary type definition to help with value conversion
+        let primary_type_def = req.types.iter()
+            .find(|td| td.name == req.primary_type)
+            .ok_or_else(|| anyhow!("Primary type '{}' not in types list", req.primary_type))?;
+
+        // Convert JSON field values to proto Eip712Value using declared field types for guidance
+        let message = req.message.iter().map(|fv| {
+            let declared_type = primary_type_def.fields.iter()
+                .find(|f| f.name == fv.name)
+                .map(|f| f.field_type.as_str())
+                .unwrap_or("");
+            let value = json_to_eip712_value(&fv.value, declared_type)?;
+            Ok(proto::Eip712FieldValue { name: fv.name.clone(), value })
+        }).collect::<Result<Vec<_>>>()?;
+
+        let ta_input = proto::SignTypedDataInput {
+            wallet_id,
+            hd_path: req.hd_path.clone(),
+            domain,
+            primary_type: req.primary_type.clone(),
+            types,
+            message,
+            passkey_assertion,
+        };
+
+        let output = self.tee.sign_typed_data(ta_input).await?;
+
+        println!("✅ SignTypedData: keyId={} primaryType={}", req.key_id, req.primary_type);
+        Ok(SignTypedDataResponse {
+            key_id: req.key_id,
+            signature: format!("0x{}", hex::encode(&output.signature)),
+        })
+    }
+
     pub async fn refresh_agent_credential(&self, bearer_jwt: String, req: RefreshAgentCredentialRequest) -> Result<CreateAgentKeyResponse> {
         // Verify current JWT is still valid
         let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
@@ -1982,6 +2191,25 @@ async fn handle_revoke_agent_credential(
     }
 }
 
+async fn handle_sign_typed_data(
+    body: SignTypedDataRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.sign_typed_data(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignTypedData OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignTypedData error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ApiError(String);
 
@@ -2385,6 +2613,16 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_revoke.clone()))
         .and_then(handle_revoke_agent_credential);
 
+    let server_std = server.clone();
+    let sign_typed_data = warp::path("kms")
+        .and(warp::path("SignTypedData"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_std.clone()))
+        .and_then(handle_sign_typed_data);
+
     // JWT secret auto-rotation background task (runs every 24h)
     let server_rot = server.clone();
     tokio::spawn(async move {
@@ -2441,6 +2679,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign_agent)
         .or(refresh_agent_credential)
         .or(revoke_agent_credential)
+        .or(sign_typed_data)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);
@@ -2466,6 +2705,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /kms/sign-agent             - Agent sign userOpHash (Bearer JWT)");
     println!("   POST /kms/refresh-agent-credential - Refresh agent JWT (Bearer + WebAuthn)");
     println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
+    println!("   POST /kms/SignTypedData             - EIP-712 typed data signing");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
