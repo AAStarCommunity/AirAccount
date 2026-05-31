@@ -238,14 +238,14 @@ fi
 echo ""
 echo "${YELLOW}[Step 5] ecrecover — ECDSA portion recovers to agent address${NC}"
 
-python3 - <<PYEOF
+ECRECOVER_RESULT=$(python3 - 2>&1 <<PYEOF
 import sys
 
 try:
     from eth_account import Account
     from eth_account.messages import encode_defunct
 except ImportError:
-    print("SKIP: pip3 install eth_account to enable ecrecover check")
+    print("__SKIP__")
     sys.exit(0)
 
 sig_hex = '${SIG_HEX}'.lstrip('0x')
@@ -258,26 +258,34 @@ r = int.from_bytes(ecdsa_sig[0:32], 'big')
 s = int.from_bytes(ecdsa_sig[32:64], 'big')
 v = ecdsa_sig[64]
 
-recovered = Account.recover_message(encode_defunct(payload_hash), vrs=(v, r, s))
+try:
+    recovered = Account.recover_message(encode_defunct(payload_hash), vrs=(v, r, s))
+except Exception as ex:
+    print(f"__FAIL__:ecrecover exception: {ex}")
+    sys.exit(1)
+
 got = recovered.lower()
 want = embedded_agent.lower()
 if got == want:
     print(f"ecrecover → {recovered}")
     print(f"matches embedded agent address ✓")
 else:
-    print(f"FAIL: ecrecover={got}, want={want}", file=sys.stderr)
+    print(f"__FAIL__:ecrecover={got}, want={want}")
     sys.exit(1)
 PYEOF
-
+)
 ECRECOVER_RC=$?
-if [ $ECRECOVER_RC -eq 0 ]; then
-    PASS=$((PASS + 1))
-    printf "${GREEN} OK ${NC} ecrecover recovered correct agent address\n"
-elif grep -q "SKIP" /dev/stdin 2>/dev/null; then
-    :  # truly skipped (eth_account not installed)
-else
+
+if echo "$ECRECOVER_RESULT" | grep -q "__SKIP__"; then
+    printf "${YELLOW}SKIP${NC} ecrecover check (pip3 install eth_account to enable)\n"
+elif [ $ECRECOVER_RC -ne 0 ] || echo "$ECRECOVER_RESULT" | grep -q "__FAIL__"; then
     FAIL=$((FAIL + 1))
     printf "${RED}FAIL${NC} ecrecover check failed\n"
+    echo "$ECRECOVER_RESULT" | grep "__FAIL__" | sed 's/__FAIL__:/  /'
+else
+    PASS=$((PASS + 1))
+    printf "${GREEN} OK ${NC} ecrecover recovered correct agent address\n"
+    echo "$ECRECOVER_RESULT" | sed 's/^/     /'
 fi
 
 # ── Cleanup ──

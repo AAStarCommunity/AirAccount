@@ -585,9 +585,9 @@ fn parse_uint_str(s: &str) -> Result<Vec<u8>> {
     }
     if s.starts_with("0x") {
         let hex_part = s.trim_start_matches("0x");
-        // "0x" alone (empty hex) → zero; longer → decode normally
+        // "0x" alone with no digits is ambiguous — require at least one hex digit
         if hex_part.is_empty() {
-            return Ok(vec![0]);
+            return Err(anyhow!("uint hex must have at least one digit after '0x' (use '0x0' for zero)"));
         }
         let bytes = hex::decode(hex_part)
             .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?;

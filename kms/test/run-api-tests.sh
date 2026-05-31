@@ -70,9 +70,12 @@ make_assertion() {
 }
 
 # API key header (if configured)
+# Scalar form for legacy curl calls; array form for Phase 5b to avoid word-splitting
 API_KEY_HDR=""
+API_KEY_HDR_ARGS=()
 if [ -n "$KMS_API_KEY" ]; then
     API_KEY_HDR="-H x-api-key:$KMS_API_KEY"
+    API_KEY_HDR_ARGS=(-H "x-api-key: $KMS_API_KEY")
 fi
 
 echo ""
@@ -236,7 +239,7 @@ check_sig_len() {
 PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 timed_curl "POST /kms/SignTypedData" \
     -X POST "$BASE/kms/SignTypedData" \
-    -H "$HDR_JSON" ${API_KEY_HDR:+"$API_KEY_HDR"} \
+    -H "$HDR_JSON" "${API_KEY_HDR_ARGS[@]}" \
     -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"domain\":{\"name\":\"Ether Mail\",\"version\":\"1\",\"chainId\":1,\"verifyingContract\":\"0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC\"},\"primaryType\":\"Mail\",\"types\":[{\"name\":\"Mail\",\"fields\":[{\"name\":\"contents\",\"type\":\"string\"}]}],\"message\":[{\"name\":\"contents\",\"value\":\"Hello, Bob!\"}],$(make_p2_passkey "$PASSKEY_JSON")}"
 check_sig_len "SignTypedData" "$(echo "$LAST_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('signature',''))" 2>/dev/null)"
 
@@ -244,7 +247,7 @@ check_sig_len "SignTypedData" "$(echo "$LAST_BODY" | python3 -c "import sys,json
 PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 timed_curl "POST /kms/SignMicropaymentVoucher" \
     -X POST "$BASE/kms/SignMicropaymentVoucher" \
-    -H "$HDR_JSON" ${API_KEY_HDR:+"$API_KEY_HDR"} \
+    -H "$HDR_JSON" "${API_KEY_HDR_ARGS[@]}" \
     -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"verifyingContract\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"channelId\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"cumulativeAmount\":\"1000000000000000000\",$(make_p2_passkey "$PASSKEY_JSON")}"
 check_sig_len "SignMicropaymentVoucher" "$(echo "$LAST_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('signature',''))" 2>/dev/null)"
 
@@ -253,7 +256,7 @@ PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 NONCE_32="0x$(python3 -c 'import os; print(os.urandom(32).hex())')"
 timed_curl "POST /kms/SignGTokenAuthorization" \
     -X POST "$BASE/kms/SignGTokenAuthorization" \
-    -H "$HDR_JSON" ${API_KEY_HDR:+"$API_KEY_HDR"} \
+    -H "$HDR_JSON" "${API_KEY_HDR_ARGS[@]}" \
     -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"gTokenAddress\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"from\":\"$DERIVED_ADDR\",\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"500000000000000000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"$NONCE_32\",$(make_p2_passkey "$PASSKEY_JSON")}"
 check_sig_len "SignGTokenAuthorization" "$(echo "$LAST_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('signature',''))" 2>/dev/null)"
 
@@ -262,7 +265,7 @@ PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 PAYMENT_ID="0x$(python3 -c 'import os; print(os.urandom(32).hex())')"
 timed_curl "POST /kms/SignX402Payment" \
     -X POST "$BASE/kms/SignX402Payment" \
-    -H "$HDR_JSON" ${API_KEY_HDR:+"$API_KEY_HDR"} \
+    -H "$HDR_JSON" "${API_KEY_HDR_ARGS[@]}" \
     -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"verifyingContract\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"paymentId\":\"$PAYMENT_ID\",\"amount\":\"250000\",\"recipient\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"deadline\":\"9999999999\",$(make_p2_passkey "$PASSKEY_JSON")}"
 check_sig_len "SignX402Payment" "$(echo "$LAST_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('signature',''))" 2>/dev/null)"
 echo ""
