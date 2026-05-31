@@ -723,6 +723,7 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     let private_key = wallet.export_private_key(&input.hd_path)?;
 
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;

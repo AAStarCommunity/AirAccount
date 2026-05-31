@@ -238,6 +238,8 @@ fi
 echo ""
 echo "${YELLOW}[Step 5] ecrecover — ECDSA portion recovers to agent address${NC}"
 
+# Temporarily disable set -e so command substitution failure doesn't exit the script
+set +e
 ECRECOVER_RESULT=$(python3 - 2>&1 <<PYEOF
 import sys
 
@@ -275,6 +277,7 @@ else:
 PYEOF
 )
 ECRECOVER_RC=$?
+set -e  # re-enable after capturing exit code
 
 if echo "$ECRECOVER_RESULT" | grep -q "__SKIP__"; then
     printf "${YELLOW}SKIP${NC} ecrecover check (pip3 install eth_account to enable)\n"

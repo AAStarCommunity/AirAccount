@@ -589,7 +589,15 @@ fn parse_uint_str(s: &str) -> Result<Vec<u8>> {
         if hex_part.is_empty() {
             return Err(anyhow!("uint hex must have at least one digit after '0x' (use '0x0' for zero)"));
         }
-        let bytes = hex::decode(hex_part)
+        // hex::decode requires even-length strings; left-pad odd-length with "0"
+        let padded;
+        let hex_to_decode = if hex_part.len() % 2 != 0 {
+            padded = format!("0{}", hex_part);
+            padded.as_str()
+        } else {
+            hex_part
+        };
+        let bytes = hex::decode(hex_to_decode)
             .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?;
         if bytes.len() > 32 {
             return Err(anyhow!("uint value exceeds uint256 (32 bytes): got {} bytes", bytes.len()));
