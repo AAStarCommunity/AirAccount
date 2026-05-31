@@ -212,6 +212,56 @@ timed_curl "POST /Sign (transaction)" \
     -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"Passkey\":$PASSKEY_JSON}"
 echo ""
 
+# ── Phase 5b: EIP-712 & SP v5.3.3 Signers ──
+echo "${YELLOW}[Phase 5b] EIP-712 & SuperPaymaster v5.3.3 Signers${NC}"
+
+# Generic SignTypedData (Mail example from EIP-712 spec)
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
+timed_curl "POST /kms/SignTypedData" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"domain\":{\"name\":\"Ether Mail\",\"version\":\"1\",\"chainId\":1,\"verifyingContract\":\"0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC\"},\"primaryType\":\"Mail\",\"types\":[{\"name\":\"Mail\",\"fields\":[{\"name\":\"contents\",\"type\":\"string\"}]}],\"message\":[{\"name\":\"contents\",\"value\":\"Hello, Bob!\"}]}"
+SIG_STD=$(echo "$LAST_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signature',''))" 2>/dev/null || echo "")
+if [ ${#SIG_STD} -eq 132 ]; then  # 0x + 65*2 chars
+    echo "  SignTypedData: sig length OK (65 bytes)"
+fi
+
+# SignMicropaymentVoucher
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
+timed_curl "POST /kms/SignMicropaymentVoucher" \
+    -X POST "$BASE/kms/SignMicropaymentVoucher" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"verifyingContract\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"channelId\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"cumulativeAmount\":\"1000000000000000000\"}"
+SIG_MV=$(echo "$LAST_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signature',''))" 2>/dev/null || echo "")
+if [ ${#SIG_MV} -eq 132 ]; then
+    echo "  SignMicropaymentVoucher: sig length OK (65 bytes)"
+fi
+
+# SignGTokenAuthorization
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
+NONCE_32="0x$(python3 -c 'import os; print(os.urandom(32).hex())')"
+timed_curl "POST /kms/SignGTokenAuthorization" \
+    -X POST "$BASE/kms/SignGTokenAuthorization" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"gTokenAddress\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"from\":\"$DERIVED_ADDR\",\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"500000000000000000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"$NONCE_32\"}"
+SIG_GA=$(echo "$LAST_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signature',''))" 2>/dev/null || echo "")
+if [ ${#SIG_GA} -eq 132 ]; then
+    echo "  SignGTokenAuthorization: sig length OK (65 bytes)"
+fi
+
+# SignX402Payment
+PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
+PAYMENT_ID="0x$(python3 -c 'import os; print(os.urandom(32).hex())')"
+timed_curl "POST /kms/SignX402Payment" \
+    -X POST "$BASE/kms/SignX402Payment" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":11155111,\"verifyingContract\":\"0xFb090E82bD041C6e9787eDEbE1D3BE55b3c7266a\",\"paymentId\":\"$PAYMENT_ID\",\"amount\":\"250000\",\"recipient\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"deadline\":\"9999999999\"}"
+SIG_X4=$(echo "$LAST_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signature',''))" 2>/dev/null || echo "")
+if [ ${#SIG_X4} -eq 132 ]; then
+    echo "  SignX402Payment: sig length OK (65 bytes)"
+fi
+echo ""
+
 # ── Phase 6: Negative Tests ──
 echo "${YELLOW}[Phase 6] Negative Tests${NC}"
 
