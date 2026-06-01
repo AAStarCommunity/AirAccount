@@ -229,28 +229,19 @@ if [ -z "$OWNER_ADDR" ]; then
     OWNER_ADDR="0x0000000000000000000000000000000000000001"
 fi
 
-# sign-grant-session (ECDSA session key)
-PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 SESSION_KEY="0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"
 DUMMY_CONTRACT="0x0000000000000000000000000000000000000000"
 EXPIRY=$(python3 -c "import time; print(int(time.time()) + 86400)")
-
-timed_curl "POST /kms/sign-grant-session" \
-    -X POST "$BASE/kms/sign-grant-session" \
-    -H "$HDR_JSON" $API_KEY_HDR \
-    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":1,\"verifyingContract\":\"$DUMMY_CONTRACT\",\"account\":\"$OWNER_ADDR\",\"sessionKey\":\"$SESSION_KEY\",\"expiry\":$EXPIRY,\"contractScope\":\"$DUMMY_CONTRACT\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":0,\"velocityWindow\":0,\"callTargets\":[],\"selectorAllowlist\":[],\"nonce\":0,\"passkeyAssertion\":$PASSKEY_JSON}"
-
-# sign-p256-grant-session (P256 session key)
-PASSKEY_JSON=$(make_passkey_json "$(make_assertion)")
 KEY_X="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 KEY_Y="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-timed_curl "POST /kms/sign-p256-grant-session" \
-    -X POST "$BASE/kms/sign-p256-grant-session" \
-    -H "$HDR_JSON" $API_KEY_HDR \
-    -d "{\"keyId\":\"$KEY_ID\",\"hdPath\":\"m/44'/60'/0'/0/0\",\"chainId\":1,\"verifyingContract\":\"$DUMMY_CONTRACT\",\"account\":\"$OWNER_ADDR\",\"keyX\":\"$KEY_X\",\"keyY\":\"$KEY_Y\",\"expiry\":$EXPIRY,\"contractScope\":\"$DUMMY_CONTRACT\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":0,\"velocityWindow\":0,\"callTargets\":[],\"selectorAllowlist\":[],\"nonce\":0,\"passkeyAssertion\":$PASSKEY_JSON}"
+# sign-grant-session positive test requires WebAuthn ceremony (browser) — SKIP in headless CI
+# To test manually: call POST /BeginAuthentication first, complete ceremony, then:
+#   POST /kms/sign-grant-session with webAuthnAssertion:{ChallengeId, Credential}
+API_NAMES+=("POST /kms/sign-grant-session (WebAuthn)"); API_TIMES+=("0"); API_STATUS+=("SKIP")
+API_NAMES+=("POST /kms/sign-p256-grant-session (WebAuthn)"); API_TIMES+=("0"); API_STATUS+=("SKIP")
 
-# Negative: sign-grant-session without passkey assertion (should fail)
+# Negative: sign-grant-session without auth (should fail)
 timed_curl "POST /kms/sign-grant-session (no auth)" \
     -X POST "$BASE/kms/sign-grant-session" \
     -H "$HDR_JSON" $API_KEY_HDR \
@@ -259,7 +250,19 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     API_STATUS[${#API_STATUS[@]}-1]="OK"
     TOTAL_FAIL=$((TOTAL_FAIL - 1))
     TOTAL_PASS=$((TOTAL_PASS + 1))
-    echo "  (Expected failure — no passkey assertion correctly rejected)"
+    echo "  (Expected failure — no auth correctly rejected)"
+fi
+
+# Negative: sign-p256-grant-session without auth (should fail)
+timed_curl "POST /kms/sign-p256-grant-session (no auth)" \
+    -X POST "$BASE/kms/sign-p256-grant-session" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"chainId\":1,\"verifyingContract\":\"$DUMMY_CONTRACT\",\"account\":\"$OWNER_ADDR\",\"keyX\":\"$KEY_X\",\"keyY\":\"$KEY_Y\",\"expiry\":$EXPIRY,\"contractScope\":\"$DUMMY_CONTRACT\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":0,\"velocityWindow\":0,\"nonce\":0}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — no auth correctly rejected)"
 fi
 
 # ── Phase 5c: P256 Session Key (v0.18.1) ──
