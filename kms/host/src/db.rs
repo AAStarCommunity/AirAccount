@@ -764,6 +764,40 @@ impl KmsDb {
         Ok(n > 0)
     }
 
+    /// Return session_index values for P256 session keys that are expired (credential_expires_at
+    /// <= now_unix) and still have a TEE key to clean up (status = 'active' or 'pending').
+    /// Used by lazy GC triggered on create/sign/revoke for the same wallet.
+    pub fn list_expired_p256_session_keys(
+        &self,
+        wallet_id: &str,
+        now_unix: i64,
+    ) -> Result<Vec<u32>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT session_index FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND credential_expires_at IS NOT NULL \
+               AND credential_expires_at <= ?2 \
+               AND status IN ('active', 'pending')",
+        )?;
+        let indices: Vec<u32> = stmt
+            .query_map(params![wallet_id, now_unix], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(indices)
+    }
+
+    /// Mark a P256 session key as 'revoked' in the DB (called after TA-side TEE key deleted).
+    pub fn mark_p256_session_key_gc(&self, wallet_id: &str, session_index: u32) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE p256_session_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
+             WHERE wallet_id=?1 AND session_index=?2",
+            params![wallet_id, session_index, now],
+        )?;
+        Ok(())
+    }
+
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock();

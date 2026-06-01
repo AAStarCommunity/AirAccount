@@ -43,6 +43,7 @@ pub enum Command {
     SignTypedData = 17,
     CreateP256SessionKey = 18,
     SignP256UserOp = 19,
+    DeleteP256SessionKey = 20,
     #[default]
     Unknown,
 }
@@ -89,6 +90,7 @@ mod tests {
         assert_eq!(u32::from(Command::SignTypedData), 17);
         assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
         assert_eq!(u32::from(Command::SignP256UserOp), 19);
+        assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
     }
 
     #[test]
@@ -99,6 +101,7 @@ mod tests {
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
         assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
         assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
+        assert!(matches!(Command::from(20u32), Command::DeleteP256SessionKey));
     }
 
     #[test]
@@ -599,5 +602,15 @@ mod tests {
         bincode_roundtrip(&SignP256UserOpOutput {
             signature: vec![0u8; 149],
         });
+    }
+
+    #[test]
+    fn delete_p256_session_key_roundtrip() {
+        bincode_roundtrip(&DeleteP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 1,
+        });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: true });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: false });
     }
 }

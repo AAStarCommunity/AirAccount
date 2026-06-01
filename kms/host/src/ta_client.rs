@@ -814,6 +814,24 @@ impl TeeHandle {
             bincode::deserialize(&out).context("Failed to deserialize SignP256UserOpOutput")?;
         Ok(output.signature)
     }
+
+    /// Delete a P256 session key from TEE secure storage (GC cleanup).
+    /// Returns true if the key existed and was deleted; false if already absent (idempotent).
+    pub async fn delete_p256_session_key(
+        &self,
+        wallet_id: uuid::Uuid,
+        session_index: u32,
+    ) -> Result<bool> {
+        let input = bincode::serialize(&proto::DeleteP256SessionKeyInput {
+            wallet_id,
+            session_index,
+        })
+        .context("Failed to serialize DeleteP256SessionKeyInput")?;
+        let out = self.call(proto::Command::DeleteP256SessionKey, input).await?;
+        let output: proto::DeleteP256SessionKeyOutput =
+            bincode::deserialize(&out).context("Failed to deserialize DeleteP256SessionKeyOutput")?;
+        Ok(output.deleted)
+    }
 }
 
 // ---- TEE worker thread ----
