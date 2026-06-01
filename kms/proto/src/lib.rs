@@ -43,6 +43,8 @@ pub enum Command {
     SignTypedData = 17,
     CreateP256SessionKey = 18,
     SignP256UserOp = 19,
+    SignGrantSession = 20,
+    SignP256GrantSession = 21,
     #[default]
     Unknown,
 }
@@ -89,6 +91,8 @@ mod tests {
         assert_eq!(u32::from(Command::SignTypedData), 17);
         assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
         assert_eq!(u32::from(Command::SignP256UserOp), 19);
+        assert_eq!(u32::from(Command::SignGrantSession), 20);
+        assert_eq!(u32::from(Command::SignP256GrantSession), 21);
     }
 
     #[test]
@@ -99,6 +103,8 @@ mod tests {
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
         assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
         assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
+        assert!(matches!(Command::from(20u32), Command::SignGrantSession));
+        assert!(matches!(Command::from(21u32), Command::SignP256GrantSession));
     }
 
     #[test]
@@ -109,7 +115,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=19u32 {
+        for i in 0..=21u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -560,6 +566,57 @@ mod tests {
         bincode_roundtrip(&input_jwt);
 
         bincode_roundtrip(&SignTypedDataOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    // ── Grant Session ──
+
+    #[test]
+    fn sign_grant_session_roundtrip() {
+        bincode_roundtrip(&SignGrantSessionInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            chain_id: 1,
+            verifying_contract: [0x11; 20],
+            account: [0x22; 20],
+            session_key: [0x33; 20],
+            expiry: 1_000_000,
+            contract_scope: [0x00; 20],
+            selector_scope: [0x00; 4],
+            velocity_limit: 0,
+            velocity_window: 0,
+            call_targets: vec![[0x44; 20]],
+            selector_allowlist: vec![[0xaa, 0xbb, 0xcc, 0xdd]],
+            nonce: [0x00; 32],
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&SignGrantSessionOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    #[test]
+    fn sign_p256_grant_session_roundtrip() {
+        bincode_roundtrip(&SignP256GrantSessionInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            chain_id: 11155111,
+            verifying_contract: [0x11; 20],
+            account: [0x22; 20],
+            key_x: [0xaa; 32],
+            key_y: [0xbb; 32],
+            expiry: 2_000_000,
+            contract_scope: [0x00; 20],
+            selector_scope: [0x00; 4],
+            velocity_limit: 5,
+            velocity_window: 3600,
+            call_targets: vec![],
+            selector_allowlist: vec![],
+            nonce: [0x00; 32],
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&SignP256GrantSessionOutput {
             signature: vec![0u8; 65],
         });
     }

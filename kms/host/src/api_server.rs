@@ -480,6 +480,115 @@ pub struct SignTypedDataResponse {
     pub signature: String,
 }
 
+// ── Grant Session Signing ──
+
+/// Parse bytes4 hex string ("0x..." or bare 8 hex chars) into [u8; 4].
+fn parse_bytes4_hex(s: &str) -> Result<[u8; 4]> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| anyhow!("Invalid bytes4 hex '{}': {}", s, e))?;
+    if bytes.len() != 4 {
+        return Err(anyhow!("bytes4 must be exactly 4 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignGrantSessionRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    /// SessionKeyValidator contract address ("0x..." 20 bytes)
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    /// Smart Account address ("0x..." 20 bytes)
+    pub account: String,
+    /// secp256k1 session key address ("0x..." 20 bytes)
+    #[serde(rename = "sessionKey")]
+    pub session_key: String,
+    /// Session expiry as Unix timestamp (uint48)
+    pub expiry: u64,
+    /// Allowed contract address or zero for any
+    #[serde(rename = "contractScope")]
+    pub contract_scope: String,
+    /// Allowed 4-byte selector or zero for any
+    #[serde(rename = "selectorScope")]
+    pub selector_scope: String,
+    #[serde(rename = "velocityLimit")]
+    pub velocity_limit: u16,
+    #[serde(rename = "velocityWindow")]
+    pub velocity_window: u32,
+    /// Allowed call target addresses (empty = any)
+    #[serde(rename = "callTargets", default)]
+    pub call_targets: Vec<String>,
+    /// Allowed 4-byte function selectors (empty = any)
+    #[serde(rename = "selectorAllowlist", default)]
+    pub selector_allowlist: Vec<String>,
+    /// grantNonces[account][sessionKey] read from chain (decimal u64)
+    pub nonce: u64,
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignGrantSessionResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    /// Hex-encoded 65-byte ECDSA signature: R(32) || S(32) || V(1), V=27/28
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256GrantSessionRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    pub account: String,
+    /// P256 session key X coordinate (hex, 32 bytes)
+    #[serde(rename = "keyX")]
+    pub key_x: String,
+    /// P256 session key Y coordinate (hex, 32 bytes)
+    #[serde(rename = "keyY")]
+    pub key_y: String,
+    pub expiry: u64,
+    #[serde(rename = "contractScope")]
+    pub contract_scope: String,
+    #[serde(rename = "selectorScope")]
+    pub selector_scope: String,
+    #[serde(rename = "velocityLimit")]
+    pub velocity_limit: u16,
+    #[serde(rename = "velocityWindow")]
+    pub velocity_window: u32,
+    #[serde(rename = "callTargets", default)]
+    pub call_targets: Vec<String>,
+    #[serde(rename = "selectorAllowlist", default)]
+    pub selector_allowlist: Vec<String>,
+    /// grantNonces_p256[account][keyHash] read from chain (decimal u64)
+    pub nonce: u64,
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256GrantSessionResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    pub signature: String,
+}
+
 // ── P256 Session Key (v0.18.1) ──
 
 /// POST /kms/create-p256-session-key
@@ -1757,6 +1866,120 @@ impl KmsApiServer {
         })
     }
 
+    pub async fn sign_grant_session(&self, req: SignGrantSessionRequest) -> Result<SignGrantSessionResponse> {
+        let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let key_id_str = wallet_id.to_string();
+
+        let passkey_assertion = self.resolve_passkey_assertion(
+            &key_id_str, req.passkey_assertion.as_ref(), req.webauthn_assertion.as_ref(),
+        ).await?;
+
+        if passkey_assertion.is_none() {
+            return Err(anyhow!("sign-grant-session requires passkey authentication"));
+        }
+
+        let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
+        let account = Self::parse_address_hex(&req.account)?;
+        let session_key = Self::parse_address_hex(&req.session_key)?;
+        let contract_scope = Self::parse_address_hex(&req.contract_scope)?;
+        let selector_scope = parse_bytes4_hex(&req.selector_scope)?;
+
+        let mut call_targets = Vec::with_capacity(req.call_targets.len());
+        for s in &req.call_targets {
+            call_targets.push(Self::parse_address_hex(s)?);
+        }
+        let mut selector_allowlist = Vec::with_capacity(req.selector_allowlist.len());
+        for s in &req.selector_allowlist {
+            selector_allowlist.push(parse_bytes4_hex(s)?);
+        }
+
+        let mut nonce = [0u8; 32];
+        nonce[24..32].copy_from_slice(&req.nonce.to_be_bytes());
+
+        let ta_input = proto::SignGrantSessionInput {
+            wallet_id,
+            hd_path: req.hd_path,
+            chain_id: req.chain_id,
+            verifying_contract,
+            account,
+            session_key,
+            expiry: req.expiry,
+            contract_scope,
+            selector_scope,
+            velocity_limit: req.velocity_limit,
+            velocity_window: req.velocity_window,
+            call_targets,
+            selector_allowlist,
+            nonce,
+            passkey_assertion,
+        };
+
+        let output = self.tee.sign_grant_session(ta_input).await?;
+        println!("✅ SignGrantSession: keyId={}", req.key_id);
+        Ok(SignGrantSessionResponse {
+            key_id: req.key_id,
+            signature: format!("0x{}", hex::encode(&output.signature)),
+        })
+    }
+
+    pub async fn sign_p256_grant_session(&self, req: SignP256GrantSessionRequest) -> Result<SignP256GrantSessionResponse> {
+        let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let key_id_str = wallet_id.to_string();
+
+        let passkey_assertion = self.resolve_passkey_assertion(
+            &key_id_str, req.passkey_assertion.as_ref(), req.webauthn_assertion.as_ref(),
+        ).await?;
+
+        if passkey_assertion.is_none() {
+            return Err(anyhow!("sign-p256-grant-session requires passkey authentication"));
+        }
+
+        let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
+        let account = Self::parse_address_hex(&req.account)?;
+        let key_x = Self::validate_hash_hex(&req.key_x)?;
+        let key_y = Self::validate_hash_hex(&req.key_y)?;
+        let contract_scope = Self::parse_address_hex(&req.contract_scope)?;
+        let selector_scope = parse_bytes4_hex(&req.selector_scope)?;
+
+        let mut call_targets = Vec::with_capacity(req.call_targets.len());
+        for s in &req.call_targets {
+            call_targets.push(Self::parse_address_hex(s)?);
+        }
+        let mut selector_allowlist = Vec::with_capacity(req.selector_allowlist.len());
+        for s in &req.selector_allowlist {
+            selector_allowlist.push(parse_bytes4_hex(s)?);
+        }
+
+        let mut nonce = [0u8; 32];
+        nonce[24..32].copy_from_slice(&req.nonce.to_be_bytes());
+
+        let ta_input = proto::SignP256GrantSessionInput {
+            wallet_id,
+            hd_path: req.hd_path,
+            chain_id: req.chain_id,
+            verifying_contract,
+            account,
+            key_x,
+            key_y,
+            expiry: req.expiry,
+            contract_scope,
+            selector_scope,
+            velocity_limit: req.velocity_limit,
+            velocity_window: req.velocity_window,
+            call_targets,
+            selector_allowlist,
+            nonce,
+            passkey_assertion,
+        };
+
+        let output = self.tee.sign_p256_grant_session(ta_input).await?;
+        println!("✅ SignP256GrantSession: keyId={}", req.key_id);
+        Ok(SignP256GrantSessionResponse {
+            key_id: req.key_id,
+            signature: format!("0x{}", hex::encode(&output.signature)),
+        })
+    }
+
     pub async fn refresh_agent_credential(&self, bearer_jwt: String, req: RefreshAgentCredentialRequest) -> Result<CreateAgentKeyResponse> {
         // Verify current JWT is still valid
         let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
@@ -2590,6 +2813,44 @@ async fn handle_sign_typed_data(
     }
 }
 
+async fn handle_sign_grant_session(
+    body: SignGrantSessionRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.sign_grant_session(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignGrantSession OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignGrantSession error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_p256_grant_session(
+    body: SignP256GrantSessionRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.sign_p256_grant_session(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignP256GrantSession OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignP256GrantSession error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 async fn handle_create_p256_session_key(
     body: CreateP256SessionKeyRequest,
     server: Arc<KmsApiServer>,
@@ -3070,6 +3331,26 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_std.clone()))
         .and_then(handle_sign_typed_data);
 
+    let server_sgs = server.clone();
+    let sign_grant_session = warp::path("kms")
+        .and(warp::path("sign-grant-session"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sgs.clone()))
+        .and_then(handle_sign_grant_session);
+
+    let server_sp256gs = server.clone();
+    let sign_p256_grant_session = warp::path("kms")
+        .and(warp::path("sign-p256-grant-session"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sp256gs.clone()))
+        .and_then(handle_sign_p256_grant_session);
+
     // P256 Session Key endpoints
     let server_cp256 = server.clone();
     let create_p256_session_key = warp::path("kms")
@@ -3159,6 +3440,8 @@ pub async fn start_kms_server() -> Result<()> {
         .or(refresh_agent_credential)
         .or(revoke_agent_credential)
         .or(sign_typed_data)
+        .or(sign_grant_session)
+        .or(sign_p256_grant_session)
         .or(create_p256_session_key)
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
@@ -3188,6 +3471,8 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /kms/refresh-agent-credential - Refresh agent JWT (Bearer + WebAuthn)");
     println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
     println!("   POST /kms/SignTypedData             - EIP-712 typed data signing");
+    println!("   POST /kms/sign-grant-session        - Sign GRANT_SESSION_V2 (ECDSA session key)");
+    println!("   POST /kms/sign-p256-grant-session   - Sign GRANT_P256_SESSION_V2 (P256 session key)");
     println!("   POST /kms/create-p256-session-key  - Create P256 session key (WebAuthn)");
     println!("   POST /kms/sign-p256-user-op        - P256 sign userOpHash (Bearer JWT)");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
