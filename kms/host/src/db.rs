@@ -683,10 +683,10 @@ impl KmsDb {
         let pending_cutoff = now_unix - PENDING_TTL_SECS;
 
         let now_rfc = Utc::now().to_rfc3339();
-        let conn = self.lock();
+        let mut conn = self.lock(); // mut required by transaction_with_behavior(&mut self)
 
         // BEGIN IMMEDIATE: acquire write lock immediately, block other writers.
-        // Using rusqlite Transaction for RAII rollback on any ? error.
+        // rusqlite Transaction is a RAII guard — Drop calls ROLLBACK if not committed.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let current_count: i64 = tx.query_row(
@@ -826,7 +826,12 @@ impl KmsDb {
         exclude_session_index: Option<u32>,
     ) -> Result<Vec<u32>> {
         const PENDING_TTL_SECS: i64 = 300;
-        let stuck_pending_cutoff = gc_cutoff_unix - PENDING_TTL_SECS; // older = stuck
+        // stuck_pending_cutoff = gc_cutoff - 300s.
+        // Caller sets gc_cutoff = now - 60s (clock-drift grace window), so effective
+        // stuck threshold is now - 360s (6 min). Pending rows older than this are GC-eligible.
+        // The extra 60s is intentional: a pending that just crossed 5 min gets one more GC cycle
+        // before actual deletion, giving in-flight TA calls a final chance to complete.
+        let stuck_pending_cutoff = gc_cutoff_unix - PENDING_TTL_SECS;
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT session_index FROM p256_session_keys \
