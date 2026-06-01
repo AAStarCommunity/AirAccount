@@ -873,6 +873,37 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
         input.primary_type
     );
 
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // TA-side auth gate (defense-in-depth): independently verifies the caller's authorization.
+    // Host has already validated, but TA confirms using TEE-resident secrets that cannot be
+    // forged by a compromised host. Exactly one auth proof must be present.
+    match (&input.passkey_assertion, &input.jwt_kid) {
+        (Some(_), None) => {
+            // WebAuthn path: verify passkey signature against wallet's stored public key.
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+        }
+        (None, Some(kid)) => {
+            // Agent JWT path: verify HMAC using TEE-resident JWT secret.
+            let signing_input = input.jwt_signing_input.as_deref().unwrap_or(&[]);
+            let expected_hmac = input.jwt_hmac.as_deref().unwrap_or(&[]);
+            let verify_result = jwt_hmac_verify(&proto::JwtHmacVerifyInput {
+                kid: kid.clone(),
+                signing_input: signing_input.to_vec(),
+                expected_hmac: expected_hmac.to_vec(),
+            })?;
+            if !verify_result.valid {
+                return Err(anyhow!("JWT HMAC verification failed in TA for sign-typed-data"));
+            }
+        }
+        (None, None) => {
+            return Err(anyhow!("sign_typed_data: no auth proof provided to TA"));
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!("sign_typed_data: ambiguous auth — provide passkey OR JWT, not both"));
+        }
+    }
+
     // Resolve the primary type definition from the provided type list
     let primary_type_def = input
         .types
@@ -883,7 +914,6 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     // Compute EIP-712 digest entirely inside TEE
     let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
 
-    let wallet = load_wallet_cached(&input.wallet_id)?;
     let private_key = wallet.export_private_key(&input.hd_path)?;
 
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;

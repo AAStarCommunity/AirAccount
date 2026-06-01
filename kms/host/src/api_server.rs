@@ -1653,8 +1653,8 @@ impl KmsApiServer {
                     return Err(anyhow!("Agent credential has been superseded or revoked"));
                 }
 
-                // Per-credential rate limit
-                let cred_rl_key = format!("typed-data/{}/{}", wallet_id_str, payload.agent_index);
+                // Per-credential rate limit (shared key with sign_agent — same credential budget)
+                let cred_rl_key = format!("{}/{}", wallet_id_str, payload.agent_index);
                 self.agent_rate_limiter.check(&cred_rl_key).map_err(|limit| {
                     anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit)
                 })?;
@@ -1726,6 +1726,15 @@ impl KmsApiServer {
             Ok(proto::Eip712FieldValue { name: fv.name.clone(), value })
         }).collect::<Result<Vec<_>>>()?;
 
+        // Extract JWT proof for TA-side verification on JWT path (defense-in-depth).
+        let (jwt_kid, jwt_signing_input, jwt_hmac) = if let Some(ref jwt) = bearer {
+            let (kid, si, hmac) = agent_jwt::extract_signing_proof(jwt)
+                .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+            (Some(kid), Some(si), Some(hmac))
+        } else {
+            (None, None, None)
+        };
+
         let ta_input = proto::SignTypedDataInput {
             wallet_id,
             hd_path: req.hd_path.clone(),
@@ -1734,6 +1743,9 @@ impl KmsApiServer {
             types,
             message,
             passkey_assertion,
+            jwt_kid,
+            jwt_signing_input,
+            jwt_hmac,
         };
 
         let output = self.tee.sign_typed_data(ta_input).await?;
