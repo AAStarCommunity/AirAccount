@@ -41,6 +41,8 @@ pub enum Command {
     JwtRotateSecret = 15,
     JwtSignPayload = 16,
     SignTypedData = 17,
+    CreateP256SessionKey = 18,
+    SignP256UserOp = 19,
     #[default]
     Unknown,
 }
@@ -85,6 +87,8 @@ mod tests {
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
         assert_eq!(u32::from(Command::JwtSignPayload), 16);
         assert_eq!(u32::from(Command::SignTypedData), 17);
+        assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
+        assert_eq!(u32::from(Command::SignP256UserOp), 19);
     }
 
     #[test]
@@ -93,6 +97,8 @@ mod tests {
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
+        assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
+        assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
     }
 
     #[test]
@@ -103,7 +109,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=17u32 {
+        for i in 0..=19u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -562,6 +568,36 @@ mod tests {
         bincode_roundtrip(&Eip712FieldValue {
             name: "hash".into(),
             value: Eip712Value::Bytes32([0x11; 32]),
+        });
+    }
+
+    // ── P256 Session Key ──
+
+    #[test]
+    fn create_p256_session_key_roundtrip() {
+        bincode_roundtrip(&CreateP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 0,
+        });
+        bincode_roundtrip(&CreateP256SessionKeyOutput {
+            pub_key_x: [0xaa; 32],
+            pub_key_y: [0xbb; 32],
+        });
+    }
+
+    #[test]
+    fn sign_p256_user_op_roundtrip() {
+        bincode_roundtrip(&SignP256UserOpInput {
+            wallet_id: test_uuid(),
+            session_index: 2,
+            user_op_hash: [0xcc; 32],
+            jwt_kid: "v1234".to_string(),
+            jwt_signing_input: b"header.payload".to_vec(),
+            jwt_hmac: vec![0xaa; 32],
+            account_address: [0xab; 20],
+        });
+        bincode_roundtrip(&SignP256UserOpOutput {
+            signature: vec![0u8; 149],
         });
     }
 }

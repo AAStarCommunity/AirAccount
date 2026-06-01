@@ -94,6 +94,21 @@ CREATE TABLE IF NOT EXISTS jwt_secret_meta (
     expires_at   INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS p256_session_keys (
+    wallet_id               TEXT NOT NULL,
+    session_index           INTEGER NOT NULL,
+    human_id                TEXT NOT NULL,
+    pub_key_x               TEXT NOT NULL,
+    pub_key_y               TEXT NOT NULL,
+    credential_hash         TEXT,
+    credential_expires_at   INTEGER,
+    status                  TEXT NOT NULL DEFAULT 'active',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    PRIMARY KEY (wallet_id, session_index),
+    FOREIGN KEY (wallet_id) REFERENCES wallets(key_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_key ON address_index(key_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_credential ON wallets(credential_id);
@@ -181,6 +196,20 @@ pub struct JwtSecretMetaRow {
     pub created_at: String,
     pub retired_at: Option<String>,
     pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct P256SessionKeyRow {
+    pub wallet_id: String,
+    pub session_index: u32,
+    pub human_id: String,
+    pub pub_key_x: String,
+    pub pub_key_y: String,
+    pub credential_hash: Option<String>,
+    pub credential_expires_at: Option<i64>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // ── KmsDb ──
@@ -603,6 +632,94 @@ impl KmsDb {
         )?;
         let rows = stmt.query_map([], Self::map_agent_key_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ── P256 Session Key methods ──
+
+    fn map_p256_session_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<P256SessionKeyRow> {
+        Ok(P256SessionKeyRow {
+            wallet_id: row.get(0)?,
+            session_index: row.get::<_, u32>(1)?,
+            human_id: row.get(2)?,
+            pub_key_x: row.get(3)?,
+            pub_key_y: row.get(4)?,
+            credential_hash: row.get(5)?,
+            credential_expires_at: row.get(6)?,
+            status: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    }
+
+    pub fn insert_p256_session_key(&self, row: &P256SessionKeyRow) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO p256_session_keys \
+             (wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
+              credential_hash, credential_expires_at, status, created_at, updated_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                row.wallet_id,
+                row.session_index,
+                row.human_id,
+                row.pub_key_x,
+                row.pub_key_y,
+                row.credential_hash,
+                row.credential_expires_at,
+                row.status,
+                row.created_at,
+                row.updated_at,
+            ],
+        )
+        .context("insert_p256_session_key")?;
+        Ok(())
+    }
+
+    pub fn get_p256_session_key(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+    ) -> Result<Option<P256SessionKeyRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
+             credential_hash, credential_expires_at, status, created_at, updated_at \
+             FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2",
+        )?;
+        let mut rows =
+            stmt.query_map(params![wallet_id, session_index], Self::map_p256_session_key_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn next_p256_session_index_for_wallet(&self, wallet_id: &str) -> Result<u32> {
+        let conn = self.lock();
+        let max: Option<i64> = conn.query_row(
+            "SELECT MAX(session_index) FROM p256_session_keys WHERE wallet_id=?1",
+            params![wallet_id],
+            |row| row.get(0),
+        )?;
+        Ok(max.map(|n| n as u32 + 1).unwrap_or(0))
+    }
+
+    pub fn update_p256_session_key_credential(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+        credential_hash: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE p256_session_keys SET credential_hash=?3, credential_expires_at=?4, \
+             updated_at=?5 WHERE wallet_id=?1 AND session_index=?2",
+            params![wallet_id, session_index, credential_hash, expires_at, now],
+        )
+        .context("update_p256_session_key_credential")?;
+        Ok(())
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
