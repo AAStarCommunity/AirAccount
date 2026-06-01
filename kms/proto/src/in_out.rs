@@ -384,3 +384,17 @@ pub struct SignP256UserOpOutput {
     /// 149 bytes: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
     pub signature: Vec<u8>,
 }
+
+/// Delete a P256 session key from TEE secure storage (GC cleanup).
+/// Called by the host's lazy GC on create/sign/revoke when the credential has expired.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DeleteP256SessionKeyInput {
+    pub wallet_id: Uuid,
+    pub session_index: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DeleteP256SessionKeyOutput {
+    /// true if the key existed and was deleted; false if it was already absent (idempotent).
+    pub deleted: bool,
+}

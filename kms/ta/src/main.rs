@@ -866,6 +866,34 @@ fn sign_p256_user_op(
     Ok(proto::SignP256UserOpOutput { signature })
 }
 
+/// Delete a P256 session key from TEE secure storage.
+/// Called by the host's lazy GC when credential_expires_at has passed.
+/// Returns deleted=false (not an error) if the key is already absent — idempotent.
+fn delete_p256_session_key(
+    input: &proto::DeleteP256SessionKeyInput,
+) -> Result<proto::DeleteP256SessionKeyOutput> {
+    dbg_println!(
+        "[+] Delete P256 session key for wallet: {:?}, index: {}",
+        input.wallet_id,
+        input.session_index
+    );
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
+    match db.delete_entry::<P256SessionKey>(&store_id) {
+        Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
+        Err(e) => {
+            // OP-TEE secure storage returns item-not-found when the key is already absent.
+            // Treat as idempotent success so double-GC doesn't return an error.
+            let msg = e.to_string();
+            if msg.contains("ItemNotFound") || msg.contains("not found") || msg.contains("does not exist") {
+                Ok(proto::DeleteP256SessionKeyOutput { deleted: false })
+            } else {
+                Err(anyhow!("delete_p256_session_key: secure storage error: {}", msg))
+            }
+        }
+    }
+}
+
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
     dbg_println!(
         "[+] EIP-712 sign typed data for wallet: {:?}, primary_type: {}",
@@ -973,6 +1001,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
+        Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
         _ => bail!("Unsupported command"),
     }
 }
