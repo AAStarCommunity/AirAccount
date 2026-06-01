@@ -1781,10 +1781,16 @@ impl KmsApiServer {
         exclude_session_index: Option<u32>,
     ) {
         // Pass 0: Retry TEE deletes that previously failed (DB=revoked, tee_deleted=0).
-        let unconfirmed = self
-            .db
-            .list_unconfirmed_tee_deletes(wallet_id_str)
-            .unwrap_or_default();
+        let unconfirmed = match self.db.list_unconfirmed_tee_deletes(wallet_id_str) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "⚠️  P256 GC: list_unconfirmed_tee_deletes failed for {}: {}",
+                    wallet_id_str, e
+                );
+                vec![]
+            }
+        };
         for session_index in unconfirmed {
             match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
                 Ok(_) => {
@@ -2126,8 +2132,19 @@ impl KmsApiServer {
                 .db
                 .p256_session_key_is_revoked(&wallet_id_str, session_index)?;
             if already_revoked {
-                // Idempotent: key is already revoked. Retry TEE delete in case it failed before.
-                let _ = self.tee.delete_p256_session_key(wallet_uuid, session_index).await;
+                // Idempotent: key is already revoked. Retry TEE delete in case it failed before,
+                // then confirm tee_deleted so GC's Pass 0 stops retrying this row.
+                match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+                    Ok(_) => {
+                        let _ = self.db.mark_p256_tee_deleted(&wallet_id_str, session_index);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "⚠️  RevokeP256SessionKey (idempotent): TEE delete retry failed {}:{}: {}",
+                            wallet_id_str, session_index, e
+                        );
+                    }
+                }
                 let revoked_at = Utc::now().timestamp();
                 println!(
                     "✅ RevokeP256SessionKey (idempotent): wallet={} idx={}",
