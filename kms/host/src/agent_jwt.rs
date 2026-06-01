@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
+use proto;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -26,34 +27,16 @@ pub struct JwtPayload {
     pub exp: i64,
 }
 
-#[cfg(feature = "tee")]
-pub async fn issue_credential(
-    tee: &TeeHandle,
-    subject: &str,
-    wallet_id: uuid::Uuid,
-    agent_index: u32,
-    agent_address: &str,
-    ttl_secs: i64,
-) -> Result<(String, i64)> {
-    let now = Utc::now().timestamp();
-    let exp = now + ttl_secs;
-
-    let payload = JwtPayload {
-        sub: subject.to_string(),
-        wallet_id: wallet_id.to_string(),
-        agent_index,
-        agent_address: agent_address.to_string(),
-        iat: now,
-        exp,
-    };
-    let payload_b64 = b64_json(&payload)?;
-
-    // Single atomic TA call: TA picks current kid, builds header, signs — no kid race possible
-    let sig = tee.jwt_sign_payload(&payload_b64).await?;
-    let signing_input = format!("{}.{}", sig.header_b64, payload_b64);
-    let signature_b64 = URL_SAFE_NO_PAD.encode(sig.hmac);
-
-    Ok((format!("{}.{}", signing_input, signature_b64), exp))
+/// Assemble a JWT string from the material returned by `create_agent_key` TA call.
+/// The payload was constructed inside TEE — wallet_id and agent_index are TEE-validated.
+pub fn assemble_jwt(tee_out: &proto::CreateAgentKeyOutput) -> Result<(String, i64)> {
+    let signature_b64 = URL_SAFE_NO_PAD.encode(tee_out.jwt_hmac);
+    let jwt = format!(
+        "{}.{}.{}",
+        tee_out.jwt_header_b64, tee_out.jwt_payload_b64, signature_b64
+    );
+    let payload: JwtPayload = decode_json(&tee_out.jwt_payload_b64)?;
+    Ok((jwt, payload.exp))
 }
 
 #[cfg(feature = "tee")]
@@ -108,11 +91,6 @@ pub fn extract_signing_proof(jwt: &str) -> anyhow::Result<(String, Vec<u8>, Vec<
         return Err(anyhow::anyhow!("JWT HMAC must be 32 bytes, got {}", hmac_bytes.len()));
     }
     Ok((header.kid, signing_input, hmac_bytes))
-}
-
-fn b64_json<T: Serialize>(value: &T) -> Result<String> {
-    let json = serde_json::to_vec(value)?;
-    Ok(URL_SAFE_NO_PAD.encode(json))
 }
 
 fn decode_json<T: serde::de::DeserializeOwned>(segment: &str) -> Result<T> {
