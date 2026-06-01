@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -663,10 +663,13 @@ impl KmsDb {
     ///
     /// Counted rows (against max_active):
     ///   - status='active' with credential_expires_at > now_unix (non-expired)
-    ///   - status='active' with credential_expires_at IS NULL (shouldn't exist, but safe to count)
-    ///   - status='pending' (TEE key generation in flight; always reserves a slot)
+    ///   - status='active' with credential_expires_at IS NULL (anomaly; counted conservatively)
+    ///   - status='pending' created within the last `pending_ttl_secs` seconds
+    ///     (stuck pending rows older than pending_ttl_secs are excluded from the quota;
+    ///      they will be cleaned up by the next GC cycle)
     ///
-    /// Returns Err if active+pending count >= max_active before inserting.
+    /// Uses rusqlite Transaction (BEGIN IMMEDIATE) for RAII rollback on any error path.
+    /// Returns Err if active/recent-pending count >= max_active before inserting.
     pub fn allocate_p256_session_key_pending(
         &self,
         wallet_id: &str,
@@ -674,33 +677,41 @@ impl KmsDb {
         now_unix: i64,
         max_active: i64,
     ) -> Result<u32> {
+        // Pending rows older than this are considered stuck (host crash after allocate)
+        // and excluded from the count so they don't permanently block new creates.
+        const PENDING_TTL_SECS: i64 = 300; // 5 minutes
+        let pending_cutoff = now_unix - PENDING_TTL_SECS;
+
         let now_rfc = Utc::now().to_rfc3339();
         let conn = self.lock();
 
-        // Count check and INSERT in a single transaction to prevent concurrent over-allocation.
-        // BEGIN IMMEDIATE acquires a write lock immediately, blocking other writers.
-        conn.execute_batch("BEGIN IMMEDIATE")?;
+        // BEGIN IMMEDIATE: acquire write lock immediately, block other writers.
+        // Using rusqlite Transaction for RAII rollback on any ? error.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let current_count: i64 = conn.query_row(
+        let current_count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM p256_session_keys \
              WHERE wallet_id=?1 \
-               AND (status = 'pending' \
-                    OR (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2)))",
-            params![wallet_id, now_unix],
+               AND (
+                 (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2))
+                 OR (status = 'pending' AND CAST(strftime('%s', created_at) AS INTEGER) >= ?3)
+               )",
+            params![wallet_id, now_unix, pending_cutoff],
             |row| row.get(0),
         )?;
 
         if current_count >= max_active {
-            conn.execute_batch("ROLLBACK")?;
+            // tx dropped here → automatic ROLLBACK via rusqlite Transaction::Drop
             return Err(anyhow::anyhow!(
-                "Wallet already has {} active/pending P256 session keys (max {}). \
-                 Revoke an existing key before creating a new one.",
+                "Wallet already has {} active/recent-pending P256 session keys (max {}). \
+                 Revoke an existing key or wait for stuck pending to expire ({}s).",
                 current_count,
-                max_active
+                max_active,
+                PENDING_TTL_SECS
             ));
         }
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO p256_session_keys \
              (wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
               credential_hash, credential_expires_at, status, created_at, updated_at) \
@@ -710,14 +721,14 @@ impl KmsDb {
         )
         .context("allocate_p256_session_key_pending INSERT")?;
 
-        let idx: i64 = conn.query_row(
+        let idx: i64 = tx.query_row(
             "SELECT session_index FROM p256_session_keys \
              WHERE wallet_id=?1 AND status='pending' ORDER BY session_index DESC LIMIT 1",
             params![wallet_id],
             |row| row.get(0),
         )?;
 
-        conn.execute_batch("COMMIT")?;
+        tx.commit()?;
         Ok(idx as u32)
     }
 
@@ -799,28 +810,41 @@ impl KmsDb {
         Ok(n > 0)
     }
 
-    /// Return session_index values for P256 session keys that are expired.
-    /// `gc_cutoff_unix` = now - grace_secs (grace window guards against clock drift).
-    /// Optionally exclude one session_index (used during sign to avoid GC-ing the key in use).
-    /// Expired = credential_expires_at IS NOT NULL AND <= gc_cutoff AND status IN ('active','pending').
+    /// Return session_index values for P256 session keys eligible for GC.
+    ///
+    /// Two categories:
+    /// 1. Expired active/pending: credential_expires_at IS NOT NULL AND <= gc_cutoff
+    ///    (gc_cutoff = now - 60s grace window for clock drift)
+    /// 2. Stuck pending: status='pending' AND created_at older than pending_ttl_secs
+    ///    (these have NULL credential_expires_at and would never be GC'd otherwise)
+    ///
+    /// `exclude_session_index`: skip this index (used during sign to avoid GC-ing the key in use).
     pub fn list_expired_p256_session_keys(
         &self,
         wallet_id: &str,
         gc_cutoff_unix: i64,
         exclude_session_index: Option<u32>,
     ) -> Result<Vec<u32>> {
+        const PENDING_TTL_SECS: i64 = 300;
+        let stuck_pending_cutoff = gc_cutoff_unix - PENDING_TTL_SECS; // older = stuck
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT session_index FROM p256_session_keys \
              WHERE wallet_id=?1 \
-               AND credential_expires_at IS NOT NULL \
-               AND credential_expires_at <= ?2 \
-               AND status IN ('active', 'pending') \
-               AND (?3 IS NULL OR session_index != ?3)",
+               AND (?3 IS NULL OR session_index != ?3) \
+               AND (
+                 -- Expired active or pending (credential_expires_at set and past)
+                 (credential_expires_at IS NOT NULL AND credential_expires_at <= ?2 \
+                  AND status IN ('active', 'pending'))
+                 OR
+                 -- Stuck pending: created long ago, NULL expiry, host crashed after allocate
+                 (status = 'pending' \
+                  AND CAST(strftime('%s', created_at) AS INTEGER) < ?4)
+               )",
         )?;
         let excl: Option<i64> = exclude_session_index.map(|i| i as i64);
         let indices: Vec<u32> = stmt
-            .query_map(params![wallet_id, gc_cutoff_unix, excl], |row| row.get(0))?
+            .query_map(params![wallet_id, gc_cutoff_unix, excl, stuck_pending_cutoff], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(indices)
     }
