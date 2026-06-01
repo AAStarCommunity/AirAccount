@@ -772,6 +772,48 @@ impl TeeHandle {
             bincode::deserialize(&out).context("Failed to deserialize SignTypedDataOutput")?;
         Ok(output)
     }
+
+    pub async fn create_p256_session_key(
+        &self,
+        wallet_id: uuid::Uuid,
+        session_index: u32,
+    ) -> Result<proto::CreateP256SessionKeyOutput> {
+        let input = bincode::serialize(&proto::CreateP256SessionKeyInput {
+            wallet_id,
+            session_index,
+        })
+        .context("Failed to serialize CreateP256SessionKeyInput")?;
+        let out = self.call(proto::Command::CreateP256SessionKey, input).await?;
+        let output: proto::CreateP256SessionKeyOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize CreateP256SessionKeyOutput")?;
+        Ok(output)
+    }
+
+    pub async fn sign_p256_user_op(
+        &self,
+        wallet_id: uuid::Uuid,
+        session_index: u32,
+        user_op_hash: &[u8; 32],
+        jwt_kid: String,
+        jwt_signing_input: Vec<u8>,
+        jwt_hmac: Vec<u8>,
+        account_address: [u8; 20],
+    ) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::SignP256UserOpInput {
+            wallet_id,
+            session_index,
+            user_op_hash: *user_op_hash,
+            jwt_kid,
+            jwt_signing_input,
+            jwt_hmac,
+            account_address,
+        })
+        .context("Failed to serialize SignP256UserOpInput")?;
+        let out = self.call(proto::Command::SignP256UserOp, input).await?;
+        let output: proto::SignP256UserOpOutput =
+            bincode::deserialize(&out).context("Failed to deserialize SignP256UserOpOutput")?;
+        Ok(output.signature)
+    }
 }
 
 // ---- TEE worker thread ----

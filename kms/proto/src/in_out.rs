@@ -348,3 +348,39 @@ pub struct SignTypedDataOutput {
     /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
     pub signature: Vec<u8>,
 }
+
+// ── P256 Session Key (v0.18.1) ──
+// Wire format: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)] = 149 bytes
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CreateP256SessionKeyInput {
+    pub wallet_id: Uuid,
+    pub session_index: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CreateP256SessionKeyOutput {
+    /// P-256 public key X coordinate (32 bytes big-endian)
+    pub pub_key_x: [u8; 32],
+    /// P-256 public key Y coordinate (32 bytes big-endian)
+    pub pub_key_y: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256UserOpInput {
+    pub wallet_id: Uuid,
+    pub session_index: u32,
+    pub user_op_hash: [u8; 32],
+    /// JWT kid for TA-side HMAC authorization check (defense-in-depth)
+    pub jwt_kid: String,
+    pub jwt_signing_input: Vec<u8>,
+    pub jwt_hmac: Vec<u8>,
+    /// ERC-4337 Smart Account address embedded in wire format to prevent cross-account abuse
+    pub account_address: [u8; 20],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256UserOpOutput {
+    /// 149 bytes: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
+    pub signature: Vec<u8>,
+}

@@ -475,6 +475,58 @@ pub struct SignTypedDataResponse {
     pub signature: String,
 }
 
+// ── P256 Session Key (v0.18.1) ──
+
+/// POST /kms/create-p256-session-key
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateP256SessionKeyRequest {
+    #[serde(rename = "humanKeyId")]
+    pub human_key_id: String,
+    #[serde(rename = "label", default)]
+    pub label: String,
+    #[serde(rename = "webAuthnAssertion", skip_serializing_if = "Option::is_none")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateP256SessionKeyResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "pubKeyX")]
+    pub pub_key_x: String,
+    #[serde(rename = "pubKeyY")]
+    pub pub_key_y: String,
+    pub algorithm: String,
+    #[serde(rename = "agentCredential")]
+    pub agent_credential: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
+}
+
+/// POST /kms/sign-p256-user-op
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256UserOpRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "payload")]
+    pub payload: String,
+    /// ERC-4337 Smart Account contract address (embedded in the 149-byte signature)
+    #[serde(rename = "accountAddress")]
+    pub account_address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256UserOpResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "pubKeyX")]
+    pub pub_key_x: String,
+    #[serde(rename = "pubKeyY")]
+    pub pub_key_y: String,
+    /// Hex-encoded 149-byte wire format: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
+    pub signature: String,
+}
+
 /// Parse compound agent keyId "wallet_uuid:agent_index"
 fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
     let parts: Vec<&str> = key_id.splitn(2, ':').collect();
@@ -1694,6 +1746,176 @@ impl KmsApiServer {
 
         Ok(RevokeAgentCredentialResponse { success: true, revoked_at })
     }
+
+    pub async fn create_p256_session_key(
+        &self,
+        req: CreateP256SessionKeyRequest,
+    ) -> Result<CreateP256SessionKeyResponse> {
+        let wallet_id = Self::validate_key_id(&req.human_key_id)?;
+
+        // Verify human wallet exists
+        let _wallet = self
+            .db
+            .get_wallet(&req.human_key_id)?
+            .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
+
+        // P256 session key creation requires WebAuthn ceremony (replay-protected)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!(
+                "create-p256-session-key requires WebAuthn ceremony. \
+                 Legacy passkey assertions are not accepted."
+            ));
+        }
+        let assertion = self
+            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
+            .await?;
+        if assertion.is_none() {
+            return Err(anyhow!("Passkey assertion required to create P256 session key"));
+        }
+
+        // Atomically allocate next session_index
+        let session_index = self
+            .db
+            .next_p256_session_index_for_wallet(&req.human_key_id)?;
+
+        // Generate P256 key pair in TEE
+        let tee_result = self
+            .tee
+            .create_p256_session_key(wallet_id, session_index)
+            .await?;
+        let pub_key_x = hex::encode(&tee_result.pub_key_x);
+        let pub_key_y = hex::encode(&tee_result.pub_key_y);
+
+        // Issue JWT credential for this P256 session key (reuse agent JWT infrastructure)
+        let key_id = format!("{}:{}", req.human_key_id, session_index);
+        let (jwt, expires_at) = agent_jwt::issue_credential(
+            &self.tee,
+            &req.human_key_id,
+            wallet_id,
+            session_index,
+            &key_id,
+            3 * 24 * 3600,
+        )
+        .await?;
+
+        let now = Utc::now().to_rfc3339();
+        let cred_hash = agent_jwt::credential_hash(&jwt);
+        self.db.insert_p256_session_key(&kms::db::P256SessionKeyRow {
+            wallet_id: req.human_key_id.clone(),
+            session_index,
+            human_id: req.human_key_id.clone(),
+            pub_key_x: pub_key_x.clone(),
+            pub_key_y: pub_key_y.clone(),
+            credential_hash: Some(cred_hash),
+            credential_expires_at: Some(expires_at),
+            status: "active".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        })?;
+
+        println!(
+            "✅ CreateP256SessionKey: wallet={} idx={} x={}...",
+            req.human_key_id,
+            session_index,
+            &pub_key_x[..8]
+        );
+
+        Ok(CreateP256SessionKeyResponse {
+            key_id,
+            pub_key_x,
+            pub_key_y,
+            algorithm: "p256".to_string(),
+            agent_credential: jwt,
+            expires_at,
+        })
+    }
+
+    pub async fn sign_p256_user_op(
+        &self,
+        bearer_jwt: String,
+        req: SignP256UserOpRequest,
+    ) -> Result<SignP256UserOpResponse> {
+        // Verify JWT via TEE HMAC
+        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt)
+            .await
+            .map_err(|e| anyhow!("Invalid P256 session credential: {}", e))?;
+
+        // Validate keyId matches JWT payload
+        let (wallet_uuid, session_index) = parse_agent_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_uuid.to_string();
+        if payload.wallet_id != wallet_id_str || payload.agent_index != session_index {
+            return Err(anyhow!("keyId does not match P256 session credential"));
+        }
+
+        // Per-credential rate limit
+        let cred_rl_key = format!("p256/{}/{}", wallet_id_str, session_index);
+        self.agent_rate_limiter
+            .check(&cred_rl_key)
+            .map_err(|limit| {
+                anyhow!(
+                    "Per-credential rate limit exceeded ({}/min). Retry after 60s.",
+                    limit
+                )
+            })?;
+
+        // Check session key is active and credential_hash matches
+        let session_key = self
+            .db
+            .get_p256_session_key(&wallet_id_str, session_index)?
+            .ok_or_else(|| anyhow!("P256 session key not found: {}", req.key_id))?;
+        if session_key.status != "active" {
+            return Err(anyhow!("P256 session key is revoked"));
+        }
+        let current_hash = agent_jwt::credential_hash(&bearer_jwt);
+        if session_key.credential_hash.as_deref() != Some(current_hash.as_str()) {
+            return Err(anyhow!("P256 session credential has been superseded or revoked"));
+        }
+
+        // Validate userOpHash (exactly 32 bytes)
+        let user_op_hash = Self::validate_hash_hex(&req.payload)?;
+
+        // Parse accountAddress
+        let account_address = Self::parse_address_hex(&req.account_address)
+            .map_err(|e| anyhow!("Invalid accountAddress: {}", e))?;
+
+        // Extract JWT proof for TA-side authorization (defense-in-depth)
+        let (jwt_kid, jwt_signing_input, jwt_hmac) =
+            agent_jwt::extract_signing_proof(&bearer_jwt)
+                .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+
+        // Sign in TEE — 149-byte P256 format
+        let sig_bytes = self
+            .tee
+            .sign_p256_user_op(
+                wallet_uuid,
+                session_index,
+                &user_op_hash,
+                jwt_kid,
+                jwt_signing_input,
+                jwt_hmac,
+                account_address,
+            )
+            .await?;
+
+        if sig_bytes.len() != 149 {
+            return Err(anyhow!(
+                "Unexpected P256 signature length: {} (expected 149)",
+                sig_bytes.len()
+            ));
+        }
+
+        println!(
+            "✅ SignP256UserOp: wallet={} idx={}",
+            wallet_id_str, session_index
+        );
+
+        Ok(SignP256UserOpResponse {
+            key_id: req.key_id,
+            pub_key_x: session_key.pub_key_x,
+            pub_key_y: session_key.pub_key_y,
+            signature: format!("0x{}", hex::encode(&sig_bytes)),
+        })
+    }
 }
 
 // ========================================
@@ -2210,6 +2432,53 @@ async fn handle_sign_typed_data(
     }
 }
 
+async fn handle_create_p256_session_key(
+    body: CreateP256SessionKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.create_p256_session_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ CreateP256SessionKey OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("CreateP256SessionKey error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_p256_user_op(
+    auth_header: String,
+    body: SignP256UserOpRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let jwt = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| {
+            warp::reject::custom(ApiError(
+                "Authorization must be 'Bearer <jwt>'".to_string(),
+            ))
+        })?
+        .to_string();
+    let t0 = std::time::Instant::now();
+    match server.sign_p256_user_op(jwt, body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignP256UserOp OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignP256UserOp error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ApiError(String);
 
@@ -2623,6 +2892,28 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_std.clone()))
         .and_then(handle_sign_typed_data);
 
+    // P256 Session Key endpoints
+    let server_cp256 = server.clone();
+    let create_p256_session_key = warp::path("kms")
+        .and(warp::path("create-p256-session-key"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_cp256.clone()))
+        .and_then(handle_create_p256_session_key);
+
+    let server_sp256 = server.clone();
+    let sign_p256_user_op = warp::path("kms")
+        .and(warp::path("sign-p256-user-op"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sp256.clone()))
+        .and_then(handle_sign_p256_user_op);
+
     // JWT secret auto-rotation background task (runs every 24h)
     let server_rot = server.clone();
     tokio::spawn(async move {
@@ -2680,6 +2971,8 @@ pub async fn start_kms_server() -> Result<()> {
         .or(refresh_agent_credential)
         .or(revoke_agent_credential)
         .or(sign_typed_data)
+        .or(create_p256_session_key)
+        .or(sign_p256_user_op)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);
@@ -2706,6 +2999,8 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /kms/refresh-agent-credential - Refresh agent JWT (Bearer + WebAuthn)");
     println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
     println!("   POST /kms/SignTypedData             - EIP-712 typed data signing");
+    println!("   POST /kms/create-p256-session-key  - Create P256 session key (WebAuthn)");
+    println!("   POST /kms/sign-p256-user-op        - P256 sign userOpHash (Bearer JWT)");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
