@@ -227,6 +227,11 @@ impl KmsDb {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite DB at {}", path))?;
+        // Prevent SQLITE_BUSY on schema init and migration: retry automatically for up to 5s
+        // before returning an error. DDL operations on a shared WAL-mode DB can be transiently
+        // locked by concurrent readers/writers.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .context("Failed to set SQLite busy timeout")?;
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
         // Migration: add tee_deleted column to DBs created before this column existed.
@@ -768,6 +773,10 @@ impl KmsDb {
     }
 
     /// Activate a pending P256 session key after successful TA key generation.
+    ///
+    /// Uses BEGIN IMMEDIATE to atomically recheck the active-key count before promoting
+    /// the pending row to 'active'. This prevents a slow/stuck pending row from pushing
+    /// the count above max_active after another create was allowed in during the stuck window.
     pub fn activate_p256_session_key(
         &self,
         wallet_id: &str,
@@ -776,24 +785,47 @@ impl KmsDb {
         pub_key_y: &str,
         credential_hash: &str,
         credential_expires_at: i64,
+        max_active: i64,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE p256_session_keys SET pub_key_x=?3, pub_key_y=?4, \
-             credential_hash=?5, credential_expires_at=?6, status='active', updated_at=?7 \
-             WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
-            params![
-                wallet_id,
-                session_index,
-                pub_key_x,
-                pub_key_y,
-                credential_hash,
-                credential_expires_at,
-                now
-            ],
-        )
-        .context("activate_p256_session_key")?;
+        let now_unix = Utc::now().timestamp();
+        let now_rfc = Utc::now().to_rfc3339();
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Count currently non-expired active rows (self is still 'pending', so not counted).
+        // If adding this key would exceed the cap, reject so caller can clean up TEE material.
+        let active_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND status='active' \
+               AND (credential_expires_at IS NULL OR credential_expires_at > ?2)",
+            params![wallet_id, now_unix],
+            |row| row.get(0),
+        )?;
+        if active_count >= max_active {
+            return Err(anyhow::anyhow!(
+                "activate_p256_session_key: already {} active keys for wallet {} (max {}); \
+                 slow create raced with another key. Caller will clean up TEE material.",
+                active_count, wallet_id, max_active
+            ));
+        }
+
+        let n = tx
+            .execute(
+                "UPDATE p256_session_keys SET pub_key_x=?3, pub_key_y=?4, \
+                 credential_hash=?5, credential_expires_at=?6, status='active', updated_at=?7 \
+                 WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
+                params![
+                    wallet_id,
+                    session_index,
+                    pub_key_x,
+                    pub_key_y,
+                    credential_hash,
+                    credential_expires_at,
+                    now_rfc
+                ],
+            )
+            .context("activate_p256_session_key")?;
         if n == 0 {
             return Err(anyhow::anyhow!(
                 "activate_p256_session_key: no pending row found for ({}, {})",
@@ -801,6 +833,7 @@ impl KmsDb {
                 session_index
             ));
         }
+        tx.commit()?;
         Ok(())
     }
 

@@ -1974,6 +1974,7 @@ impl KmsApiServer {
             &pub_key_y,
             &cred_hash,
             expires_at,
+            2, // max_active: enforced atomically in activate to guard against slow-create races
         ) {
             // DB activation failed after TEE key and JWT were created. Same TEE-cleanup
             // strategy: keep DB pending row if TEE delete fails so GC can retry.

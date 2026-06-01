@@ -306,6 +306,9 @@ if [ -n "${P256_REVOKED_KEY_ID:-}" ] && [ -n "${P256_REVOKE_ASSERTION_JSON:-}" ]
         echo "  ${RED}FAIL: expected 2xx on double-revoke (idempotent)${NC}"
     fi
 else
+    API_NAMES+=("P256 double-revoke (idempotent)")
+    API_TIMES+=("0")
+    API_STATUS+=("SKIP")
     printf "${YELLOW}SKIP${NC} %-32s %6s  Set P256_REVOKED_KEY_ID+P256_REVOKE_ASSERTION_JSON to test\n" \
         "P256 double-revoke (idempotent)" "0ms"
 fi
