@@ -675,7 +675,6 @@ impl TeeHandle {
         wallet_id: uuid::Uuid,
         agent_index: u32,
         subject: &str,
-        iat: i64,
         ttl_secs: i64,
         passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<proto::CreateAgentKeyOutput> {
@@ -683,7 +682,6 @@ impl TeeHandle {
             wallet_id,
             agent_index,
             subject: subject.to_string(),
-            iat,
             ttl_secs,
             passkey_assertion,
         })
