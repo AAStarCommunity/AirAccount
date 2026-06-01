@@ -866,21 +866,52 @@ fn sign_p256_user_op(
     Ok(proto::SignP256UserOpOutput { signature })
 }
 
+/// Extract wallet_id, agent_index, and exp from a JWT signing input, then validate exp.
+/// signing_input format: "header_b64url.payload_b64url" (exactly two dot-separated segments).
+/// Payload JSON: {"wallet_id":"<uuid>","agent_index":<u32>,"exp":<i64>}
+/// The format is controlled by our own jwt_sign_payload TA function — no whitespace around colons.
 fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
     use base64ct::{Base64UrlUnpadded, Encoding};
     let s = std::str::from_utf8(signing_input)
         .map_err(|_| anyhow!("jwt_parse_claims: signing_input is not valid UTF-8"))?;
-    let payload_b64 = s.splitn(2, '.').nth(1)
-        .ok_or_else(|| anyhow!("jwt_parse_claims: missing '.' separator"))?;
+
+    // Require exactly "header.payload" — split_once ensures both parts are non-empty
+    let (_, payload_b64) = s.split_once('.')
+        .ok_or_else(|| anyhow!("jwt_parse_claims: signing_input must be 'header.payload'"))?;
+    if payload_b64.is_empty() || payload_b64.contains('.') {
+        return Err(anyhow!("jwt_parse_claims: malformed signing_input — expected exactly two segments"));
+    }
+
+
     let payload_bytes = Base64UrlUnpadded::decode_vec(payload_b64)
         .map_err(|_| anyhow!("jwt_parse_claims: payload base64url decode failed"))?;
     let payload = std::str::from_utf8(&payload_bytes)
         .map_err(|_| anyhow!("jwt_parse_claims: payload is not valid UTF-8"))?;
+
+    // Validate payload starts with '{' — guards against format drift
+    if !payload.starts_with('{') {
+        return Err(anyhow!("jwt_parse_claims: payload is not a JSON object"));
+    }
+
+
     let wallet_id = extract_json_str_field(payload, "wallet_id")?;
     let agent_index = extract_json_u32_field(payload, "agent_index")?;
+    let exp = extract_json_i64_field(payload, "exp")?;
+
+    // TA-side expiry check using TEE system time (TEE_GetSystemTime).
+    // Prevents a compromised host from replaying expired tokens.
+    let mut tee_time = optee_utee::Time::new();
+    tee_time.system_time();
+    let now_secs = tee_time.seconds as i64;
+    if exp <= now_secs {
+        return Err(anyhow!("jwt_parse_claims: JWT has expired (exp={}, now={})", exp, now_secs));
+    }
+
     Ok((wallet_id, agent_index))
 }
 
+/// Extract a JSON string field value from a minimally-formatted JWT payload.
+/// Format contract: `"field":"value"` with no whitespace around colon (our jwt_sign_payload format).
 fn extract_json_str_field(json: &str, field: &str) -> Result<String> {
     let needle = format!("\"{}\":\"", field);
     let start = json.find(needle.as_str())
@@ -892,6 +923,8 @@ fn extract_json_str_field(json: &str, field: &str) -> Result<String> {
     Ok(json[start..end].to_string())
 }
 
+/// Extract a JSON unsigned integer field from JWT payload.
+/// Format contract: `"field":12345` (digits immediately after colon, no whitespace).
 fn extract_json_u32_field(json: &str, field: &str) -> Result<u32> {
     let needle = format!("\"{}\":", field);
     let start = json.find(needle.as_str())
@@ -905,6 +938,22 @@ fn extract_json_u32_field(json: &str, field: &str) -> Result<u32> {
     }
     json[start..end].parse::<u32>()
         .map_err(|e| anyhow!("field '{}' is not a valid u32: {}", field, e))
+}
+
+/// Extract a JSON signed integer field from JWT payload (used for 'exp' claim).
+fn extract_json_i64_field(json: &str, field: &str) -> Result<i64> {
+    let needle = format!("\"{}\":", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(json[start..].len())
+        + start;
+    if start == end {
+        return Err(anyhow!("empty value for i64 field '{}' in JWT payload", field));
+    }
+    json[start..end].parse::<i64>()
+        .map_err(|e| anyhow!("field '{}' is not a valid i64 in JWT payload: {}", field, e))
 }
 
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
