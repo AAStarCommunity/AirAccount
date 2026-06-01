@@ -1703,21 +1703,15 @@ impl KmsApiServer {
         // Avoids the race between count() and insert() that could yield duplicate indices.
         let agent_index = self.db.next_agent_index_for_wallet(&req.human_key_id)?;
 
-        // Derive agent key in TEE (secp256k1, BIP44 m/44'/60'/0'/1/<index>)
-        let tee_result = self.tee.create_agent_key(wallet_id, agent_index).await?;
+        // Derive agent key in TEE; TA constructs JWT payload internally (no oracle exposure)
+        let iat = Utc::now().timestamp();
+        let tee_result = self.tee.create_agent_key(wallet_id, agent_index, &req.human_key_id, iat, 3 * 24 * 3600).await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
         let pubkey_hex = hex::encode(&tee_result.public_key_compressed);
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
 
-        // Issue JWT credential (3-day TTL), EIP-191 wrapping done inside TEE
-        let (jwt, expires_at) = agent_jwt::issue_credential(
-            &self.tee,
-            &req.human_key_id,
-            wallet_id,
-            agent_index,
-            &agent_address,
-            3 * 24 * 3600,
-        ).await?;
+        // Assemble JWT from TEE-produced material (no host-side signing)
+        let (jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         // Store in DB — only credential_hash, never the full JWT
         let now = Utc::now().to_rfc3339();
@@ -2107,15 +2101,10 @@ impl KmsApiServer {
             return Err(anyhow!("Agent key is revoked"));
         }
 
-        // Issue new JWT (old JWT is implicitly superseded via credential_hash update)
-        let (new_jwt, expires_at) = agent_jwt::issue_credential(
-            &self.tee,
-            &wallet_id_str,
-            wallet_uuid,
-            agent_index,
-            &agent_key.agent_address,
-            3 * 24 * 3600,
-        ).await?;
+        // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation)
+        let iat = Utc::now().timestamp();
+        let tee_result = self.tee.create_agent_key(wallet_uuid, agent_index, &wallet_id_str, iat, 3 * 24 * 3600).await?;
+        let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
         self.db.update_agent_credential(&wallet_id_str, agent_index, &cred_hash, expires_at)?;

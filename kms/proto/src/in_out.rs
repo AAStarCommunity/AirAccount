@@ -204,12 +204,24 @@ pub struct WarmupCacheOutput {
 pub struct CreateAgentKeyInput {
     pub wallet_id: Uuid,
     pub agent_index: u32,
+    /// JWT sub claim (typically the human key ID string).
+    pub subject: String,
+    /// Unix timestamp of issuance (provided by host; low-security field).
+    pub iat: i64,
+    /// JWT lifetime in seconds.
+    pub ttl_secs: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateAgentKeyOutput {
     pub agent_address: [u8; 20],
     pub public_key_compressed: Vec<u8>,
+    /// JWT material for assembling the credential on the host side.
+    /// wallet_id and agent_index in the payload are TEE-constructed (not host-supplied).
+    pub jwt_kid: String,
+    pub jwt_header_b64: String,
+    pub jwt_payload_b64: String,
+    pub jwt_hmac: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -256,19 +268,6 @@ pub struct JwtRotateSecretInput {
 pub struct JwtRotateSecretOutput {
     pub new_kid: String,
     pub retired_kid: Option<String>,
-}
-
-// Single-call payload signing — atomically picks current kid, builds header, signs
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadInput {
-    pub payload_b64: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadOutput {
-    pub kid: String,
-    pub header_b64: String,
-    pub hmac: [u8; 32],
 }
 
 // EIP-712 Typed Data Signing
