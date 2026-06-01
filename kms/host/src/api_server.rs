@@ -1763,14 +1763,18 @@ impl KmsApiServer {
         Ok(RevokeAgentCredentialResponse { success: true, revoked_at })
     }
 
-    /// Lazy GC: delete expired P256 session keys for a wallet from TEE and DB.
+    /// Lazy GC: delete expired P256 session keys for a wallet from DB and TEE.
     /// Called silently on create/sign/revoke — errors are logged, never propagated.
     ///
-    /// `exclude_session_index`: skip this index (used during sign to avoid GC-ing the key
-    /// being signed, in case the JWT expires in the same second as the GC runs).
+    /// Ordering: DB-first (atomic claim) → then TEE delete (idempotent).
+    /// This prevents TOCTOU for stuck-pending rows: if DB claim wins (returns true),
+    /// a concurrent activate will fail with "no pending row found" — correct behavior.
+    /// If TEE delete fails after DB claim, the key material may linger in TEE but is
+    /// permanently inaccessible via the API (host rejects all operations on revoked keys).
+    /// The ghost TEE entry is deleted on the next GC trigger (tee_deleted=false is fine).
     ///
-    /// Grace window: 60s added to account for clock skew between host and credential issuer,
-    /// so keys are not GC'd until at least 60s past credential_expires_at.
+    /// `exclude_session_index`: skip this index during sign (prevents GC-ing the key in use).
+    /// Grace window: gc_cutoff = now - 60s so keys are GC-eligible 60s after credential_expires_at.
     async fn gc_expired_p256_session_keys(
         &self,
         wallet_id_str: &str,
@@ -1791,27 +1795,33 @@ impl KmsApiServer {
             }
         };
         for session_index in expired {
-            // TEE-first: delete key from secure storage. If TEE returns not-found, treat as
-            // already deleted (idempotent). DB update follows only on TEE success.
+            // Step 1: Atomically claim the key in DB (status → 'revoked').
+            // If claim fails (0 rows: already revoked), skip — another path handled it.
+            let claimed = match self.db.mark_p256_session_key_gc(wallet_id_str, session_index) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("⚠️  P256 GC: DB claim failed for {}:{}: {}", wallet_id_str, session_index, e);
+                    continue;
+                }
+            };
+            if !claimed {
+                continue; // already revoked by concurrent path
+            }
+
+            // Step 2: Delete TEE key (idempotent — stuck-pending rows may have no TEE key).
             match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
-                Ok(deleted) => {
-                    if let Err(e) = self.db.mark_p256_session_key_gc(wallet_id_str, session_index) {
-                        // DB update failed: ghost-active row remains. Next GC will retry TEE
-                        // (returns deleted=false) and retry DB. Self-healing on next trigger.
-                        eprintln!(
-                            "⚠️  P256 GC: TEE deleted={} but DB update failed for {}:{}: {}",
-                            deleted, wallet_id_str, session_index, e
-                        );
-                    } else {
-                        println!(
-                            "🗑️  P256 GC: cleaned expired key {}:{} (tee_deleted={})",
-                            wallet_id_str, session_index, deleted
-                        );
-                    }
+                Ok(tee_deleted) => {
+                    println!(
+                        "🗑️  P256 GC: cleaned {}:{} (tee_deleted={})",
+                        wallet_id_str, session_index, tee_deleted
+                    );
                 }
                 Err(e) => {
+                    // TEE delete failed but DB is already 'revoked'. Key is inaccessible via API.
+                    // Will retry TEE delete on next GC trigger (list_expired won't return revoked rows
+                    // so this is a best-effort cleanup; ghost TEE entry is non-exploitable).
                     eprintln!(
-                        "⚠️  P256 GC: TEE delete failed for {}:{}: {}",
+                        "⚠️  P256 GC: DB claimed but TEE delete failed for {}:{}: {}",
                         wallet_id_str, session_index, e
                     );
                 }
@@ -1890,10 +1900,23 @@ impl KmsApiServer {
         {
             Ok(r) => r,
             Err(e) => {
-                // JWT issuance failed after TEE key was created: clean up both TEE key and DB
-                // row to prevent an orphaned "ghost key" (HIGH-2 fix).
-                let _ = self.tee.delete_p256_session_key(wallet_id, session_index).await;
-                let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                // JWT issuance failed after TEE key was created. Attempt TEE cleanup:
+                // - If TEE delete succeeds: also delete the DB pending row (clean state).
+                // - If TEE delete fails: leave the DB pending row so GC can retry TEE delete
+                //   after PENDING_TTL_SECS (stuck-pending path). Never silently lose track
+                //   of key material by deleting DB while TEE delete is unknown.
+                match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+                    Ok(_) => {
+                        let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                    }
+                    Err(tee_err) => {
+                        eprintln!(
+                            "⚠️  CreateP256SessionKey cleanup: TEE delete failed for {}:{}: {} \
+                             (DB pending row kept for GC retry)",
+                            req.human_key_id, session_index, tee_err
+                        );
+                    }
+                }
                 return Err(e);
             }
         };
@@ -1908,11 +1931,20 @@ impl KmsApiServer {
             &cred_hash,
             expires_at,
         ) {
-            // DB activation failed after TEE key and JWT were created: clean up TEE key to
-            // prevent ghost key. DB pending row stays; GC cannot pick it up (NULL expiry)
-            // so explicitly delete it here too.
-            let _ = self.tee.delete_p256_session_key(wallet_id, session_index).await;
-            let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+            // DB activation failed after TEE key and JWT were created. Same TEE-cleanup
+            // strategy: keep DB pending row if TEE delete fails so GC can retry.
+            match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+                Ok(_) => {
+                    let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                }
+                Err(tee_err) => {
+                    eprintln!(
+                        "⚠️  CreateP256SessionKey cleanup: TEE delete failed for {}:{}: {} \
+                         (DB pending row kept for GC retry)",
+                        req.human_key_id, session_index, tee_err
+                    );
+                }
+            }
             return Err(e);
         }
 
@@ -2048,14 +2080,23 @@ impl KmsApiServer {
         // Lazy GC: clean up other expired P256 session keys for this wallet.
         self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, None).await;
 
-        let revoked = self
-            .db
-            .revoke_p256_session_key(&wallet_id_str, session_index)?;
-        if !revoked {
+        // Atomically mark the target key as revoked in DB (via the GC claim path).
+        // This uses the same status guard as GC to avoid double-revoke.
+        let claimed = self.db.mark_p256_session_key_gc(&wallet_id_str, session_index)?;
+        if !claimed {
             return Err(anyhow!(
                 "P256 session key not found or already revoked: {}",
                 req.key_id
             ));
+        }
+
+        // Delete TEE key material — best-effort, idempotent.
+        // If this fails, the key is permanently inaccessible via API (DB='revoked').
+        if let Err(e) = self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+            eprintln!(
+                "⚠️  RevokeP256SessionKey: TEE delete failed (key still in TEE but DB=revoked) {}:{}: {}",
+                wallet_id_str, session_index, e
+            );
         }
 
         let revoked_at = Utc::now().timestamp();

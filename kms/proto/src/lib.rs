@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=19u32 {
+        for i in 0..=20u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }

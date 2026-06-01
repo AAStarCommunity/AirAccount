@@ -871,17 +871,19 @@ impl KmsDb {
         ).context("count_active_p256_session_keys")
     }
 
-    /// Mark a P256 session key as 'revoked' in the DB (called after TA-side TEE key deleted).
-    /// Status guard prevents accidentally marking a key that was already manually revoked.
-    pub fn mark_p256_session_key_gc(&self, wallet_id: &str, session_index: u32) -> Result<()> {
+    /// Atomically claim a P256 session key for GC by setting status='revoked'.
+    /// Status guard ensures we never touch an already-revoked row.
+    /// Returns true if the row was claimed (rows_affected > 0), false if already revoked/gone.
+    /// Callers should proceed with TEE deletion only when this returns true.
+    pub fn mark_p256_session_key_gc(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock();
-        conn.execute(
+        let n = conn.execute(
             "UPDATE p256_session_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
              WHERE wallet_id=?1 AND session_index=?2 AND status IN ('active', 'pending')",
             params![wallet_id, session_index, now],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
