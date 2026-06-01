@@ -1848,24 +1848,17 @@ impl KmsApiServer {
         // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
         self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None).await;
 
-        // Enforce max-2 active P256 session keys per wallet (current + one during rotation).
-        // Checked after GC so freshly expired keys are excluded from the count.
-        let active_count = self
-            .db
-            .count_active_p256_session_keys(&req.human_key_id, Utc::now().timestamp())?;
-        if active_count >= 2 {
-            return Err(anyhow!(
-                "Wallet already has {} active P256 session keys (max 2). \
-                 Revoke an existing key before creating a new one.",
-                active_count
-            ));
-        }
-
-        // Atomically allocate next session_index via INSERT-SELECT in a single lock.
-        // This prevents TOCTOU: the 'pending' row reserves the index before the slow TA call.
+        // Atomically check active/pending count and allocate next session_index.
+        // Both happen under a single Mutex+BEGIN IMMEDIATE to prevent concurrent over-allocation.
+        // Max 2 = one active key + one during rotation overlap; pending slots always count.
         let session_index = self
             .db
-            .allocate_p256_session_key_pending(&req.human_key_id, &req.human_key_id)?;
+            .allocate_p256_session_key_pending(
+                &req.human_key_id,
+                &req.human_key_id,
+                Utc::now().timestamp(),
+                2,
+            )?;
 
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
