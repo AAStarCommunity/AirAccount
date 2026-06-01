@@ -1048,6 +1048,217 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     Ok(proto::SignTypedDataOutput { signature })
 }
 
+// ── Grant Session ABI encoding helpers ──
+
+fn abi_u256_from_u64(val: u64) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+fn abi_pad_address(addr: &[u8; 20]) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[12..32].copy_from_slice(addr);
+    buf
+}
+
+/// bytes4 is right-padded in ABI encoding (data at low offset, zeros at high offset)
+fn abi_pad_bytes4_right(b: &[u8; 4]) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[0..4].copy_from_slice(b);
+    buf
+}
+
+fn abi_u256_from_u16(val: u16) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[30..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+fn abi_u256_from_u32(val: u32) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[28..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+/// keccak256(abi.encodePacked(addresses)) — tight-packed 20-byte entries
+fn keccak_packed_addresses(addrs: &[[u8; 20]]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(addrs.len() * 20);
+    for a in addrs {
+        buf.extend_from_slice(a);
+    }
+    Keccak256::digest(&buf).into()
+}
+
+/// keccak256(abi.encodePacked(selectors)) — tight-packed 4-byte entries
+fn keccak_packed_selectors(sels: &[[u8; 4]]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(sels.len() * 4);
+    for s in sels {
+        buf.extend_from_slice(s);
+    }
+    Keccak256::digest(&buf).into()
+}
+
+/// Build GRANT_SESSION_V2 inner hash.
+/// Matches _buildGrantHash() in SessionKeyValidator.sol:
+///   keccak256(abi.encode("GRANT_SESSION_V2", chainId, contract, account, sessionKey,
+///             expiry, contractScope, selectorScope, velocityLimit, velocityWindow,
+///             callTargetsHash, selectorsHash, nonce))
+///
+/// ABI layout: 13 args; head = 13*32 = 416 bytes; string data tail = 64 bytes.
+fn build_grant_session_inner(input: &proto::SignGrantSessionInput) -> [u8; 32] {
+    let call_targets_hash = keccak_packed_addresses(&input.call_targets);
+    let selectors_hash = keccak_packed_selectors(&input.selector_allowlist);
+
+    let mut buf = [0u8; 480];
+    // [0x000] string offset = 13 * 32 = 416
+    buf[0..32].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[30..32].copy_from_slice(&(416u16).to_be_bytes());
+        v
+    });
+    // [0x020] chainId
+    buf[32..64].copy_from_slice(&abi_u256_from_u64(input.chain_id));
+    // [0x040] verifyingContract
+    buf[64..96].copy_from_slice(&abi_pad_address(&input.verifying_contract));
+    // [0x060] account
+    buf[96..128].copy_from_slice(&abi_pad_address(&input.account));
+    // [0x080] sessionKey
+    buf[128..160].copy_from_slice(&abi_pad_address(&input.session_key));
+    // [0x0A0] expiry (uint48)
+    buf[160..192].copy_from_slice(&abi_u256_from_u64(input.expiry));
+    // [0x0C0] contractScope
+    buf[192..224].copy_from_slice(&abi_pad_address(&input.contract_scope));
+    // [0x0E0] selectorScope (bytes4, right-padded)
+    buf[224..256].copy_from_slice(&abi_pad_bytes4_right(&input.selector_scope));
+    // [0x100] velocityLimit (uint16)
+    buf[256..288].copy_from_slice(&abi_u256_from_u16(input.velocity_limit));
+    // [0x120] velocityWindow (uint32)
+    buf[288..320].copy_from_slice(&abi_u256_from_u32(input.velocity_window));
+    // [0x140] callTargetsHash
+    buf[320..352].copy_from_slice(&call_targets_hash);
+    // [0x160] selectorsHash
+    buf[352..384].copy_from_slice(&selectors_hash);
+    // [0x180] nonce (uint256, big-endian 32 bytes)
+    buf[384..416].copy_from_slice(&input.nonce);
+    // [0x1A0] string length = 16
+    buf[416..448].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[31] = 16;
+        v
+    });
+    // [0x1C0] "GRANT_SESSION_V2" (16 bytes, right-zero-padded to 32)
+    buf[448..464].copy_from_slice(b"GRANT_SESSION_V2");
+
+    Keccak256::digest(&buf).into()
+}
+
+/// Build GRANT_P256_SESSION_V2 inner hash.
+/// Matches _buildP256GrantHash() in SessionKeyValidator.sol:
+///   keccak256(abi.encode("GRANT_P256_SESSION_V2", chainId, contract, account, keyX, keyY,
+///             expiry, contractScope, selectorScope, velocityLimit, velocityWindow,
+///             callTargetsHash, selectorsHash, nonce))
+///
+/// ABI layout: 14 args; head = 14*32 = 448 bytes; string data tail = 64 bytes.
+fn build_p256_grant_session_inner(input: &proto::SignP256GrantSessionInput) -> [u8; 32] {
+    let call_targets_hash = keccak_packed_addresses(&input.call_targets);
+    let selectors_hash = keccak_packed_selectors(&input.selector_allowlist);
+
+    let mut buf = [0u8; 512];
+    // [0x000] string offset = 14 * 32 = 448
+    buf[0..32].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[30..32].copy_from_slice(&(448u16).to_be_bytes());
+        v
+    });
+    // [0x020] chainId
+    buf[32..64].copy_from_slice(&abi_u256_from_u64(input.chain_id));
+    // [0x040] verifyingContract
+    buf[64..96].copy_from_slice(&abi_pad_address(&input.verifying_contract));
+    // [0x060] account
+    buf[96..128].copy_from_slice(&abi_pad_address(&input.account));
+    // [0x080] keyX (bytes32)
+    buf[128..160].copy_from_slice(&input.key_x);
+    // [0x0A0] keyY (bytes32)
+    buf[160..192].copy_from_slice(&input.key_y);
+    // [0x0C0] expiry (uint48)
+    buf[192..224].copy_from_slice(&abi_u256_from_u64(input.expiry));
+    // [0x0E0] contractScope
+    buf[224..256].copy_from_slice(&abi_pad_address(&input.contract_scope));
+    // [0x100] selectorScope (bytes4, right-padded)
+    buf[256..288].copy_from_slice(&abi_pad_bytes4_right(&input.selector_scope));
+    // [0x120] velocityLimit (uint16)
+    buf[288..320].copy_from_slice(&abi_u256_from_u16(input.velocity_limit));
+    // [0x140] velocityWindow (uint32)
+    buf[320..352].copy_from_slice(&abi_u256_from_u32(input.velocity_window));
+    // [0x160] callTargetsHash
+    buf[352..384].copy_from_slice(&call_targets_hash);
+    // [0x180] selectorsHash
+    buf[384..416].copy_from_slice(&selectors_hash);
+    // [0x1A0] nonce (uint256, big-endian 32 bytes)
+    buf[416..448].copy_from_slice(&input.nonce);
+    // [0x1C0] string length = 21
+    buf[448..480].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[31] = 21;
+        v
+    });
+    // [0x1E0] "GRANT_P256_SESSION_V2" (21 bytes, right-zero-padded to 32)
+    buf[480..501].copy_from_slice(b"GRANT_P256_SESSION_V2");
+
+    Keccak256::digest(&buf).into()
+}
+
+/// Wrap inner hash with EIP-191 personal_sign prefix (matches OpenZeppelin toEthSignedMessageHash).
+fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
+    let mut msg = [0u8; 60];
+    msg[0..28].copy_from_slice(b"\x19Ethereum Signed Message:\n32");
+    msg[28..60].copy_from_slice(inner);
+    Keccak256::digest(&msg).into()
+}
+
+fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    let inner = build_grant_session_inner(input);
+    let final_hash = eip191_hash(&inner);
+
+    let private_key = wallet.export_private_key(&input.hd_path)?;
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let msg = secp256k1::Message::from_slice(&final_hash)?;
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignGrantSessionOutput { signature })
+}
+
+fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<proto::SignP256GrantSessionOutput> {
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    let inner = build_p256_grant_session_inner(input);
+    let final_hash = eip191_hash(&inner);
+
+    let private_key = wallet.export_private_key(&input.hd_path)?;
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let msg = secp256k1::Message::from_slice(&final_hash)?;
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignP256GrantSessionOutput { signature })
+}
+
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
     let db = SecureStorageClient::open(DB_NAME)?;
     let store = JwtSecretStore::load(&db);
@@ -1122,6 +1333,8 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
+        Command::SignGrantSession => process(serialized_input, sign_grant_session),
+        Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         _ => bail!("Unsupported command"),
     }
 }
