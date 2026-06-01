@@ -1232,6 +1232,51 @@ impl KmsApiServer {
         }
     }
 
+    /// WebAuthn assertion resolver with operation-specific purpose check.
+    /// Ensures the challenge was created specifically for the given purpose
+    /// (e.g., "grant-session"), preventing cross-operation challenge replay.
+    async fn resolve_grant_passkey_assertion(
+        &self,
+        key_id: &str,
+        wa: &WebAuthnAssertion,
+        required_purpose: &str,
+    ) -> Result<proto::PasskeyAssertion> {
+        let challenge_row = self.db.consume_challenge(&wa.challenge_id)?
+            .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
+
+        if challenge_row.purpose != required_purpose {
+            return Err(anyhow!(
+                "Challenge purpose '{}' is not valid for this operation (expected '{}')",
+                challenge_row.purpose, required_purpose
+            ));
+        }
+
+        if let Some(ref bound_key) = challenge_row.key_id {
+            if bound_key != key_id {
+                return Err(anyhow!("Challenge bound to different key"));
+            }
+        }
+
+        let w = self.db.get_wallet(key_id)?
+            .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+        let pubkey_hex = w.passkey_pubkey
+            .ok_or_else(|| anyhow!("Wallet has no passkey public key"))?;
+        let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
+
+        let verified = webauthn::verify_authentication_response(
+            &wa.credential,
+            &challenge_row.challenge,
+            &self.expected_origins,
+            &challenge_row.rp_id,
+            &pk_bytes,
+            w.sign_count,
+        )?;
+
+        let _ = self.db.update_wallet_sign_count(key_id, verified.new_counter);
+        Ok(verified.proto_assertion)
+    }
+
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
         println!("📝 KMS DeriveAddress API called for key: {}", req.key_id);
 
@@ -1591,6 +1636,38 @@ impl KmsApiServer {
         Ok(resp)
     }
 
+    /// Start a purpose-bound WebAuthn challenge for grant-session signing.
+    /// The stored challenge has purpose="grant-session", which sign_grant_session
+    /// and sign_p256_grant_session verify before accepting the assertion.
+    pub async fn begin_grant_session_auth(
+        &self,
+        key_id: &str,
+        origin_header: Option<&str>,
+    ) -> Result<webauthn::AuthenticationOptionsResponse> {
+        let w = self.db.get_wallet(key_id)?
+            .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+
+        let allow_credentials = if let Some(ref cid) = w.credential_id {
+            vec![webauthn::CredentialDescriptor {
+                id: cid.clone(),
+                type_: "public-key".to_string(),
+                transports: Some(vec!["internal".to_string(), "hybrid".to_string()]),
+            }]
+        } else {
+            vec![]
+        };
+
+        let rp_id = self.resolve_rp_id(origin_header);
+        let (challenge_id, challenge_bytes, resp) = webauthn::generate_authentication_options(
+            &rp_id, allow_credentials,
+        );
+
+        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(key_id), "grant-session", &rp_id, 300)?;
+
+        println!("📝 WebAuthn BeginGrantSessionAuth: challenge_id={}, key_id={}", challenge_id, key_id);
+        Ok(resp)
+    }
+
     // ========================================
     // Agent Key methods
     // ========================================
@@ -1872,14 +1949,14 @@ impl KmsApiServer {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
 
-        // Legacy passkey assertions have no challenge binding and are replayable.
-        // Grant signing is high-value; require WebAuthn ceremony only.
-        if req.webauthn_assertion.is_none() {
-            return Err(anyhow!("sign-grant-session requires WebAuthn ceremony authentication (legacy passkey assertions are not accepted)"));
-        }
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, None, req.webauthn_assertion.as_ref(),
-        ).await?;
+        // Grant signing requires purpose-bound WebAuthn challenge to prevent
+        // cross-operation replay. Challenge must have been created by begin-grant-session-auth.
+        let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
+            anyhow!("sign-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
+        })?;
+        let passkey_assertion = Some(self.resolve_grant_passkey_assertion(
+            &key_id_str, wa, "grant-session",
+        ).await?);
 
         // expiry is uint48 in the contract — reject out-of-range values to keep hash match
         const UINT48_MAX: u64 = (1u64 << 48) - 1;
@@ -1935,12 +2012,12 @@ impl KmsApiServer {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
 
-        if req.webauthn_assertion.is_none() {
-            return Err(anyhow!("sign-p256-grant-session requires WebAuthn ceremony authentication (legacy passkey assertions are not accepted)"));
-        }
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, None, req.webauthn_assertion.as_ref(),
-        ).await?;
+        let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
+            anyhow!("sign-p256-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
+        })?;
+        let passkey_assertion = Some(self.resolve_grant_passkey_assertion(
+            &key_id_str, wa, "grant-session",
+        ).await?);
 
         const UINT48_MAX: u64 = (1u64 << 48) - 1;
         if req.expiry > UINT48_MAX {
@@ -2690,6 +2767,20 @@ async fn handle_begin_authentication(
     }
 }
 
+async fn handle_begin_grant_session_auth(
+    key_id: String,
+    server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.begin_grant_session_auth(&key_id, origin_header.as_deref()).await {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("BeginGrantSessionAuth error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 async fn handle_key_status(
     key_id: String,
     server: Arc<KmsApiServer>,
@@ -3290,6 +3381,23 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_authentication);
 
+    // Grant session auth (GET /kms/begin-grant-session-auth?keyId=...)
+    let server_bgsa = server.clone();
+    let begin_grant_session_auth = warp::path("kms")
+        .and(warp::path("begin-grant-session-auth"))
+        .and(warp::get())
+        .and(api_key_filter.clone())
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and(warp::any().map(move || server_bgsa.clone()))
+        .and(warp::header::optional::<String>("origin"))
+        .and_then(|_, params: std::collections::HashMap<String, String>, server: Arc<KmsApiServer>, origin: Option<String>| async move {
+            let key_id = params.get("keyId").cloned().unwrap_or_default();
+            if key_id.is_empty() {
+                return Err(warp::reject::custom(ApiError("keyId query parameter required".to_string())));
+            }
+            handle_begin_grant_session_auth(key_id, server, origin).await
+        });
+
     // Agent Key endpoints (POST /kms/create-agent-key, /kms/sign-agent, etc.)
     let server_cak = server.clone();
     let create_agent_key = warp::path("kms")
@@ -3453,6 +3561,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(refresh_agent_credential)
         .or(revoke_agent_credential)
         .or(sign_typed_data)
+        .or(begin_grant_session_auth)
         .or(sign_grant_session)
         .or(sign_p256_grant_session)
         .or(create_p256_session_key)
