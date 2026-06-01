@@ -264,6 +264,52 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     echo "  (Expected failure — CA pre-verify correctly rejected invalid passkey)"
 fi
 
+SIGN_TYPED_DATA_BODY="{\"keyId\":\"$KEY_ID\",\"primaryType\":\"Transfer\",\"domain\":{\"name\":\"Test\",\"version\":\"1\",\"chainId\":1},\"types\":[{\"name\":\"Transfer\",\"fields\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint256\"}]}],\"message\":[{\"name\":\"to\",\"value\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\"},{\"name\":\"amount\",\"value\":\"1000000000000000000\"}]}"
+
+# SignTypedData without any auth (must be rejected — auth gate fix v0.18.2)
+timed_curl "POST /SignTypedData (no auth)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — auth gate correctly rejected unauthenticated sign-typed-data)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted unauthenticated request — auth gate broken!${NC}"
+fi
+
+# SignTypedData with malformed Authorization header (not "Bearer " prefix)
+timed_curl "POST /SignTypedData (malformed auth header)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -H "Authorization: Token invalid.jwt.here" \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — malformed Authorization header correctly rejected)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted malformed Authorization header!${NC}"
+fi
+
+# SignTypedData with syntactically valid Bearer but invalid HMAC (must be rejected)
+timed_curl "POST /SignTypedData (invalid Bearer JWT)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsImtpZCI6ImZha2Uta2lkIn0.eyJ3YWxsZXRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJhZ2VudF9pbmRleCI6MCwiZXhwIjo5OTk5OTk5OTk5fQ.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — invalid HMAC correctly rejected)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted JWT with invalid HMAC!${NC}"
+fi
+
 # Non-existent key
 timed_curl "POST /DescribeKey (404)" \
     -X POST "$BASE/DescribeKey" \
