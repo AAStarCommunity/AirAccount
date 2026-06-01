@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS p256_session_keys (
     credential_hash         TEXT,
     credential_expires_at   INTEGER,
     status                  TEXT NOT NULL DEFAULT 'pending',
+    tee_deleted             INTEGER NOT NULL DEFAULT 0,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     revoked_at              TEXT,
@@ -228,6 +229,11 @@ impl KmsDb {
             .with_context(|| format!("Failed to open SQLite DB at {}", path))?;
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
+        // Idempotent migration: adds tee_deleted column to existing DBs created before this
+        // column was added to the schema. Ignored if column already exists (duplicate column error).
+        let _ = conn.execute_batch(
+            "ALTER TABLE p256_session_keys ADD COLUMN tee_deleted INTEGER NOT NULL DEFAULT 0;"
+        );
         println!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -884,6 +890,48 @@ impl KmsDb {
             params![wallet_id, session_index, now],
         )?;
         Ok(n > 0)
+    }
+
+    /// Mark a P256 session key's TEE entry as confirmed-deleted (tee_deleted=1).
+    /// Called after a successful tee.delete_p256_session_key(). Safe to call redundantly.
+    pub fn mark_p256_tee_deleted(&self, wallet_id: &str, session_index: u32) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE p256_session_keys SET tee_deleted=1 \
+             WHERE wallet_id=?1 AND session_index=?2",
+            params![wallet_id, session_index],
+        )?;
+        Ok(())
+    }
+
+    /// Return session_index values for revoked keys whose TEE deletion was not yet confirmed.
+    /// These have status='revoked' AND tee_deleted=0 — the TEE delete failed or was never attempted.
+    /// Called at the start of each GC pass to retry phantom TEE cleanup.
+    pub fn list_unconfirmed_tee_deletes(&self, wallet_id: &str) -> Result<Vec<u32>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT session_index FROM p256_session_keys \
+             WHERE wallet_id=?1 AND status='revoked' AND tee_deleted=0",
+        )?;
+        let indices: Vec<u32> = stmt
+            .query_map(params![wallet_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(indices)
+    }
+
+    /// Check whether a P256 session key exists with status='revoked'.
+    /// Used by revoke_p256_session_key to distinguish "already revoked" (idempotent)
+    /// from "not found" (caller error), when mark_p256_session_key_gc returns false.
+    pub fn p256_session_key_is_revoked(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 AND session_index=?2 AND status='revoked'",
+            params![wallet_id, session_index],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context("p256_session_key_is_revoked")
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
