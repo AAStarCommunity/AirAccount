@@ -468,6 +468,8 @@ pub struct SignTypedDataRequest {
     /// Field kept for JSON parse compatibility; the server rejects requests that rely on it.
     #[serde(rename = "passkeyAssertion", default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
@@ -1870,12 +1872,19 @@ impl KmsApiServer {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
 
+        // Legacy passkey assertions have no challenge binding and are replayable.
+        // Grant signing is high-value; require WebAuthn ceremony only.
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("sign-grant-session requires WebAuthn ceremony authentication (legacy passkey assertions are not accepted)"));
+        }
         let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, req.passkey_assertion.as_ref(), req.webauthn_assertion.as_ref(),
+            &key_id_str, None, req.webauthn_assertion.as_ref(),
         ).await?;
 
-        if passkey_assertion.is_none() {
-            return Err(anyhow!("sign-grant-session requires passkey authentication"));
+        // expiry is uint48 in the contract — reject out-of-range values to keep hash match
+        const UINT48_MAX: u64 = (1u64 << 48) - 1;
+        if req.expiry > UINT48_MAX {
+            return Err(anyhow!("expiry {} exceeds uint48 max ({})", req.expiry, UINT48_MAX));
         }
 
         let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
@@ -1926,12 +1935,16 @@ impl KmsApiServer {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
 
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!("sign-p256-grant-session requires WebAuthn ceremony authentication (legacy passkey assertions are not accepted)"));
+        }
         let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, req.passkey_assertion.as_ref(), req.webauthn_assertion.as_ref(),
+            &key_id_str, None, req.webauthn_assertion.as_ref(),
         ).await?;
 
-        if passkey_assertion.is_none() {
-            return Err(anyhow!("sign-p256-grant-session requires passkey authentication"));
+        const UINT48_MAX: u64 = (1u64 << 48) - 1;
+        if req.expiry > UINT48_MAX {
+            return Err(anyhow!("expiry {} exceeds uint48 max ({})", req.expiry, UINT48_MAX));
         }
 
         let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
