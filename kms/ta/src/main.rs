@@ -885,7 +885,9 @@ fn delete_p256_session_key(
             // OP-TEE secure storage returns item-not-found when the key is already absent.
             // Treat as idempotent success so double-GC doesn't return an error.
             let msg = e.to_string();
-            if msg.contains("ItemNotFound") || msg.contains("not found") || msg.contains("does not exist") {
+            // Only treat the specific OP-TEE TEE_ERROR_ITEM_NOT_FOUND as idempotent success.
+            // Other storage errors (I/O failures, corruption) must propagate so callers can retry.
+            if msg.contains("ItemNotFound") || msg.contains("ITEM_NOT_FOUND") {
                 Ok(proto::DeleteP256SessionKeyOutput { deleted: false })
             } else {
                 Err(anyhow!("delete_p256_session_key: secure storage error: {}", msg))
