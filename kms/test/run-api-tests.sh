@@ -276,34 +276,38 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     echo "  (Expected failure — key not found)"
 fi
 
-# P256 revoke-not-found: revoking a non-existent P256 session key must return 4xx
-if [ -n "$P256_SESSION_KEY_ID" ]; then
-    timed_curl "POST /revoke-p256-session-key (not found)" \
-        -X POST "$BASE/kms/revoke-p256-session-key" \
-        -H "$HDR_JSON" $API_KEY_HDR \
-        -d "{\"keyId\":\"$KEY_ID:99999\"}"
-    if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
-        API_STATUS[${#API_STATUS[@]}-1]="OK"
-        TOTAL_FAIL=$((TOTAL_FAIL - 1))
-        TOTAL_PASS=$((TOTAL_PASS + 1))
-        echo "  (Expected failure — unknown P256 session key)"
-    fi
+# P256 revoke without WebAuthn: must return 4xx (auth guard, not key-lookup).
+# Note: revoke_p256_session_key requires a WebAuthn ceremony for replay-protection;
+# this test verifies the guard fires before any DB lookup. Deep paths (not-found,
+# already-revoked idempotency) require a valid WebAuthn assertion and must be tested
+# via integration tests with a real or mock WebAuthn ceremony.
+timed_curl "POST /revoke-p256-session-key (no webauthn)" \
+    -X POST "$BASE/kms/revoke-p256-session-key" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID:99999\"}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — WebAuthn assertion required)"
 fi
 
-# P256 double-revoke idempotency: revoking same key twice must succeed both times.
-# Requires P256_SESSION_KEY_ID to be set and the key already-revoked from a prior run
-# (or manually set P256_REVOKED_KEY_ID to a known-revoked key ID).
-# Tests that the host returns 200 on the second call (LOW #1 fix).
-if [ -n "${P256_REVOKED_KEY_ID:-}" ]; then
+# P256 double-revoke idempotency: set P256_REVOKED_KEY_ID to a known-revoked key
+# (obtained from a prior create+revoke run) and supply a fresh WebAuthn assertion
+# via P256_REVOKE_ASSERTION_JSON to test that a second revoke returns 2xx.
+if [ -n "${P256_REVOKED_KEY_ID:-}" ] && [ -n "${P256_REVOKE_ASSERTION_JSON:-}" ]; then
     timed_curl "POST /revoke-p256-session-key (idempotent)" \
         -X POST "$BASE/kms/revoke-p256-session-key" \
         -H "$HDR_JSON" $API_KEY_HDR \
-        -d "{\"keyId\":\"$P256_REVOKED_KEY_ID\"}"
+        -d "{\"keyId\":\"$P256_REVOKED_KEY_ID\",\"webauthnAssertion\":$P256_REVOKE_ASSERTION_JSON}"
     if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "OK" ]; then
         echo "  (Idempotent revoke returned 2xx — correct)"
     else
         echo "  ${RED}FAIL: expected 2xx on double-revoke (idempotent)${NC}"
     fi
+else
+    printf "${YELLOW}SKIP${NC} %-32s %6s  Set P256_REVOKED_KEY_ID+P256_REVOKE_ASSERTION_JSON to test\n" \
+        "P256 double-revoke (idempotent)" "0ms"
 fi
 echo ""
 

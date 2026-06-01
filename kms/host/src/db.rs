@@ -230,25 +230,37 @@ impl KmsDb {
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
         // Migration: add tee_deleted column to DBs created before this column existed.
-        // Check first via PRAGMA table_info to distinguish "column already exists" (OK) from
-        // real errors (disk full, corruption, etc.) that must not be silently ignored.
+        // Uses PRAGMA table_info to distinguish "already exists" (safe to skip) from real
+        // errors (disk full, corruption) that must propagate. TOCTOU is handled by re-verifying
+        // on ALTER failure: if concurrent open already added the column, we treat it as success.
         {
-            let col_exists = {
-                let mut stmt = conn
+            let check_col_exists = |c: &Connection| -> Result<bool> {
+                let mut stmt = c
                     .prepare("PRAGMA table_info(p256_session_keys)")
                     .context("Failed to query p256_session_keys schema")?;
                 let names: Vec<String> = stmt
                     .query_map([], |row| row.get::<_, String>(1))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-                names.iter().any(|n| n == "tee_deleted")
+                    .collect::<rusqlite::Result<_>>()
+                    .context("Failed to read p256_session_keys schema")?;
+                Ok(names.iter().any(|n| n == "tee_deleted"))
             };
-            if !col_exists {
-                conn.execute_batch(
+            if !check_col_exists(&conn)? {
+                match conn.execute_batch(
                     "ALTER TABLE p256_session_keys \
                      ADD COLUMN tee_deleted INTEGER NOT NULL DEFAULT 0;",
-                )
-                .context("Failed to add tee_deleted column to p256_session_keys")?;
+                ) {
+                    Ok(()) => {}
+                    Err(alter_err) => {
+                        // Re-verify: concurrent process may have added the column between
+                        // our check and the ALTER. Only propagate if column still absent.
+                        if !check_col_exists(&conn)
+                            .context("Re-check after ALTER TABLE failure")?
+                        {
+                            return Err(alter_err)
+                                .context("Failed to add tee_deleted column to p256_session_keys");
+                        }
+                    }
+                }
             }
         }
         println!("📦 SQLite DB opened: {}", path);
