@@ -229,11 +229,28 @@ impl KmsDb {
             .with_context(|| format!("Failed to open SQLite DB at {}", path))?;
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
-        // Idempotent migration: adds tee_deleted column to existing DBs created before this
-        // column was added to the schema. Ignored if column already exists (duplicate column error).
-        let _ = conn.execute_batch(
-            "ALTER TABLE p256_session_keys ADD COLUMN tee_deleted INTEGER NOT NULL DEFAULT 0;"
-        );
+        // Migration: add tee_deleted column to DBs created before this column existed.
+        // Check first via PRAGMA table_info to distinguish "column already exists" (OK) from
+        // real errors (disk full, corruption, etc.) that must not be silently ignored.
+        {
+            let col_exists = {
+                let mut stmt = conn
+                    .prepare("PRAGMA table_info(p256_session_keys)")
+                    .context("Failed to query p256_session_keys schema")?;
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                names.iter().any(|n| n == "tee_deleted")
+            };
+            if !col_exists {
+                conn.execute_batch(
+                    "ALTER TABLE p256_session_keys \
+                     ADD COLUMN tee_deleted INTEGER NOT NULL DEFAULT 0;",
+                )
+                .context("Failed to add tee_deleted column to p256_session_keys")?;
+            }
+        }
         println!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

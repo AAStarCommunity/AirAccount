@@ -275,6 +275,36 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     TOTAL_PASS=$((TOTAL_PASS + 1))
     echo "  (Expected failure — key not found)"
 fi
+
+# P256 revoke-not-found: revoking a non-existent P256 session key must return 4xx
+if [ -n "$P256_SESSION_KEY_ID" ]; then
+    timed_curl "POST /revoke-p256-session-key (not found)" \
+        -X POST "$BASE/kms/revoke-p256-session-key" \
+        -H "$HDR_JSON" $API_KEY_HDR \
+        -d "{\"keyId\":\"$KEY_ID:99999\"}"
+    if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+        API_STATUS[${#API_STATUS[@]}-1]="OK"
+        TOTAL_FAIL=$((TOTAL_FAIL - 1))
+        TOTAL_PASS=$((TOTAL_PASS + 1))
+        echo "  (Expected failure — unknown P256 session key)"
+    fi
+fi
+
+# P256 double-revoke idempotency: revoking same key twice must succeed both times.
+# Requires P256_SESSION_KEY_ID to be set and the key already-revoked from a prior run
+# (or manually set P256_REVOKED_KEY_ID to a known-revoked key ID).
+# Tests that the host returns 200 on the second call (LOW #1 fix).
+if [ -n "${P256_REVOKED_KEY_ID:-}" ]; then
+    timed_curl "POST /revoke-p256-session-key (idempotent)" \
+        -X POST "$BASE/kms/revoke-p256-session-key" \
+        -H "$HDR_JSON" $API_KEY_HDR \
+        -d "{\"keyId\":\"$P256_REVOKED_KEY_ID\"}"
+    if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "OK" ]; then
+        echo "  (Idempotent revoke returned 2xx — correct)"
+    else
+        echo "  ${RED}FAIL: expected 2xx on double-revoke (idempotent)${NC}"
+    fi
+fi
 echo ""
 
 # ── Phase 7: Cleanup ──
