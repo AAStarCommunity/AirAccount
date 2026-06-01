@@ -1765,10 +1765,25 @@ impl KmsApiServer {
 
     /// Lazy GC: delete expired P256 session keys for a wallet from TEE and DB.
     /// Called silently on create/sign/revoke — errors are logged, never propagated.
-    /// Design: max 2 active keys per wallet at any time (current + one overlapping during rotation).
-    async fn gc_expired_p256_session_keys(&self, wallet_id_str: &str, wallet_uuid: uuid::Uuid) {
-        let now_unix = Utc::now().timestamp();
-        let expired = match self.db.list_expired_p256_session_keys(wallet_id_str, now_unix) {
+    ///
+    /// `exclude_session_index`: skip this index (used during sign to avoid GC-ing the key
+    /// being signed, in case the JWT expires in the same second as the GC runs).
+    ///
+    /// Grace window: 60s added to account for clock skew between host and credential issuer,
+    /// so keys are not GC'd until at least 60s past credential_expires_at.
+    async fn gc_expired_p256_session_keys(
+        &self,
+        wallet_id_str: &str,
+        wallet_uuid: uuid::Uuid,
+        exclude_session_index: Option<u32>,
+    ) {
+        // 60-second grace window guards against host-clock drift causing premature deletion.
+        let gc_cutoff = Utc::now().timestamp() - 60;
+        let expired = match self.db.list_expired_p256_session_keys(
+            wallet_id_str,
+            gc_cutoff,
+            exclude_session_index,
+        ) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("⚠️  P256 GC: DB query failed for {}: {}", wallet_id_str, e);
@@ -1776,10 +1791,13 @@ impl KmsApiServer {
             }
         };
         for session_index in expired {
-            // Delete TEE key first; on failure skip DB update to avoid inconsistency.
+            // TEE-first: delete key from secure storage. If TEE returns not-found, treat as
+            // already deleted (idempotent). DB update follows only on TEE success.
             match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
                 Ok(deleted) => {
                     if let Err(e) = self.db.mark_p256_session_key_gc(wallet_id_str, session_index) {
+                        // DB update failed: ghost-active row remains. Next GC will retry TEE
+                        // (returns deleted=false) and retry DB. Self-healing on next trigger.
                         eprintln!(
                             "⚠️  P256 GC: TEE deleted={} but DB update failed for {}:{}: {}",
                             deleted, wallet_id_str, session_index, e
@@ -1828,7 +1846,20 @@ impl KmsApiServer {
         }
 
         // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
-        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id).await;
+        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None).await;
+
+        // Enforce max-2 active P256 session keys per wallet (current + one during rotation).
+        // Checked after GC so freshly expired keys are excluded from the count.
+        let active_count = self
+            .db
+            .count_active_p256_session_keys(&req.human_key_id, Utc::now().timestamp())?;
+        if active_count >= 2 {
+            return Err(anyhow!(
+                "Wallet already has {} active P256 session keys (max 2). \
+                 Revoke an existing key before creating a new one.",
+                active_count
+            ));
+        }
 
         // Atomically allocate next session_index via INSERT-SELECT in a single lock.
         // This prevents TOCTOU: the 'pending' row reserves the index before the slow TA call.
@@ -1844,8 +1875,7 @@ impl KmsApiServer {
         {
             Ok(r) => r,
             Err(e) => {
-                // TA failed — delete the pending placeholder so the index is not leaked
-                // (best-effort; pending row has no active key material, safe to delete)
+                // TA failed — delete the pending placeholder so the index is not leaked.
                 let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
                 return Err(e);
             }
@@ -1855,7 +1885,7 @@ impl KmsApiServer {
 
         // Issue JWT credential for this P256 session key (reuse agent JWT infrastructure)
         let key_id = format!("{}:{}", req.human_key_id, session_index);
-        let (jwt, expires_at) = agent_jwt::issue_credential(
+        let (jwt, expires_at) = match agent_jwt::issue_credential(
             &self.tee,
             &req.human_key_id,
             wallet_id,
@@ -1863,18 +1893,35 @@ impl KmsApiServer {
             &key_id,
             3 * 24 * 3600,
         )
-        .await?;
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // JWT issuance failed after TEE key was created: clean up both TEE key and DB
+                // row to prevent an orphaned "ghost key" (HIGH-2 fix).
+                let _ = self.tee.delete_p256_session_key(wallet_id, session_index).await;
+                let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                return Err(e);
+            }
+        };
 
         let cred_hash = agent_jwt::credential_hash(&jwt);
         // Activate the pending row: sets pub_key_x/y, credential_hash, status='active'
-        self.db.activate_p256_session_key(
+        if let Err(e) = self.db.activate_p256_session_key(
             &req.human_key_id,
             session_index,
             &pub_key_x,
             &pub_key_y,
             &cred_hash,
             expires_at,
-        )?;
+        ) {
+            // DB activation failed after TEE key and JWT were created: clean up TEE key to
+            // prevent ghost key. DB pending row stays; GC cannot pick it up (NULL expiry)
+            // so explicitly delete it here too.
+            let _ = self.tee.delete_p256_session_key(wallet_id, session_index).await;
+            let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+            return Err(e);
+        }
 
         println!(
             "✅ CreateP256SessionKey: wallet={} idx={} x={}...",
@@ -1911,7 +1958,8 @@ impl KmsApiServer {
         }
 
         // Lazy GC: clean up other expired P256 session keys for this wallet.
-        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid).await;
+        // Exclude the current session_index to avoid GC-ing the key being signed.
+        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, Some(session_index)).await;
 
         // Per-credential rate limit
         let cred_rl_key = format!("p256/{}/{}", wallet_id_str, session_index);
@@ -2005,7 +2053,7 @@ impl KmsApiServer {
         }
 
         // Lazy GC: clean up other expired P256 session keys for this wallet.
-        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid).await;
+        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, None).await;
 
         let revoked = self
             .db
