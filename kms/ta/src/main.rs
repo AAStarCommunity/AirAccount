@@ -870,8 +870,27 @@ fn sign_p256_user_op(
 /// signing_input format: "header_b64url.payload_b64url" (exactly two dot-separated segments).
 /// Payload JSON: {"wallet_id":"<uuid>","agent_index":<u32>,"exp":<i64>}
 /// The format is controlled by our own jwt_sign_payload TA function — no whitespace around colons.
+///
+/// Security note: exp is parsed and returned but NOT checked here. TEE_GetSystemTime's epoch is
+/// implementation-defined and unreliable for Unix timestamp comparison on all TEE platforms.
+/// The host-side exp check (performed before reaching TA) is the primary expiry enforcement.
+/// See Issue #15 for a future trusted-time solution.
+///
+/// Security note (JWT Oracle): JwtHmacSign is exposed to the host by design (JWT issuance flow).
+/// A fully compromised host can mint arbitrary JWTs that pass this TA-side HMAC check. The HMAC
+/// gate guards against partial host compromise (bugs, bypass), not total host takeover.
+/// See Issue #16 for passkey-bound JWT issuance as a future hardening.
 fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
     use base64ct::{Base64UrlUnpadded, Encoding};
+
+    // Guard against memory pressure from attacker-controlled input.
+    const MAX_SIGNING_INPUT_BYTES: usize = 4096;
+    if signing_input.len() > MAX_SIGNING_INPUT_BYTES {
+        return Err(anyhow!("jwt_parse_claims: signing_input too large ({} bytes, max {})",
+            signing_input.len(), MAX_SIGNING_INPUT_BYTES));
+    }
+
+
     let s = std::str::from_utf8(signing_input)
         .map_err(|_| anyhow!("jwt_parse_claims: signing_input is not valid UTF-8"))?;
 
@@ -896,16 +915,8 @@ fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
 
     let wallet_id = extract_json_str_field(payload, "wallet_id")?;
     let agent_index = extract_json_u32_field(payload, "agent_index")?;
-    let exp = extract_json_i64_field(payload, "exp")?;
-
-    // TA-side expiry check using TEE system time (TEE_GetSystemTime).
-    // Prevents a compromised host from replaying expired tokens.
-    let mut tee_time = optee_utee::Time::new();
-    tee_time.system_time();
-    let now_secs = tee_time.seconds as i64;
-    if exp <= now_secs {
-        return Err(anyhow!("jwt_parse_claims: JWT has expired (exp={}, now={})", exp, now_secs));
-    }
+    // Parse exp for future use; not checked in TA due to unreliable TEE clock epoch.
+    let _exp = extract_json_i64_field(payload, "exp")?;
 
     Ok((wallet_id, agent_index))
 }
