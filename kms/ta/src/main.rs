@@ -640,6 +640,9 @@ fn agent_derivation_path(agent_index: u32) -> String {
     format!("m/44'/60'/0'/1/{}", agent_index)
 }
 
+/// Maximum allowed JWT lifetime: 7 days.
+const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
+
 fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
     dbg_println!(
         "[+] Create agent key for wallet: {:?}, agent_index: {}",
@@ -648,6 +651,18 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     );
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // C-1: TA-side passkey verification — blocks a compromised host from calling this
+    // command directly to mint agent credentials without user presence.
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    // H-2: Subject must not contain JSON-special characters that could inject claims.
+    validate_jwt_subject(&input.subject)?;
+
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
 
@@ -656,7 +671,8 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     // This closes the JwtSignPayload signing oracle (Issue #16).
     let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
     let wallet_id_str = input.wallet_id.to_string();
-    let exp = input.iat + input.ttl_secs;
+    let exp = input.iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
     let payload_json = format!(
         "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"{addr}\",\"iat\":{iat},\"exp\":{exp}}}",
         sub  = input.subject,
@@ -796,6 +812,18 @@ fn extract_json_u64_field(json: &str, key: &str) -> Result<u64> {
     rest[..end].parse::<u64>().map_err(|_| anyhow!("JWT claim '{}' is not a u64", key))
 }
 
+/// Validate that `subject` contains only characters safe to embed directly in a JSON string
+/// without escaping. Prevents claim injection via a crafted subject value (H-2).
+fn validate_jwt_subject(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 256 {
+        return Err(anyhow!("JWT subject length must be 1..=256"));
+    }
+    if !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_:.@+/=".contains(&b)) {
+        return Err(anyhow!("JWT subject contains characters not allowed in JSON (no quotes, backslashes, or controls)"));
+    }
+    Ok(())
+}
+
 /// After HMAC verification, decode the JWT payload and verify that wallet_id and
 /// agent_index match the request parameters. Prevents a compromised host from
 /// using a legitimate JWT for wallet A to request signing for wallet B.
@@ -821,9 +849,21 @@ fn verify_jwt_wallet_claims(
         return Err(anyhow!("JWT wallet_id claim does not match request"));
     }
 
-    let jwt_agent_index = extract_json_u64_field(payload_str, "agent_index")? as u32;
-    if jwt_agent_index != expected_agent_index {
+    // H-3: use u64 then bounds-check before casting to avoid silent truncation
+    let jwt_agent_index_u64 = extract_json_u64_field(payload_str, "agent_index")?;
+    if jwt_agent_index_u64 > u32::MAX as u64 {
+        return Err(anyhow!("JWT agent_index overflow"));
+    }
+    if jwt_agent_index_u64 as u32 != expected_agent_index {
         return Err(anyhow!("JWT agent_index claim does not match request"));
+    }
+
+    // H-4-lite: structural exp/iat check (no trusted clock available in TA mock mode,
+    // but we can reject obviously invalid JWTs: exp must be after iat, within TTL cap).
+    let iat = extract_json_u64_field(payload_str, "iat")?;
+    let exp = extract_json_u64_field(payload_str, "exp")?;
+    if exp <= iat || exp.saturating_sub(iat) > MAX_AGENT_JWT_TTL as u64 {
+        return Err(anyhow!("JWT exp/iat structurally invalid or exceeds TTL cap"));
     }
 
     Ok(())

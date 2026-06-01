@@ -1703,9 +1703,10 @@ impl KmsApiServer {
         // Avoids the race between count() and insert() that could yield duplicate indices.
         let agent_index = self.db.next_agent_index_for_wallet(&req.human_key_id)?;
 
-        // Derive agent key in TEE; TA constructs JWT payload internally (no oracle exposure)
+        // Derive agent key in TEE; TA constructs JWT payload internally (no oracle exposure).
+        // Pass the verified passkey assertion so TA can re-verify user presence independently.
         let iat = Utc::now().timestamp();
-        let tee_result = self.tee.create_agent_key(wallet_id, agent_index, &req.human_key_id, iat, 3 * 24 * 3600).await?;
+        let tee_result = self.tee.create_agent_key(wallet_id, agent_index, &req.human_key_id, iat, 3 * 24 * 3600, assertion).await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
         let pubkey_hex = hex::encode(&tee_result.public_key_compressed);
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
@@ -2101,9 +2102,10 @@ impl KmsApiServer {
             return Err(anyhow!("Agent key is revoked"));
         }
 
-        // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation)
+        // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation).
+        // Pass the verified assertion so TA can re-verify user presence independently.
         let iat = Utc::now().timestamp();
-        let tee_result = self.tee.create_agent_key(wallet_uuid, agent_index, &wallet_id_str, iat, 3 * 24 * 3600).await?;
+        let tee_result = self.tee.create_agent_key(wallet_uuid, agent_index, &wallet_id_str, iat, 3 * 24 * 3600, assertion).await?;
         let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
