@@ -247,6 +247,38 @@ fn cache_len() -> usize {
     WALLET_CACHE.with(|c| c.borrow().len())
 }
 
+// ── P256 Session Key storage ──
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct P256SessionKey {
+    store_id: String,      // "p256sk_<wallet_uuid>_<session_index>"
+    private_key: Vec<u8>, // 32 bytes: P-256 scalar
+    pub_key: Vec<u8>,     // 64 bytes: x(32) || y(32) uncompressed public key (no 0x04 prefix)
+}
+
+impl Storable for P256SessionKey {
+    type Key = String;
+    fn unique_id(&self) -> Self::Key {
+        self.store_id.clone()
+    }
+}
+
+impl P256SessionKey {
+    fn store_id_for(wallet_id: &Uuid, session_index: u32) -> String {
+        format!("p256sk_{}_{}", wallet_id, session_index)
+    }
+
+    fn load(db: &SecureStorageClient, wallet_id: &Uuid, session_index: u32) -> Result<Self> {
+        let id = Self::store_id_for(wallet_id, session_index);
+        db.get::<P256SessionKey>(&id)
+            .map_err(|_| anyhow!("P256 session key not found for index {}", session_index))
+    }
+
+    fn save(&self, db: &SecureStorageClient) -> Result<()> {
+        db.put(self).map_err(|e| anyhow!("Failed to save P256 session key: {}", e))
+    }
+}
+
 /// Save wallet to secure storage AND update cache.
 fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
     // Cache MUST come before db.put: OP-TEE secure storage syscall corrupts TLS,
@@ -329,16 +361,24 @@ macro_rules! dbg_println {
     ($($arg:tt)*) => {};
 }
 
-// p256-m FFI: P-256 ECDSA verify inside TA.
+// p256-m FFI: P-256 ECDSA verify, sign, and key generation inside TA.
 // Compile flags fixed in e1b50c2 (2026-03-03): -O1 -fPIC -fno-common -marm (ARM32).
 // 5/5 stability tests passed on DK2 (Cortex-A7) after the flag fix.
-// p256_generate_random returns -1 because verify never needs randomness.
 extern "C" {
     fn p256_ecdsa_verify(sig: *const u8, pubkey: *const u8, hash: *const u8, hlen: usize) -> i32;
+    fn p256_gen_keypair(priv_key: *mut u8, pub_key: *mut u8) -> i32;
+    fn p256_ecdsa_sign(sig: *mut u8, priv_key: *const u8, hash: *const u8, hlen: usize) -> i32;
 }
+// Callback for p256-m: fills output with cryptographically secure random bytes via OP-TEE RNG.
+// Required for p256_gen_keypair and p256_ecdsa_sign.
 #[no_mangle]
-pub extern "C" fn p256_generate_random(_output: *mut u8, _output_size: u32) -> i32 {
-    -1 // verify path never calls this; sign/keygen are not used
+pub extern "C" fn p256_generate_random(output: *mut u8, output_size: u32) -> i32 {
+    if output.is_null() || output_size == 0 {
+        return -1; // P256_RANDOM_FAILED
+    }
+    let buf = unsafe { std::slice::from_raw_parts_mut(output, output_size as usize) };
+    Random::generate(buf);
+    0 // P256_SUCCESS
 }
 
 /// Verify passkey assertion against the passkey bound to this wallet.
@@ -714,6 +754,118 @@ fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSign
     })
 }
 
+fn create_p256_session_key(
+    input: &proto::CreateP256SessionKeyInput,
+) -> Result<proto::CreateP256SessionKeyOutput> {
+    dbg_println!(
+        "[+] Create P256 session key for wallet: {:?}, index: {}",
+        input.wallet_id,
+        input.session_index
+    );
+
+    // Verify the wallet exists so we don't create orphaned session keys
+    let _wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // Generate P-256 key pair via p256-m using OP-TEE hardware RNG (p256_generate_random).
+    // priv[32] = private scalar; pub[64] = x(32) || y(32) (uncompressed, no 0x04 prefix)
+    let mut priv_bytes = [0u8; 32];
+    let mut pub_bytes = [0u8; 64];
+    let ret = unsafe { p256_gen_keypair(priv_bytes.as_mut_ptr(), pub_bytes.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(anyhow!("p256_gen_keypair failed (code {})", ret));
+    }
+
+    // Persist both private key and public key in TEE secure storage.
+    // Public key is stored so sign_p256_user_op can embed it in the 149-byte output
+    // without needing to re-derive it from the private key.
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let sk = P256SessionKey {
+        store_id: P256SessionKey::store_id_for(&input.wallet_id, input.session_index),
+        private_key: priv_bytes.to_vec(),
+        pub_key: pub_bytes.to_vec(),
+    };
+    sk.save(&db)?;
+
+    let mut pub_key_x = [0u8; 32];
+    let mut pub_key_y = [0u8; 32];
+    pub_key_x.copy_from_slice(&pub_bytes[..32]);
+    pub_key_y.copy_from_slice(&pub_bytes[32..]);
+
+    Ok(proto::CreateP256SessionKeyOutput { pub_key_x, pub_key_y })
+}
+
+fn sign_p256_user_op(
+    input: &proto::SignP256UserOpInput,
+) -> Result<proto::SignP256UserOpOutput> {
+    dbg_println!(
+        "[+] Sign P256 user op for wallet: {:?}, index: {}",
+        input.wallet_id,
+        input.session_index
+    );
+
+    // TA-side JWT authorization: verify HMAC proof before any signing (defense-in-depth).
+    // Prevents a compromised CA from bypassing host-side JWT verification.
+    let jwt_verify_input = proto::JwtHmacVerifyInput {
+        kid: input.jwt_kid.clone(),
+        message: input.jwt_signing_input.clone(),
+        expected_hmac: input.jwt_hmac.clone(),
+    };
+    let verify_result = jwt_hmac_verify(&jwt_verify_input)?;
+    if !verify_result.valid {
+        return Err(anyhow!("TA: P256 session JWT credential verification failed"));
+    }
+
+    // Load P-256 key pair from TEE secure storage
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let sk = P256SessionKey::load(&db, &input.wallet_id, input.session_index)?;
+    if sk.private_key.len() != 32 {
+        return Err(anyhow!(
+            "Corrupt P256 private key: expected 32 bytes, got {}",
+            sk.private_key.len()
+        ));
+    }
+    if sk.pub_key.len() != 64 {
+        return Err(anyhow!(
+            "Corrupt P256 public key: expected 64 bytes, got {}",
+            sk.pub_key.len()
+        ));
+    }
+
+    // EIP-191 prefix: "\x19Ethereum Signed Message:\n32" || userOpHash
+    let mut eip191 = b"\x19Ethereum Signed Message:\n32".to_vec();
+    eip191.extend_from_slice(&input.user_op_hash);
+    let digest = Keccak256::digest(&eip191);
+
+    // Sign with P-256 via p256-m (internally uses p256_generate_random for nonce)
+    // sig[64] = r(32) || s(32) big-endian integers
+    let mut sig_bytes = [0u8; 64];
+    let ret = unsafe {
+        p256_ecdsa_sign(
+            sig_bytes.as_mut_ptr(),
+            sk.private_key.as_ptr(),
+            digest.as_ptr(),
+            digest.len(),
+        )
+    };
+    if ret != 0 {
+        return Err(anyhow!("p256_ecdsa_sign failed (code {})", ret));
+    }
+
+    // v0.18.1 wire format: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)] = 149 bytes
+    // account = ERC-4337 Smart Account address (prevents cross-account session key abuse)
+    // keyX/keyY = P-256 public key (verifier needs pubkey to verify non-recoverable ECDSA)
+    // r/s = P-256 ECDSA signature over EIP-191(userOpHash)
+    let mut signature = Vec::with_capacity(149);
+    signature.push(0x08u8);
+    signature.extend_from_slice(&input.account_address);
+    signature.extend_from_slice(&sk.pub_key[..32]);   // keyX
+    signature.extend_from_slice(&sk.pub_key[32..64]); // keyY
+    signature.extend_from_slice(&sig_bytes[..32]);    // r
+    signature.extend_from_slice(&sig_bytes[32..64]);  // s
+
+    Ok(proto::SignP256UserOpOutput { signature })
+}
+
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
     dbg_println!(
         "[+] EIP-712 sign typed data for wallet: {:?}, primary_type: {}",
@@ -819,6 +971,8 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
         Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
         Command::SignTypedData => process(serialized_input, sign_typed_data),
+        Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
+        Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
         _ => bail!("Unsupported command"),
     }
 }
