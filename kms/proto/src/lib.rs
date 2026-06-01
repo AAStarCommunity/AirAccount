@@ -36,7 +36,6 @@ pub enum Command {
     RegisterPasskeyTa,
     CreateAgentKey = 11,
     SignAgentUserOp = 12,
-    JwtHmacSign = 13,
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
     JwtSignPayload = 16,
@@ -84,7 +83,6 @@ mod tests {
         assert_eq!(u32::from(Command::RegisterPasskeyTa), 10);
         assert_eq!(u32::from(Command::CreateAgentKey), 11);
         assert_eq!(u32::from(Command::SignAgentUserOp), 12);
-        assert_eq!(u32::from(Command::JwtHmacSign), 13);
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
         assert_eq!(u32::from(Command::JwtSignPayload), 16);
@@ -115,7 +113,9 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=21u32 {
+        // 13 (JwtHmacSign) removed — signing oracle closed (Issue #16)
+        let valid_ids: &[u32] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,16,17,18,19,20,21];
+        for &i in valid_ids {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -381,13 +381,6 @@ mod tests {
 
     #[test]
     fn jwt_hmac_roundtrip() {
-        bincode_roundtrip(&JwtHmacSignInput {
-            message: b"header.payload".to_vec(),
-        });
-        bincode_roundtrip(&JwtHmacSignOutput {
-            hmac: [0xaa; 32],
-            kid: "v1".to_string(),
-        });
         bincode_roundtrip(&JwtHmacVerifyInput {
             kid: "v1".to_string(),
             message: b"header.payload".to_vec(),

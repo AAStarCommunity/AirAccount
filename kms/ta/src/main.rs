@@ -716,17 +716,6 @@ fn hmac_sha256(secret: &[u8], message: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
-    let mut store = JwtSecretStore::load(&db);
-    let current = store.ensure_current()?.clone();
-    store.save(&db)?;
-
-    Ok(proto::JwtHmacSignOutput {
-        hmac: hmac_sha256(&current.secret, &input.message)?,
-        kid: current.kid,
-    })
-}
 
 fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSignPayloadOutput> {
     use base64ct::{Base64UrlUnpadded, Encoding};
@@ -1326,7 +1315,6 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
         Command::CreateAgentKey => process(serialized_input, create_agent_key),
         Command::SignAgentUserOp => process(serialized_input, sign_agent_user_op),
-        Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
         Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
         Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
