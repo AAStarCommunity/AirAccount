@@ -373,6 +373,9 @@ extern "C" {
 // Required for p256_gen_keypair and p256_ecdsa_sign.
 #[no_mangle]
 pub extern "C" fn p256_generate_random(output: *mut u8, output_size: u32) -> i32 {
+    if output.is_null() || output_size == 0 {
+        return -1; // P256_RANDOM_FAILED
+    }
     let buf = unsafe { std::slice::from_raw_parts_mut(output, output_size as usize) };
     Random::generate(buf);
     0 // P256_SUCCESS

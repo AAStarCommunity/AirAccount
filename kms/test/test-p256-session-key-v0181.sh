@@ -29,8 +29,8 @@ if [ ! -f "$FIXTURE" ]; then
     python3 "$SCRIPT_DIR/p256_helper.py" gen-all
 fi
 
-USER1_PUBKEY=$(python3 -c "import json; print(json.load(open('$FIXTURE'))['public_key_hex'])")
-USER1_PEM=$(python3 -c "import json; print(json.load(open('$FIXTURE'))['private_key_pem'])")
+USER1_PUBKEY=$(FIXTURE_PATH="$FIXTURE" python3 -c 'import json,os; print(json.load(open(os.environ["FIXTURE_PATH"]))["public_key_hex"])')
+USER1_PEM=$(FIXTURE_PATH="$FIXTURE" python3 -c 'import json,os; print(json.load(open(os.environ["FIXTURE_PATH"]))["private_key_pem"])')
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 make_assertion() { python3 "$SCRIPT_DIR/p256_helper.py" assertion "$USER1_PEM"; }
@@ -153,10 +153,10 @@ print(s[2:] if s.startswith('0x') else s)
         # ── Decode 149-byte format ──
         echo ""
         echo "  ${BOLD}Decoding 149-byte P256 session key signature:${NC}"
-        python3 - <<PYEOF
-import sys
+        SIG_HEX_ENV="$SIG_HEX" python3 - <<'PYEOF'
+import sys, os
 
-hex_str = "$SIG_HEX"
+hex_str = os.environ['SIG_HEX_ENV']
 if len(hex_str) != 298:  # 149 * 2
     print(f"  ERROR: expected 298 hex chars, got {len(hex_str)}")
     sys.exit(1)
@@ -191,8 +191,8 @@ PYEOF
         echo ""
         echo "  ${BOLD}Verifying P256 ECDSA signature:${NC}"
         set +e
-        VERIFY_RESULT=$(python3 - 2>&1 <<PYEOF
-import sys
+        VERIFY_RESULT=$(SIG_HEX_ENV="$SIG_HEX" PUB_X_ENV="$PUB_X" PUB_Y_ENV="$PUB_Y" SAMPLE_HASH_ENV="$SAMPLE_HASH" python3 - 2>&1 <<'PYEOF'
+import sys, os
 try:
     from cryptography.hazmat.primitives.asymmetric.ec import (
         EllipticCurvePublicKey, SECP256R1, ECDSA
@@ -212,11 +212,11 @@ except ImportError:
 
 import struct
 
-sig_hex = "$SIG_HEX"
+sig_hex = os.environ['SIG_HEX_ENV']
 data = bytes.fromhex(sig_hex)
-pub_x_hex = "$PUB_X"
-pub_y_hex = "$PUB_Y"
-user_op_hash = bytes.fromhex("$SAMPLE_HASH")
+pub_x_hex = os.environ.get('PUB_X_ENV', '')
+pub_y_hex = os.environ.get('PUB_Y_ENV', '')
+user_op_hash = bytes.fromhex(os.environ['SAMPLE_HASH_ENV'])
 
 # Reconstruct public key from X and Y
 key_x_int = int(pub_x_hex, 16) if pub_x_hex else int(data[21:53].hex(), 16)

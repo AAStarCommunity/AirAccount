@@ -503,6 +503,22 @@ pub struct CreateP256SessionKeyResponse {
     pub expires_at: i64,
 }
 
+/// POST /kms/revoke-p256-session-key
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevokeP256SessionKeyRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "webAuthnAssertion", skip_serializing_if = "Option::is_none")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevokeP256SessionKeyResponse {
+    pub success: bool,
+    #[serde(rename = "revokedAt")]
+    pub revoked_at: i64,
+}
+
 /// POST /kms/sign-p256-user-op
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignP256UserOpRequest {
@@ -1773,16 +1789,26 @@ impl KmsApiServer {
             return Err(anyhow!("Passkey assertion required to create P256 session key"));
         }
 
-        // Atomically allocate next session_index
+        // Atomically allocate next session_index via INSERT-SELECT in a single lock.
+        // This prevents TOCTOU: the 'pending' row reserves the index before the slow TA call.
         let session_index = self
             .db
-            .next_p256_session_index_for_wallet(&req.human_key_id)?;
+            .allocate_p256_session_key_pending(&req.human_key_id, &req.human_key_id)?;
 
-        // Generate P256 key pair in TEE
-        let tee_result = self
+        // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
+        let tee_result = match self
             .tee
             .create_p256_session_key(wallet_id, session_index)
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // TA failed — delete the pending placeholder so the index is not leaked
+                // (best-effort; pending row has no active key material, safe to delete)
+                let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                return Err(e);
+            }
+        };
         let pub_key_x = hex::encode(&tee_result.pub_key_x);
         let pub_key_y = hex::encode(&tee_result.pub_key_y);
 
@@ -1798,20 +1824,16 @@ impl KmsApiServer {
         )
         .await?;
 
-        let now = Utc::now().to_rfc3339();
         let cred_hash = agent_jwt::credential_hash(&jwt);
-        self.db.insert_p256_session_key(&kms::db::P256SessionKeyRow {
-            wallet_id: req.human_key_id.clone(),
+        // Activate the pending row: sets pub_key_x/y, credential_hash, status='active'
+        self.db.activate_p256_session_key(
+            &req.human_key_id,
             session_index,
-            human_id: req.human_key_id.clone(),
-            pub_key_x: pub_key_x.clone(),
-            pub_key_y: pub_key_y.clone(),
-            credential_hash: Some(cred_hash),
-            credential_expires_at: Some(expires_at),
-            status: "active".to_string(),
-            created_at: now.clone(),
-            updated_at: now,
-        })?;
+            &pub_key_x,
+            &pub_key_y,
+            &cred_hash,
+            expires_at,
+        )?;
 
         println!(
             "✅ CreateP256SessionKey: wallet={} idx={} x={}...",
@@ -1914,6 +1936,49 @@ impl KmsApiServer {
             pub_key_x: session_key.pub_key_x,
             pub_key_y: session_key.pub_key_y,
             signature: format!("0x{}", hex::encode(&sig_bytes)),
+        })
+    }
+
+    pub async fn revoke_p256_session_key(
+        &self,
+        req: RevokeP256SessionKeyRequest,
+    ) -> Result<RevokeP256SessionKeyResponse> {
+        let (wallet_uuid, session_index) = parse_agent_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_uuid.to_string();
+
+        // Require WebAuthn ceremony for replay protection
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!(
+                "revoke-p256-session-key requires WebAuthn ceremony. \
+                 Legacy passkey assertions are not accepted."
+            ));
+        }
+        let assertion = self
+            .resolve_passkey_assertion(&wallet_id_str, None, req.webauthn_assertion.as_ref())
+            .await?;
+        if assertion.is_none() {
+            return Err(anyhow!("Passkey assertion required to revoke P256 session key"));
+        }
+
+        let revoked = self
+            .db
+            .revoke_p256_session_key(&wallet_id_str, session_index)?;
+        if !revoked {
+            return Err(anyhow!(
+                "P256 session key not found or already revoked: {}",
+                req.key_id
+            ));
+        }
+
+        let revoked_at = Utc::now().timestamp();
+        println!(
+            "✅ RevokeP256SessionKey: wallet={} idx={}",
+            wallet_id_str, session_index
+        );
+
+        Ok(RevokeP256SessionKeyResponse {
+            success: true,
+            revoked_at,
         })
     }
 }
@@ -2451,6 +2516,25 @@ async fn handle_create_p256_session_key(
     }
 }
 
+async fn handle_revoke_p256_session_key(
+    body: RevokeP256SessionKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.revoke_p256_session_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ RevokeP256SessionKey OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("RevokeP256SessionKey error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 async fn handle_sign_p256_user_op(
     auth_header: String,
     body: SignP256UserOpRequest,
@@ -2914,6 +2998,16 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_sp256.clone()))
         .and_then(handle_sign_p256_user_op);
 
+    let server_rp256 = server.clone();
+    let revoke_p256_session_key = warp::path("kms")
+        .and(warp::path("revoke-p256-session-key"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_rp256.clone()))
+        .and_then(handle_revoke_p256_session_key);
+
     // JWT secret auto-rotation background task (runs every 24h)
     let server_rot = server.clone();
     tokio::spawn(async move {
@@ -2973,6 +3067,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign_typed_data)
         .or(create_p256_session_key)
         .or(sign_p256_user_op)
+        .or(revoke_p256_session_key)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);
