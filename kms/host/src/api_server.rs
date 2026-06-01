@@ -1191,6 +1191,12 @@ impl KmsApiServer {
             let challenge_row = self.db.consume_challenge(&wa.challenge_id)?
                 .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
 
+            // Reject operation-specific challenges (e.g. "grant-session") to prevent
+            // cross-purpose replay. This resolver is for generic authentication only.
+            if challenge_row.purpose != "authentication" {
+                return Err(anyhow!("Challenge purpose '{}' cannot be used for this operation", challenge_row.purpose));
+            }
+
             // challenge must be bound to this key
             if let Some(ref bound_key) = challenge_row.key_id {
                 if bound_key != key_id {
