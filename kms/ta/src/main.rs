@@ -683,7 +683,7 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
         wid  = wallet_id_str,
         idx  = input.agent_index,
         addr = agent_addr_hex,
-        iat  = input.iat,
+        iat  = iat,
         exp  = exp,
     );
     let jwt_out = jwt_sign_payload_internal(&payload_json)?;
