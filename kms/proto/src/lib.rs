@@ -358,7 +358,6 @@ mod tests {
             wallet_id: test_uuid(),
             agent_index: 0,
             subject: "4319f351-0b24-4097-b659-80ee4f824cdd".to_string(),
-            iat: 1748000000i64,
             ttl_secs: 259200i64,
             passkey_assertion: None,
         });
@@ -366,7 +365,6 @@ mod tests {
             wallet_id: test_uuid(),
             agent_index: 1,
             subject: "test-agent".to_string(),
-            iat: 1748000000i64,
             ttl_secs: 86400i64,
             passkey_assertion: Some(PasskeyAssertion {
                 authenticator_data: vec![0xad; 37],

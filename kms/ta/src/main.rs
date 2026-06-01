@@ -666,12 +666,16 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
 
-    // Build JWT payload entirely inside TEE — wallet_id and agent_index are derived from
-    // TEE-validated inputs, not from a host-supplied payload string.
-    // This closes the JwtSignPayload signing oracle (Issue #16).
+    // Build JWT payload entirely inside TEE — iat computed from TA system clock so
+    // a compromised host cannot supply iat=0 or iat=far_future to shift the TTL window.
+    // H-3: TA owns iat; host only supplies ttl_secs (capped above).
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
     let wallet_id_str = input.wallet_id.to_string();
-    let exp = input.iat.checked_add(input.ttl_secs)
+    let exp = iat.checked_add(input.ttl_secs)
         .ok_or_else(|| anyhow!("JWT exp overflow"))?;
     let payload_json = format!(
         "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"{addr}\",\"iat\":{iat},\"exp\":{exp}}}",
