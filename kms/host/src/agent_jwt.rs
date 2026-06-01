@@ -93,11 +93,6 @@ pub fn extract_signing_proof(jwt: &str) -> anyhow::Result<(String, Vec<u8>, Vec<
     Ok((header.kid, signing_input, hmac_bytes))
 }
 
-fn b64_json<T: Serialize>(value: &T) -> Result<String> {
-    let json = serde_json::to_vec(value)?;
-    Ok(URL_SAFE_NO_PAD.encode(json))
-}
-
 fn decode_json<T: serde::de::DeserializeOwned>(segment: &str) -> Result<T> {
     let bytes = URL_SAFE_NO_PAD
         .decode(segment)

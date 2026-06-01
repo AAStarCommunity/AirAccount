@@ -20,7 +20,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 mod in_out;
 pub use in_out::*;
 
-#[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone)]
+#[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Command {
     CreateWallet,
@@ -117,6 +117,9 @@ mod tests {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
+        // Removed command IDs must map to Unknown (prevent silent ID reuse regression)
+        assert_eq!(Command::from(13), Command::Unknown);
+        assert_eq!(Command::from(16), Command::Unknown);
     }
 
     // ── UUID constant ──
@@ -357,6 +360,20 @@ mod tests {
             subject: "4319f351-0b24-4097-b659-80ee4f824cdd".to_string(),
             iat: 1748000000i64,
             ttl_secs: 259200i64,
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&CreateAgentKeyInput {
+            wallet_id: test_uuid(),
+            agent_index: 1,
+            subject: "test-agent".to_string(),
+            iat: 1748000000i64,
+            ttl_secs: 86400i64,
+            passkey_assertion: Some(PasskeyAssertion {
+                authenticator_data: vec![0xad; 37],
+                client_data_hash: [0xcd; 32],
+                signature_r: [0x11; 32],
+                signature_s: [0x22; 32],
+            }),
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
             agent_address: [0xab; 20],

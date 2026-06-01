@@ -208,8 +208,12 @@ pub struct CreateAgentKeyInput {
     pub subject: String,
     /// Unix timestamp of issuance (provided by host; low-security field).
     pub iat: i64,
-    /// JWT lifetime in seconds.
+    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
     pub ttl_secs: i64,
+    /// Passkey assertion — mandatory when wallet has a PassKey bound.
+    /// TA verifies this before creating/refreshing agent credentials.
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
