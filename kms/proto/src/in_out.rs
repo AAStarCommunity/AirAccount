@@ -204,12 +204,27 @@ pub struct WarmupCacheOutput {
 pub struct CreateAgentKeyInput {
     pub wallet_id: Uuid,
     pub agent_index: u32,
+    /// JWT sub claim (typically the human key ID string).
+    pub subject: String,
+    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    /// TA computes iat = now() internally; host does not supply iat.
+    pub ttl_secs: i64,
+    /// Passkey assertion — mandatory when wallet has a PassKey bound.
+    /// TA verifies this before creating/refreshing agent credentials.
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateAgentKeyOutput {
     pub agent_address: [u8; 20],
     pub public_key_compressed: Vec<u8>,
+    /// JWT material for assembling the credential on the host side.
+    /// wallet_id and agent_index in the payload are TEE-constructed (not host-supplied).
+    pub jwt_kid: String,
+    pub jwt_header_b64: String,
+    pub jwt_payload_b64: String,
+    pub jwt_hmac: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -236,17 +251,6 @@ pub struct SignAgentUserOpOutput {
 // JWT HMAC Commands
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignInput {
-    pub message: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignOutput {
-    pub hmac: [u8; 32],
-    pub kid: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct JwtHmacVerifyInput {
     pub kid: String,
     pub message: Vec<u8>,
@@ -267,19 +271,6 @@ pub struct JwtRotateSecretInput {
 pub struct JwtRotateSecretOutput {
     pub new_kid: String,
     pub retired_kid: Option<String>,
-}
-
-// Single-call payload signing — atomically picks current kid, builds header, signs
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadInput {
-    pub payload_b64: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadOutput {
-    pub kid: String,
-    pub header_b64: String,
-    pub hmac: [u8; 32],
 }
 
 // EIP-712 Typed Data Signing

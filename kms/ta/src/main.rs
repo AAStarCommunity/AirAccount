@@ -640,6 +640,9 @@ fn agent_derivation_path(agent_index: u32) -> String {
     format!("m/44'/60'/0'/1/{}", agent_index)
 }
 
+/// Maximum allowed JWT lifetime: 7 days.
+const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
+
 fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
     dbg_println!(
         "[+] Create agent key for wallet: {:?}, agent_index: {}",
@@ -648,12 +651,50 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     );
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // C-1: TA-side passkey verification — blocks a compromised host from calling this
+    // command directly to mint agent credentials without user presence.
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    // H-2: Subject must not contain JSON-special characters that could inject claims.
+    validate_jwt_subject(&input.subject)?;
+
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
+
+    // Build JWT payload entirely inside TEE — iat computed from TA system clock so
+    // a compromised host cannot supply iat=0 or iat=far_future to shift the TTL window.
+    // H-3: TA owns iat; host only supplies ttl_secs (capped above).
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
+    let wallet_id_str = input.wallet_id.to_string();
+    let exp = iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
+    let payload_json = format!(
+        "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"{addr}\",\"iat\":{iat},\"exp\":{exp}}}",
+        sub  = input.subject,
+        wid  = wallet_id_str,
+        idx  = input.agent_index,
+        addr = agent_addr_hex,
+        iat  = iat,
+        exp  = exp,
+    );
+    let jwt_out = jwt_sign_payload_internal(&payload_json)?;
 
     Ok(proto::CreateAgentKeyOutput {
         agent_address,
         public_key_compressed,
+        jwt_kid:        jwt_out.kid,
+        jwt_header_b64: jwt_out.header_b64,
+        jwt_payload_b64: jwt_out.payload_b64,
+        jwt_hmac:       jwt_out.hmac,
     })
 }
 
@@ -675,6 +716,10 @@ fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::Sign
     if !verify_result.valid {
         return Err(anyhow!("TA: agent JWT credential verification failed"));
     }
+
+    // Bind JWT claims to request parameters — prevents a compromised host from using
+    // wallet A's JWT to request signing for wallet B (Issue #16 claim-binding fix).
+    verify_jwt_wallet_claims(&input.jwt_signing_input, &input.wallet_id, input.agent_index)?;
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
     let derivation_path = agent_derivation_path(input.agent_index);
@@ -716,19 +761,18 @@ fn hmac_sha256(secret: &[u8], message: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
-    let mut store = JwtSecretStore::load(&db);
-    let current = store.ensure_current()?.clone();
-    store.save(&db)?;
 
-    Ok(proto::JwtHmacSignOutput {
-        hmac: hmac_sha256(&current.secret, &input.message)?,
-        kid: current.kid,
-    })
+/// Internal JWT signing helper — NOT exposed as a TA command.
+/// Accepts a pre-built payload JSON string, computes the full JWT signing_input
+/// and HMAC using the current TEE-stored secret.
+struct JwtSignedMaterial {
+    kid: String,
+    header_b64: String,
+    payload_b64: String,
+    hmac: [u8; 32],
 }
 
-fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSignPayloadOutput> {
+fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
     let db = SecureStorageClient::open(DB_NAME)?;
@@ -736,22 +780,97 @@ fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSign
     let current = store.ensure_current()?.clone();
     store.save(&db)?;
 
-    // Build header JSON identical to what serde_json would produce for JwtHeader
     let header_json = format!(
         "{{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"{}\"}}",
         current.kid
     );
     let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+    let payload_b64 = Base64UrlUnpadded::encode_string(payload_json.as_bytes());
 
-    // signing_input = header_b64 + "." + payload_b64 (standard JWT format)
-    let signing_input = format!("{}.{}", header_b64, input.payload_b64);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
     let hmac = hmac_sha256(&current.secret, signing_input.as_bytes())?;
 
-    Ok(proto::JwtSignPayloadOutput {
-        kid: current.kid,
-        header_b64,
-        hmac,
-    })
+    Ok(JwtSignedMaterial { kid: current.kid, header_b64, payload_b64, hmac })
+}
+
+/// Extract a string field value from a compact JSON object without serde_json.
+/// Matches the first occurrence of `"key":"<value>"`.
+fn extract_json_str_field(json: &str, key: &str) -> Result<String> {
+    let pattern = format!("\"{}\":\"", key);
+    let start = json.find(&*pattern)
+        .ok_or_else(|| anyhow!("JWT claim '{}' not found", key))?
+        + pattern.len();
+    let end = start + json[start..].find('"')
+        .ok_or_else(|| anyhow!("JWT claim '{}' not terminated", key))?;
+    Ok(json[start..end].to_string())
+}
+
+/// Extract a u64 field value from a compact JSON object without serde_json.
+fn extract_json_u64_field(json: &str, key: &str) -> Result<u64> {
+    let pattern = format!("\"{}\":", key);
+    let start = json.find(&*pattern)
+        .ok_or_else(|| anyhow!("JWT claim '{}' not found", key))?
+        + pattern.len();
+    let rest = json[start..].trim_start_matches(' ');
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse::<u64>().map_err(|_| anyhow!("JWT claim '{}' is not a u64", key))
+}
+
+/// Validate that `subject` contains only characters safe to embed directly in a JSON string
+/// without escaping. Prevents claim injection via a crafted subject value (H-2).
+fn validate_jwt_subject(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 256 {
+        return Err(anyhow!("JWT subject length must be 1..=256"));
+    }
+    if !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_:.@+/=".contains(&b)) {
+        return Err(anyhow!("JWT subject contains characters not allowed in JSON (no quotes, backslashes, or controls)"));
+    }
+    Ok(())
+}
+
+/// After HMAC verification, decode the JWT payload and verify that wallet_id and
+/// agent_index match the request parameters. Prevents a compromised host from
+/// using a legitimate JWT for wallet A to request signing for wallet B.
+fn verify_jwt_wallet_claims(
+    signing_input: &[u8],
+    expected_wallet_id: &uuid::Uuid,
+    expected_agent_index: u32,
+) -> Result<()> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    let input_str = core::str::from_utf8(signing_input)
+        .map_err(|_| anyhow!("JWT signing_input is not UTF-8"))?;
+    let dot = input_str.find('.')
+        .ok_or_else(|| anyhow!("JWT signing_input missing dot separator"))?;
+    let payload_b64 = &input_str[dot + 1..];
+    let payload_bytes = Base64UrlUnpadded::decode_vec(payload_b64)
+        .map_err(|_| anyhow!("JWT payload base64 decode failed"))?;
+    let payload_str = core::str::from_utf8(&payload_bytes)
+        .map_err(|_| anyhow!("JWT payload is not UTF-8"))?;
+
+    let jwt_wallet_id = extract_json_str_field(payload_str, "wallet_id")?;
+    if jwt_wallet_id != expected_wallet_id.to_string() {
+        return Err(anyhow!("JWT wallet_id claim does not match request"));
+    }
+
+    // H-3: use u64 then bounds-check before casting to avoid silent truncation
+    let jwt_agent_index_u64 = extract_json_u64_field(payload_str, "agent_index")?;
+    if jwt_agent_index_u64 > u32::MAX as u64 {
+        return Err(anyhow!("JWT agent_index overflow"));
+    }
+    if jwt_agent_index_u64 as u32 != expected_agent_index {
+        return Err(anyhow!("JWT agent_index claim does not match request"));
+    }
+
+    // H-4-lite: structural exp/iat check (no trusted clock available in TA mock mode,
+    // but we can reject obviously invalid JWTs: exp must be after iat, within TTL cap).
+    let iat = extract_json_u64_field(payload_str, "iat")?;
+    let exp = extract_json_u64_field(payload_str, "exp")?;
+    if exp <= iat || exp.saturating_sub(iat) > MAX_AGENT_JWT_TTL as u64 {
+        return Err(anyhow!("JWT exp/iat structurally invalid or exceeds TTL cap"));
+    }
+
+    Ok(())
 }
 
 fn create_p256_session_key(
@@ -1326,10 +1445,8 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
         Command::CreateAgentKey => process(serialized_input, create_agent_key),
         Command::SignAgentUserOp => process(serialized_input, sign_agent_user_op),
-        Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
         Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
-        Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
