@@ -339,8 +339,17 @@ pub struct SignTypedDataInput {
     pub types: Vec<Eip712TypeDef>,
     /// The message values for the primary type
     pub message: Vec<Eip712FieldValue>,
+    /// Passkey assertion for WebAuthn path. TA verifies this independently.
     #[serde(default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
+    /// JWT proof fields for agent-key auth path (defense-in-depth: TA verifies HMAC independently).
+    /// All three must be Some together; absent on WebAuthn path.
+    #[serde(default)]
+    pub jwt_kid: Option<String>,
+    #[serde(default)]
+    pub jwt_signing_input: Option<Vec<u8>>,
+    #[serde(default)]
+    pub jwt_hmac: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

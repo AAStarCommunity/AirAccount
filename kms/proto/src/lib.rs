@@ -538,8 +538,27 @@ mod tests {
                 },
             ],
             passkey_assertion: None,
+            jwt_kid: None,
+            jwt_signing_input: None,
+            jwt_hmac: None,
         };
         bincode_roundtrip(&input);
+
+        // JWT-path variant: jwt_kid/signing_input/hmac present, passkey absent
+        let input_jwt = SignTypedDataInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/1/0".into(),
+            domain: Eip712Domain { name: None, version: None, chain_id: Some(1), verifying_contract: None },
+            primary_type: "Transfer".into(),
+            types: vec![],
+            message: vec![],
+            passkey_assertion: None,
+            jwt_kid: Some("kid-abc".into()),
+            jwt_signing_input: Some(b"header.payload".to_vec()),
+            jwt_hmac: Some(vec![0xde; 32]),
+        };
+        bincode_roundtrip(&input_jwt);
+
         bincode_roundtrip(&SignTypedDataOutput {
             signature: vec![0u8; 65],
         });
