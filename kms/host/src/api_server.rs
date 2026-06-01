@@ -461,11 +461,13 @@ pub struct SignTypedDataRequest {
     pub types: Vec<JsonEip712TypeDef>,
     /// Field values for the primary type
     pub message: Vec<JsonEip712FieldValue>,
-    #[serde(rename = "passkeyAssertion", default)]
-    pub passkey_assertion: Option<PasskeyAssertion>,
-    /// WebAuthn ceremony assertion (challenge-based, replay-protected). Preferred over passkeyAssertion.
+    /// WebAuthn ceremony assertion (challenge-based, replay-protected). Required if no Bearer JWT.
     #[serde(rename = "webAuthnAssertion", default)]
     pub webauthn_assertion: Option<WebAuthnAssertion>,
+    /// Deprecated: legacy raw passkey assertion. NOT accepted by sign-typed-data (no replay protection).
+    /// Field kept for JSON parse compatibility; the server rejects requests that rely on it.
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
@@ -1614,23 +1616,53 @@ impl KmsApiServer {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let wallet_id_str = wallet_id.to_string();
 
-        // Auth gate: require one of three paths.
-        // Path A — Bearer JWT (agent key or P256 session key): proves user previously authorized delegation via WebAuthn.
-        // Path B — WebAuthn ceremony assertion: live proof of key ownership (challenge-bound, replay-resistant).
-        // Path C — Legacy passkey assertion: raw P256 assertion (no challenge; backward-compat only).
-        // No auth at all → reject. The wallet's private key must not sign without proof of owner consent.
-        let passkey_assertion = match (&bearer, &req.webauthn_assertion, &req.passkey_assertion) {
-            (Some(jwt), _, _) => {
-                // Path A: session key JWT
+        // Auth gate: require one of two paths.
+        // Path A — Bearer JWT (agent key): user previously authorized via WebAuthn; checked against
+        //           DB active-status, credential_hash, and per-credential rate limit. JWT path is
+        //           locked to the agent's own derivation path — it cannot escalate to the owner root key.
+        // Path B — WebAuthn ceremony assertion: live, challenge-bound proof of ownership; replay-resistant.
+        // Legacy raw passkeyAssertion is NOT accepted for sign-typed-data (no challenge binding → replay risk).
+        // No auth at all → reject.
+        let passkey_assertion = match (&bearer, &req.webauthn_assertion) {
+            (Some(jwt), _) => {
+                // Path A: agent key JWT
                 let payload = agent_jwt::verify_credential(&self.tee, jwt).await
-                    .map_err(|e| anyhow!("Invalid session credential for sign-typed-data: {}", e))?;
+                    .map_err(|e| anyhow!("Invalid agent credential for sign-typed-data: {}", e))?;
                 if payload.wallet_id != wallet_id_str {
-                    return Err(anyhow!("Session credential wallet does not match keyId"));
+                    return Err(anyhow!("Agent credential wallet does not match keyId"));
                 }
-                None // no passkey forwarded to TA on JWT path
+
+                // Enforce: JWT can only sign on its own agent derivation path, not the owner root key.
+                let expected_path = format!("m/44'/60'/0'/1/{}", payload.agent_index);
+                if req.hd_path != expected_path {
+                    return Err(anyhow!(
+                        "Agent credential may only sign typed-data on path '{}' (requested '{}'). \
+                         Use WebAuthn to sign on other paths.",
+                        expected_path, req.hd_path
+                    ));
+                }
+
+                // DB checks: active status + credential_hash match (same pattern as sign_agent)
+                let agent_key = self.db.get_agent_key(&wallet_id_str, payload.agent_index)?
+                    .ok_or_else(|| anyhow!("Agent key not found: {}:{}", wallet_id_str, payload.agent_index))?;
+                if agent_key.status != "active" {
+                    return Err(anyhow!("Agent key is revoked"));
+                }
+                let current_hash = agent_jwt::credential_hash(jwt);
+                if agent_key.credential_hash.as_deref() != Some(current_hash.as_str()) {
+                    return Err(anyhow!("Agent credential has been superseded or revoked"));
+                }
+
+                // Per-credential rate limit
+                let cred_rl_key = format!("typed-data/{}/{}", wallet_id_str, payload.agent_index);
+                self.agent_rate_limiter.check(&cred_rl_key).map_err(|limit| {
+                    anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit)
+                })?;
+
+                None // no passkey forwarded to TA; JWT auth is host-enforced
             }
-            (None, Some(_), _) => {
-                // Path B: WebAuthn ceremony (preferred, replay-protected)
+            (None, Some(_)) => {
+                // Path B: WebAuthn ceremony (preferred, replay-protected, no hdPath restriction)
                 let assertion = self
                     .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref())
                     .await?;
@@ -1639,16 +1671,11 @@ impl KmsApiServer {
                 }
                 assertion
             }
-            (None, None, Some(_)) => {
-                // Path C: legacy raw passkey (backward-compat; no challenge binding)
-                Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?
-            }
-            (None, None, None) => {
+            (None, None) => {
                 return Err(anyhow!(
                     "sign-typed-data requires authentication: \
-                     provide Authorization: Bearer <jwt> (session key) \
-                     OR webAuthnAssertion (WebAuthn ceremony) \
-                     OR passkeyAssertion (legacy)"
+                     provide Authorization: Bearer <agent-jwt> OR webAuthnAssertion. \
+                     Legacy passkeyAssertion is not accepted for this endpoint."
                 ));
             }
         };
@@ -2523,9 +2550,19 @@ async fn handle_sign_typed_data(
     body: SignTypedDataRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let bearer = auth_header.and_then(|h| {
-        h.strip_prefix("Bearer ").map(|s| s.to_string())
-    });
+    // If Authorization header is present it must be "Bearer <token>"; any other format is rejected
+    // immediately — silent fallback to body-auth would allow header-stripping downgrade attacks.
+    let bearer = match auth_header {
+        Some(h) => {
+            let token = h.strip_prefix("Bearer ").ok_or_else(|| {
+                warp::reject::custom(ApiError(
+                    "Authorization header must use 'Bearer <token>' format".to_string(),
+                ))
+            })?;
+            Some(token.to_string())
+        }
+        None => None,
+    };
     let t0 = std::time::Instant::now();
     match server.sign_typed_data(bearer, body).await {
         Ok(response) => {
