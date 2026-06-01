@@ -773,6 +773,30 @@ impl TeeHandle {
         Ok(output)
     }
 
+    pub async fn sign_grant_session(
+        &self,
+        input: proto::SignGrantSessionInput,
+    ) -> Result<proto::SignGrantSessionOutput> {
+        let serialized =
+            bincode::serialize(&input).context("Failed to serialize SignGrantSessionInput")?;
+        let out = self.call(proto::Command::SignGrantSession, serialized).await?;
+        let output: proto::SignGrantSessionOutput =
+            bincode::deserialize(&out).context("Failed to deserialize SignGrantSessionOutput")?;
+        Ok(output)
+    }
+
+    pub async fn sign_p256_grant_session(
+        &self,
+        input: proto::SignP256GrantSessionInput,
+    ) -> Result<proto::SignP256GrantSessionOutput> {
+        let serialized = bincode::serialize(&input)
+            .context("Failed to serialize SignP256GrantSessionInput")?;
+        let out = self.call(proto::Command::SignP256GrantSession, serialized).await?;
+        let output: proto::SignP256GrantSessionOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize SignP256GrantSessionOutput")?;
+        Ok(output)
+    }
+
     pub async fn create_p256_session_key(
         &self,
         wallet_id: uuid::Uuid,

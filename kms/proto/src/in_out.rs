@@ -393,3 +393,62 @@ pub struct SignP256UserOpOutput {
     /// 149 bytes: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
     pub signature: Vec<u8>,
 }
+
+// Grant Session Signing — owner generates off-chain sig; relayer submits on-chain
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignGrantSessionInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub chain_id: u64,
+    pub verifying_contract: [u8; 20],
+    pub account: [u8; 20],
+    pub session_key: [u8; 20],
+    pub expiry: u64,
+    pub contract_scope: [u8; 20],
+    pub selector_scope: [u8; 4],
+    pub velocity_limit: u16,
+    pub velocity_window: u32,
+    /// Raw address list — TA computes keccak256(abi.encodePacked(callTargets))
+    pub call_targets: Vec<[u8; 20]>,
+    /// Raw 4-byte selector list — TA computes keccak256(abi.encodePacked(selectorAllowlist))
+    pub selector_allowlist: Vec<[u8; 4]>,
+    /// Big-endian uint256 nonce from grantNonces[account][sessionKey] on-chain
+    pub nonce: [u8; 32],
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignGrantSessionOutput {
+    /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256GrantSessionInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub chain_id: u64,
+    pub verifying_contract: [u8; 20],
+    pub account: [u8; 20],
+    pub key_x: [u8; 32],
+    pub key_y: [u8; 32],
+    pub expiry: u64,
+    pub contract_scope: [u8; 20],
+    pub selector_scope: [u8; 4],
+    pub velocity_limit: u16,
+    pub velocity_window: u32,
+    pub call_targets: Vec<[u8; 20]>,
+    pub selector_allowlist: Vec<[u8; 4]>,
+    /// Big-endian uint256 nonce from grantNonces_p256[account][keyHash] on-chain
+    pub nonce: [u8; 32],
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256GrantSessionOutput {
+    /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
+    pub signature: Vec<u8>,
+}
