@@ -94,6 +94,22 @@ CREATE TABLE IF NOT EXISTS jwt_secret_meta (
     expires_at   INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS p256_session_keys (
+    wallet_id               TEXT NOT NULL,
+    session_index           INTEGER NOT NULL,
+    human_id                TEXT NOT NULL,
+    pub_key_x               TEXT NOT NULL,
+    pub_key_y               TEXT NOT NULL,
+    credential_hash         TEXT,
+    credential_expires_at   INTEGER,
+    status                  TEXT NOT NULL DEFAULT 'pending',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    revoked_at              TEXT,
+    PRIMARY KEY (wallet_id, session_index),
+    FOREIGN KEY (wallet_id) REFERENCES wallets(key_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_key ON address_index(key_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_credential ON wallets(credential_id);
@@ -181,6 +197,21 @@ pub struct JwtSecretMetaRow {
     pub created_at: String,
     pub retired_at: Option<String>,
     pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct P256SessionKeyRow {
+    pub wallet_id: String,
+    pub session_index: u32,
+    pub human_id: String,
+    pub pub_key_x: String,
+    pub pub_key_y: String,
+    pub credential_hash: Option<String>,
+    pub credential_expires_at: Option<i64>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub revoked_at: Option<String>,
 }
 
 // ── KmsDb ──
@@ -603,6 +634,134 @@ impl KmsDb {
         )?;
         let rows = stmt.query_map([], Self::map_agent_key_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ── P256 Session Key methods ──
+
+    fn map_p256_session_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<P256SessionKeyRow> {
+        Ok(P256SessionKeyRow {
+            wallet_id: row.get(0)?,
+            session_index: row.get::<_, u32>(1)?,
+            human_id: row.get(2)?,
+            pub_key_x: row.get(3)?,
+            pub_key_y: row.get(4)?,
+            credential_hash: row.get(5)?,
+            credential_expires_at: row.get(6)?,
+            status: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            revoked_at: row.get(10)?,
+        })
+    }
+
+    /// Atomically allocate the next session_index and insert a 'pending' placeholder.
+    /// The placeholder prevents concurrent requests from claiming the same index before
+    /// the TA key generation completes. Call activate_p256_session_key after TA success.
+    pub fn allocate_p256_session_key_pending(
+        &self,
+        wallet_id: &str,
+        human_id: &str,
+    ) -> Result<u32> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        // Single SQL operation: compute MAX+1 and INSERT as a single atomic statement.
+        // The SELECT subquery and INSERT share the same connection lock, preventing TOCTOU.
+        conn.execute(
+            "INSERT INTO p256_session_keys \
+             (wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
+              credential_hash, credential_expires_at, status, created_at, updated_at) \
+             SELECT ?1, COALESCE(MAX(session_index)+1, 0), ?2, '', '', NULL, NULL, 'pending', ?3, ?3 \
+             FROM p256_session_keys WHERE wallet_id=?1",
+            params![wallet_id, human_id, now],
+        )
+        .context("allocate_p256_session_key_pending")?;
+
+        // Read back the allocated index (the MAX that was just inserted)
+        let idx: i64 = conn.query_row(
+            "SELECT session_index FROM p256_session_keys \
+             WHERE wallet_id=?1 AND status='pending' ORDER BY session_index DESC LIMIT 1",
+            params![wallet_id],
+            |row| row.get(0),
+        )?;
+        Ok(idx as u32)
+    }
+
+    /// Activate a pending P256 session key after successful TA key generation.
+    pub fn activate_p256_session_key(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+        pub_key_x: &str,
+        pub_key_y: &str,
+        credential_hash: &str,
+        credential_expires_at: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE p256_session_keys SET pub_key_x=?3, pub_key_y=?4, \
+             credential_hash=?5, credential_expires_at=?6, status='active', updated_at=?7 \
+             WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
+            params![
+                wallet_id,
+                session_index,
+                pub_key_x,
+                pub_key_y,
+                credential_hash,
+                credential_expires_at,
+                now
+            ],
+        )
+        .context("activate_p256_session_key")?;
+        if n == 0 {
+            return Err(anyhow::anyhow!(
+                "activate_p256_session_key: no pending row found for ({}, {})",
+                wallet_id,
+                session_index
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn get_p256_session_key(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+    ) -> Result<Option<P256SessionKeyRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
+             credential_hash, credential_expires_at, status, created_at, updated_at, revoked_at \
+             FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2",
+        )?;
+        let mut rows =
+            stmt.query_map(params![wallet_id, session_index], Self::map_p256_session_key_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a pending P256 session key placeholder after TA key generation fails.
+    /// Only removes rows with status='pending'; does not affect active or revoked keys.
+    pub fn delete_p256_session_key_pending(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
+            params![wallet_id, session_index],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn revoke_p256_session_key(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE p256_session_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
+             WHERE wallet_id=?1 AND session_index=?2 AND status='active'",
+            params![wallet_id, session_index, now],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {
