@@ -236,17 +236,6 @@ pub struct SignAgentUserOpOutput {
 // JWT HMAC Commands
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignInput {
-    pub message: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignOutput {
-    pub hmac: [u8; 32],
-    pub kid: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct JwtHmacVerifyInput {
     pub kid: String,
     pub message: Vec<u8>,

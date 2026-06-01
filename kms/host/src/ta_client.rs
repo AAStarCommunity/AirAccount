@@ -712,17 +712,6 @@ impl TeeHandle {
         Ok(output.signature)
     }
 
-    pub async fn jwt_hmac_sign(&self, message: &[u8]) -> Result<proto::JwtHmacSignOutput> {
-        let input = bincode::serialize(&proto::JwtHmacSignInput {
-            message: message.to_vec(),
-        })
-        .context("Failed to serialize JwtHmacSignInput")?;
-        let out = self.call(proto::Command::JwtHmacSign, input).await?;
-        let output: proto::JwtHmacSignOutput =
-            bincode::deserialize(&out).context("Failed to deserialize JwtHmacSignOutput")?;
-        Ok(output)
-    }
-
     pub async fn jwt_hmac_verify(
         &self,
         kid: &str,
