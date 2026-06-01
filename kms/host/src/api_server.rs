@@ -463,6 +463,9 @@ pub struct SignTypedDataRequest {
     pub message: Vec<JsonEip712FieldValue>,
     #[serde(rename = "passkeyAssertion", default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (challenge-based, replay-protected). Preferred over passkeyAssertion.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
@@ -1607,11 +1610,48 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_typed_data(&self, req: SignTypedDataRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_typed_data(&self, bearer: Option<String>, req: SignTypedDataRequest) -> Result<SignTypedDataResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_id.to_string();
 
-        // Passkey verification (optional — wallet may or may not have one bound)
-        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
+        // Auth gate: require one of three paths.
+        // Path A — Bearer JWT (agent key or P256 session key): proves user previously authorized delegation via WebAuthn.
+        // Path B — WebAuthn ceremony assertion: live proof of key ownership (challenge-bound, replay-resistant).
+        // Path C — Legacy passkey assertion: raw P256 assertion (no challenge; backward-compat only).
+        // No auth at all → reject. The wallet's private key must not sign without proof of owner consent.
+        let passkey_assertion = match (&bearer, &req.webauthn_assertion, &req.passkey_assertion) {
+            (Some(jwt), _, _) => {
+                // Path A: session key JWT
+                let payload = agent_jwt::verify_credential(&self.tee, jwt).await
+                    .map_err(|e| anyhow!("Invalid session credential for sign-typed-data: {}", e))?;
+                if payload.wallet_id != wallet_id_str {
+                    return Err(anyhow!("Session credential wallet does not match keyId"));
+                }
+                None // no passkey forwarded to TA on JWT path
+            }
+            (None, Some(_), _) => {
+                // Path B: WebAuthn ceremony (preferred, replay-protected)
+                let assertion = self
+                    .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref())
+                    .await?;
+                if assertion.is_none() {
+                    return Err(anyhow!("WebAuthn assertion verification failed for sign-typed-data"));
+                }
+                assertion
+            }
+            (None, None, Some(_)) => {
+                // Path C: legacy raw passkey (backward-compat; no challenge binding)
+                Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?
+            }
+            (None, None, None) => {
+                return Err(anyhow!(
+                    "sign-typed-data requires authentication: \
+                     provide Authorization: Bearer <jwt> (session key) \
+                     OR webAuthnAssertion (WebAuthn ceremony) \
+                     OR passkeyAssertion (legacy)"
+                ));
+            }
+        };
 
         // Convert domain verifyingContract from hex string to [u8; 20]
         let verifying_contract = match &req.domain.verifying_contract {
@@ -2479,11 +2519,15 @@ async fn handle_revoke_agent_credential(
 }
 
 async fn handle_sign_typed_data(
+    auth_header: Option<String>,
     body: SignTypedDataRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let bearer = auth_header.and_then(|h| {
+        h.strip_prefix("Bearer ").map(|s| s.to_string())
+    });
     let t0 = std::time::Instant::now();
-    match server.sign_typed_data(body).await {
+    match server.sign_typed_data(bearer, body).await {
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ SignTypedData OK {}ms", elapsed);
@@ -2972,6 +3016,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server_std.clone()))
         .and_then(handle_sign_typed_data);

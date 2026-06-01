@@ -264,6 +264,20 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     echo "  (Expected failure — CA pre-verify correctly rejected invalid passkey)"
 fi
 
+# SignTypedData without any auth (must be rejected — auth gate fix v0.18.2)
+timed_curl "POST /SignTypedData (no auth)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"primaryType\":\"Transfer\",\"domain\":{\"name\":\"Test\",\"version\":\"1\",\"chainId\":1},\"types\":[{\"name\":\"Transfer\",\"fields\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint256\"}]}],\"message\":[{\"name\":\"to\",\"value\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\"},{\"name\":\"amount\",\"value\":\"1000000000000000000\"}]}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — auth gate correctly rejected unauthenticated sign-typed-data)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted unauthenticated request — auth gate broken!${NC}"
+fi
+
 # Non-existent key
 timed_curl "POST /DescribeKey (404)" \
     -X POST "$BASE/DescribeKey" \
