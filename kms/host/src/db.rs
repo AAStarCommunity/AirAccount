@@ -118,6 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_tx_log_op ON tx_log(op);
 CREATE INDEX IF NOT EXISTS idx_agent_keys_human ON agent_keys(human_id);
 CREATE INDEX IF NOT EXISTS idx_agent_keys_address ON agent_keys(agent_address);
 CREATE INDEX IF NOT EXISTS idx_jwt_secret_meta_status ON jwt_secret_meta(status);
+CREATE INDEX IF NOT EXISTS idx_p256_session_gc ON p256_session_keys(wallet_id, status, credential_expires_at);
 "#;
 
 // ── TX stats ──
@@ -657,32 +658,66 @@ impl KmsDb {
     /// Atomically allocate the next session_index and insert a 'pending' placeholder.
     /// The placeholder prevents concurrent requests from claiming the same index before
     /// the TA key generation completes. Call activate_p256_session_key after TA success.
+    /// Atomically check the active/pending key count and allocate a new pending slot.
+    /// Both operations are performed under a single Mutex acquisition to prevent TOCTOU.
+    ///
+    /// Counted rows (against max_active):
+    ///   - status='active' with credential_expires_at > now_unix (non-expired)
+    ///   - status='active' with credential_expires_at IS NULL (shouldn't exist, but safe to count)
+    ///   - status='pending' (TEE key generation in flight; always reserves a slot)
+    ///
+    /// Returns Err if active+pending count >= max_active before inserting.
     pub fn allocate_p256_session_key_pending(
         &self,
         wallet_id: &str,
         human_id: &str,
+        now_unix: i64,
+        max_active: i64,
     ) -> Result<u32> {
-        let now = Utc::now().to_rfc3339();
+        let now_rfc = Utc::now().to_rfc3339();
         let conn = self.lock();
-        // Single SQL operation: compute MAX+1 and INSERT as a single atomic statement.
-        // The SELECT subquery and INSERT share the same connection lock, preventing TOCTOU.
+
+        // Count check and INSERT in a single transaction to prevent concurrent over-allocation.
+        // BEGIN IMMEDIATE acquires a write lock immediately, blocking other writers.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let current_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND (status = 'pending' \
+                    OR (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2)))",
+            params![wallet_id, now_unix],
+            |row| row.get(0),
+        )?;
+
+        if current_count >= max_active {
+            conn.execute_batch("ROLLBACK")?;
+            return Err(anyhow::anyhow!(
+                "Wallet already has {} active/pending P256 session keys (max {}). \
+                 Revoke an existing key before creating a new one.",
+                current_count,
+                max_active
+            ));
+        }
+
         conn.execute(
             "INSERT INTO p256_session_keys \
              (wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
               credential_hash, credential_expires_at, status, created_at, updated_at) \
              SELECT ?1, COALESCE(MAX(session_index)+1, 0), ?2, '', '', NULL, NULL, 'pending', ?3, ?3 \
              FROM p256_session_keys WHERE wallet_id=?1",
-            params![wallet_id, human_id, now],
+            params![wallet_id, human_id, now_rfc],
         )
-        .context("allocate_p256_session_key_pending")?;
+        .context("allocate_p256_session_key_pending INSERT")?;
 
-        // Read back the allocated index (the MAX that was just inserted)
         let idx: i64 = conn.query_row(
             "SELECT session_index FROM p256_session_keys \
              WHERE wallet_id=?1 AND status='pending' ORDER BY session_index DESC LIMIT 1",
             params![wallet_id],
             |row| row.get(0),
         )?;
+
+        conn.execute_batch("COMMIT")?;
         Ok(idx as u32)
     }
 
@@ -790,14 +825,18 @@ impl KmsDb {
         Ok(indices)
     }
 
-    /// Count active (non-expired) P256 session keys for a wallet.
-    /// Used in create to enforce the max-2 active-key invariant.
+    /// Count active/pending (non-expired) P256 session keys for a wallet.
+    /// Note: this method is NOT used for the max-2 enforcement (that is atomic inside
+    /// allocate_p256_session_key_pending). This is provided for diagnostics/stats only.
+    /// active rows should always have a non-null credential_expires_at after activation;
+    /// NULL expiry on an active row is a data anomaly but counted conservatively.
     pub fn count_active_p256_session_keys(&self, wallet_id: &str, now_unix: i64) -> Result<i64> {
         let conn = self.lock();
         conn.query_row(
             "SELECT COUNT(*) FROM p256_session_keys \
-             WHERE wallet_id=?1 AND status='active' \
-               AND (credential_expires_at IS NULL OR credential_expires_at > ?2)",
+             WHERE wallet_id=?1 \
+               AND (status = 'pending' \
+                    OR (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2)))",
             params![wallet_id, now_unix],
             |row| row.get(0),
         ).context("count_active_p256_session_keys")
