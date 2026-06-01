@@ -38,7 +38,6 @@ pub enum Command {
     SignAgentUserOp = 12,
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
-    JwtSignPayload = 16,
     SignTypedData = 17,
     CreateP256SessionKey = 18,
     SignP256UserOp = 19,
@@ -85,7 +84,6 @@ mod tests {
         assert_eq!(u32::from(Command::SignAgentUserOp), 12);
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
-        assert_eq!(u32::from(Command::JwtSignPayload), 16);
         assert_eq!(u32::from(Command::SignTypedData), 17);
         assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
         assert_eq!(u32::from(Command::SignP256UserOp), 19);
@@ -113,8 +111,8 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        // 13 (JwtHmacSign) removed — signing oracle closed (Issue #16)
-        let valid_ids: &[u32] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,16,17,18,19,20,21];
+        // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
+        let valid_ids: &[u32] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,17,18,19,20,21];
         for &i in valid_ids {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
@@ -356,10 +354,17 @@ mod tests {
         bincode_roundtrip(&CreateAgentKeyInput {
             wallet_id: test_uuid(),
             agent_index: 0,
+            subject: "4319f351-0b24-4097-b659-80ee4f824cdd".to_string(),
+            iat: 1748000000i64,
+            ttl_secs: 259200i64,
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
             agent_address: [0xab; 20],
             public_key_compressed: vec![0x02; 33],
+            jwt_kid: "v1234".to_string(),
+            jwt_header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
+            jwt_payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+            jwt_hmac: [0xbb; 32],
         });
     }
 
@@ -395,14 +400,6 @@ mod tests {
         bincode_roundtrip(&JwtRotateSecretOutput {
             new_kid: "v1".to_string(),
             retired_kid: None,
-        });
-        bincode_roundtrip(&JwtSignPayloadInput {
-            payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
-        });
-        bincode_roundtrip(&JwtSignPayloadOutput {
-            kid: "v1234".to_string(),
-            header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
-            hmac: [0xbb; 32],
         });
     }
 
