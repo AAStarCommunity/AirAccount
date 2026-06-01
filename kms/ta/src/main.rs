@@ -866,6 +866,47 @@ fn sign_p256_user_op(
     Ok(proto::SignP256UserOpOutput { signature })
 }
 
+fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let s = std::str::from_utf8(signing_input)
+        .map_err(|_| anyhow!("jwt_parse_claims: signing_input is not valid UTF-8"))?;
+    let payload_b64 = s.splitn(2, '.').nth(1)
+        .ok_or_else(|| anyhow!("jwt_parse_claims: missing '.' separator"))?;
+    let payload_bytes = Base64UrlUnpadded::decode_vec(payload_b64)
+        .map_err(|_| anyhow!("jwt_parse_claims: payload base64url decode failed"))?;
+    let payload = std::str::from_utf8(&payload_bytes)
+        .map_err(|_| anyhow!("jwt_parse_claims: payload is not valid UTF-8"))?;
+    let wallet_id = extract_json_str_field(payload, "wallet_id")?;
+    let agent_index = extract_json_u32_field(payload, "agent_index")?;
+    Ok((wallet_id, agent_index))
+}
+
+fn extract_json_str_field(json: &str, field: &str) -> Result<String> {
+    let needle = format!("\"{}\":\"", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find('"')
+        .ok_or_else(|| anyhow!("unterminated string for field '{}' in JWT payload", field))?
+        + start;
+    Ok(json[start..end].to_string())
+}
+
+fn extract_json_u32_field(json: &str, field: &str) -> Result<u32> {
+    let needle = format!("\"{}\":", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(json[start..].len())
+        + start;
+    if start == end {
+        return Err(anyhow!("empty value for u32 field '{}' in JWT payload", field));
+    }
+    json[start..end].parse::<u32>()
+        .map_err(|e| anyhow!("field '{}' is not a valid u32: {}", field, e))
+}
+
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
     dbg_println!(
         "[+] EIP-712 sign typed data for wallet: {:?}, primary_type: {}",
@@ -884,16 +925,34 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
             verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
         }
         (None, Some(kid)) => {
-            // Agent JWT path: verify HMAC using TEE-resident JWT secret.
-            let signing_input = input.jwt_signing_input.as_deref().unwrap_or(&[]);
-            let expected_hmac = input.jwt_hmac.as_deref().unwrap_or(&[]);
+            // Agent JWT path: all three JWT proof fields must be present.
+            let signing_input = input.jwt_signing_input.as_deref()
+                .ok_or_else(|| anyhow!("sign_typed_data: jwt_signing_input missing from JWT proof"))?;
+            let expected_hmac = input.jwt_hmac.as_deref()
+                .ok_or_else(|| anyhow!("sign_typed_data: jwt_hmac missing from JWT proof"))?;
+
+            // Step 1: Verify HMAC using TEE-resident JWT secret.
             let verify_result = jwt_hmac_verify(&proto::JwtHmacVerifyInput {
                 kid: kid.clone(),
-                signing_input: signing_input.to_vec(),
+                message: signing_input.to_vec(),
                 expected_hmac: expected_hmac.to_vec(),
             })?;
             if !verify_result.valid {
                 return Err(anyhow!("JWT HMAC verification failed in TA for sign-typed-data"));
+            }
+
+            // Step 2: Verify JWT claims bind to this request's wallet and agent path.
+            // Parse wallet_id and agent_index from the JWT payload (base64url-encoded JSON).
+            let (jwt_wallet_id, jwt_agent_index) = jwt_parse_claims(signing_input)?;
+            if jwt_wallet_id != input.wallet_id.to_string() {
+                return Err(anyhow!("JWT wallet_id does not match request wallet_id"));
+            }
+            let expected_path = format!("m/44'/60'/0'/1/{}", jwt_agent_index);
+            if input.hd_path != expected_path {
+                return Err(anyhow!(
+                    "JWT agent path '{}' does not match request hd_path '{}'",
+                    expected_path, input.hd_path
+                ));
             }
         }
         (None, None) => {
