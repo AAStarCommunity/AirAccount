@@ -3,4 +3,7 @@ members = [
     "kms/proto",
     "kms/host",
 ]
+exclude = [
+    "third_party",
+]
 resolver = "2"
