@@ -20,7 +20,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 mod in_out;
 pub use in_out::*;
 
-#[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone)]
+#[derive(FromPrimitive, IntoPrimitive, Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Command {
     CreateWallet,
@@ -36,14 +36,14 @@ pub enum Command {
     RegisterPasskeyTa,
     CreateAgentKey = 11,
     SignAgentUserOp = 12,
-    JwtHmacSign = 13,
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
-    JwtSignPayload = 16,
     SignTypedData = 17,
     CreateP256SessionKey = 18,
     SignP256UserOp = 19,
     DeleteP256SessionKey = 20,
+    SignGrantSession = 21,
+    SignP256GrantSession = 22,
     #[default]
     Unknown,
 }
@@ -83,14 +83,14 @@ mod tests {
         assert_eq!(u32::from(Command::RegisterPasskeyTa), 10);
         assert_eq!(u32::from(Command::CreateAgentKey), 11);
         assert_eq!(u32::from(Command::SignAgentUserOp), 12);
-        assert_eq!(u32::from(Command::JwtHmacSign), 13);
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
-        assert_eq!(u32::from(Command::JwtSignPayload), 16);
         assert_eq!(u32::from(Command::SignTypedData), 17);
         assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
         assert_eq!(u32::from(Command::SignP256UserOp), 19);
         assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
+        assert_eq!(u32::from(Command::SignGrantSession), 21);
+        assert_eq!(u32::from(Command::SignP256GrantSession), 22);
     }
 
     #[test]
@@ -108,6 +108,11 @@ mod tests {
             Command::from(20u32),
             Command::DeleteP256SessionKey
         ));
+        assert!(matches!(Command::from(21u32), Command::SignGrantSession));
+        assert!(matches!(
+            Command::from(22u32),
+            Command::SignP256GrantSession
+        ));
     }
 
     #[test]
@@ -118,10 +123,17 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=20u32 {
+        // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
+        let valid_ids: &[u32] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22,
+        ];
+        for &i in valid_ids {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
+        // Removed command IDs must map to Unknown (prevent silent ID reuse regression)
+        assert_eq!(Command::from(13), Command::Unknown);
+        assert_eq!(Command::from(16), Command::Unknown);
     }
 
     // ── UUID constant ──
@@ -359,10 +371,29 @@ mod tests {
         bincode_roundtrip(&CreateAgentKeyInput {
             wallet_id: test_uuid(),
             agent_index: 0,
+            subject: "4319f351-0b24-4097-b659-80ee4f824cdd".to_string(),
+            ttl_secs: 259200i64,
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&CreateAgentKeyInput {
+            wallet_id: test_uuid(),
+            agent_index: 1,
+            subject: "test-agent".to_string(),
+            ttl_secs: 86400i64,
+            passkey_assertion: Some(PasskeyAssertion {
+                authenticator_data: vec![0xad; 37],
+                client_data_hash: [0xcd; 32],
+                signature_r: [0x11; 32],
+                signature_s: [0x22; 32],
+            }),
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
             agent_address: [0xab; 20],
             public_key_compressed: vec![0x02; 33],
+            jwt_kid: "v1234".to_string(),
+            jwt_header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
+            jwt_payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+            jwt_hmac: [0xbb; 32],
         });
     }
 
@@ -384,13 +415,6 @@ mod tests {
 
     #[test]
     fn jwt_hmac_roundtrip() {
-        bincode_roundtrip(&JwtHmacSignInput {
-            message: b"header.payload".to_vec(),
-        });
-        bincode_roundtrip(&JwtHmacSignOutput {
-            hmac: [0xaa; 32],
-            kid: "v1".to_string(),
-        });
         bincode_roundtrip(&JwtHmacVerifyInput {
             kid: "v1".to_string(),
             message: b"header.payload".to_vec(),
@@ -405,14 +429,6 @@ mod tests {
         bincode_roundtrip(&JwtRotateSecretOutput {
             new_kid: "v1".to_string(),
             retired_kid: None,
-        });
-        bincode_roundtrip(&JwtSignPayloadInput {
-            payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
-        });
-        bincode_roundtrip(&JwtSignPayloadOutput {
-            kid: "v1234".to_string(),
-            header_b64: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InYxMjM0In0".to_string(),
-            hmac: [0xbb; 32],
         });
     }
 
@@ -556,9 +572,84 @@ mod tests {
                 },
             ],
             passkey_assertion: None,
+            jwt_kid: None,
+            jwt_signing_input: None,
+            jwt_hmac: None,
         };
         bincode_roundtrip(&input);
+
+        // JWT-path variant: jwt_kid/signing_input/hmac present, passkey absent
+        let input_jwt = SignTypedDataInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/1/0".into(),
+            domain: Eip712Domain {
+                name: None,
+                version: None,
+                chain_id: Some(1),
+                verifying_contract: None,
+            },
+            primary_type: "Transfer".into(),
+            types: vec![],
+            message: vec![],
+            passkey_assertion: None,
+            jwt_kid: Some("kid-abc".into()),
+            jwt_signing_input: Some(b"header.payload".to_vec()),
+            jwt_hmac: Some(vec![0xde; 32]),
+        };
+        bincode_roundtrip(&input_jwt);
+
         bincode_roundtrip(&SignTypedDataOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    // ── Grant Session ──
+
+    #[test]
+    fn sign_grant_session_roundtrip() {
+        bincode_roundtrip(&SignGrantSessionInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            chain_id: 1,
+            verifying_contract: [0x11; 20],
+            account: [0x22; 20],
+            session_key: [0x33; 20],
+            expiry: 1_000_000,
+            contract_scope: [0x00; 20],
+            selector_scope: [0x00; 4],
+            velocity_limit: 0,
+            velocity_window: 0,
+            call_targets: vec![[0x44; 20]],
+            selector_allowlist: vec![[0xaa, 0xbb, 0xcc, 0xdd]],
+            nonce: [0x00; 32],
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&SignGrantSessionOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    #[test]
+    fn sign_p256_grant_session_roundtrip() {
+        bincode_roundtrip(&SignP256GrantSessionInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            chain_id: 11155111,
+            verifying_contract: [0x11; 20],
+            account: [0x22; 20],
+            key_x: [0xaa; 32],
+            key_y: [0xbb; 32],
+            expiry: 2_000_000,
+            contract_scope: [0x00; 20],
+            selector_scope: [0x00; 4],
+            velocity_limit: 5,
+            velocity_window: 3600,
+            call_targets: vec![],
+            selector_allowlist: vec![],
+            nonce: [0x00; 32],
+            passkey_assertion: None,
+        });
+        bincode_roundtrip(&SignP256GrantSessionOutput {
             signature: vec![0u8; 65],
         });
     }
@@ -596,10 +687,16 @@ mod tests {
         bincode_roundtrip(&CreateP256SessionKeyInput {
             wallet_id: test_uuid(),
             session_index: 0,
+            subject: "test-wallet-id".to_string(),
+            ttl_secs: 259200,
         });
         bincode_roundtrip(&CreateP256SessionKeyOutput {
             pub_key_x: [0xaa; 32],
             pub_key_y: [0xbb; 32],
+            jwt_kid: "v1".to_string(),
+            jwt_header_b64: "eyJhbGciOiJIUzI1NiJ9".to_string(),
+            jwt_payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+            jwt_hmac: [0xcc; 32],
         });
     }
 

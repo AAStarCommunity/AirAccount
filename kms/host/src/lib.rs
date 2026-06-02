@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#![type_length_limit = "8388608"]
+
 //! KMS Host Library
 //! Shared modules for CLI and API server
 

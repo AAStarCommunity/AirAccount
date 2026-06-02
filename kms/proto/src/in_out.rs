@@ -204,12 +204,27 @@ pub struct WarmupCacheOutput {
 pub struct CreateAgentKeyInput {
     pub wallet_id: Uuid,
     pub agent_index: u32,
+    /// JWT sub claim (typically the human key ID string).
+    pub subject: String,
+    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    /// TA computes iat = now() internally; host does not supply iat.
+    pub ttl_secs: i64,
+    /// Passkey assertion — mandatory when wallet has a PassKey bound.
+    /// TA verifies this before creating/refreshing agent credentials.
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateAgentKeyOutput {
     pub agent_address: [u8; 20],
     pub public_key_compressed: Vec<u8>,
+    /// JWT material for assembling the credential on the host side.
+    /// wallet_id and agent_index in the payload are TEE-constructed (not host-supplied).
+    pub jwt_kid: String,
+    pub jwt_header_b64: String,
+    pub jwt_payload_b64: String,
+    pub jwt_hmac: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -236,17 +251,6 @@ pub struct SignAgentUserOpOutput {
 // JWT HMAC Commands
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignInput {
-    pub message: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtHmacSignOutput {
-    pub hmac: [u8; 32],
-    pub kid: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct JwtHmacVerifyInput {
     pub kid: String,
     pub message: Vec<u8>,
@@ -267,19 +271,6 @@ pub struct JwtRotateSecretInput {
 pub struct JwtRotateSecretOutput {
     pub new_kid: String,
     pub retired_kid: Option<String>,
-}
-
-// Single-call payload signing — atomically picks current kid, builds header, signs
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadInput {
-    pub payload_b64: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct JwtSignPayloadOutput {
-    pub kid: String,
-    pub header_b64: String,
-    pub hmac: [u8; 32],
 }
 
 // EIP-712 Typed Data Signing
@@ -339,8 +330,17 @@ pub struct SignTypedDataInput {
     pub types: Vec<Eip712TypeDef>,
     /// The message values for the primary type
     pub message: Vec<Eip712FieldValue>,
+    /// Passkey assertion for WebAuthn path. TA verifies this independently.
     #[serde(default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
+    /// JWT proof fields for agent-key auth path (defense-in-depth: TA verifies HMAC independently).
+    /// All three must be Some together; absent on WebAuthn path.
+    #[serde(default)]
+    pub jwt_kid: Option<String>,
+    #[serde(default)]
+    pub jwt_signing_input: Option<Vec<u8>>,
+    #[serde(default)]
+    pub jwt_hmac: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -356,6 +356,10 @@ pub struct SignTypedDataOutput {
 pub struct CreateP256SessionKeyInput {
     pub wallet_id: Uuid,
     pub session_index: u32,
+    /// JWT sub claim (typically the human key ID string).
+    pub subject: String,
+    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    pub ttl_secs: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -364,6 +368,11 @@ pub struct CreateP256SessionKeyOutput {
     pub pub_key_x: [u8; 32],
     /// P-256 public key Y coordinate (32 bytes big-endian)
     pub pub_key_y: [u8; 32],
+    /// JWT material for assembling the session credential on the host side.
+    pub jwt_kid: String,
+    pub jwt_header_b64: String,
+    pub jwt_payload_b64: String,
+    pub jwt_hmac: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -382,6 +391,65 @@ pub struct SignP256UserOpInput {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SignP256UserOpOutput {
     /// 149 bytes: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
+    pub signature: Vec<u8>,
+}
+
+// Grant Session Signing — owner generates off-chain sig; relayer submits on-chain
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignGrantSessionInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub chain_id: u64,
+    pub verifying_contract: [u8; 20],
+    pub account: [u8; 20],
+    pub session_key: [u8; 20],
+    pub expiry: u64,
+    pub contract_scope: [u8; 20],
+    pub selector_scope: [u8; 4],
+    pub velocity_limit: u16,
+    pub velocity_window: u32,
+    /// Raw address list — TA computes keccak256(abi.encodePacked(callTargets))
+    pub call_targets: Vec<[u8; 20]>,
+    /// Raw 4-byte selector list — TA computes keccak256(abi.encodePacked(selectorAllowlist))
+    pub selector_allowlist: Vec<[u8; 4]>,
+    /// Big-endian uint256 nonce from grantNonces[account][sessionKey] on-chain
+    pub nonce: [u8; 32],
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignGrantSessionOutput {
+    /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256GrantSessionInput {
+    pub wallet_id: Uuid,
+    pub hd_path: String,
+    pub chain_id: u64,
+    pub verifying_contract: [u8; 20],
+    pub account: [u8; 20],
+    pub key_x: [u8; 32],
+    pub key_y: [u8; 32],
+    pub expiry: u64,
+    pub contract_scope: [u8; 20],
+    pub selector_scope: [u8; 4],
+    pub velocity_limit: u16,
+    pub velocity_window: u32,
+    pub call_targets: Vec<[u8; 20]>,
+    pub selector_allowlist: Vec<[u8; 4]>,
+    /// Big-endian uint256 nonce from grantNonces_p256[account][keyHash] on-chain
+    pub nonce: [u8; 32],
+    #[serde(default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SignP256GrantSessionOutput {
+    /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
     pub signature: Vec<u8>,
 }
 
