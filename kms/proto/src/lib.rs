@@ -99,9 +99,15 @@ mod tests {
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
-        assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
+        assert!(matches!(
+            Command::from(18u32),
+            Command::CreateP256SessionKey
+        ));
         assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
-        assert!(matches!(Command::from(20u32), Command::DeleteP256SessionKey));
+        assert!(matches!(
+            Command::from(20u32),
+            Command::DeleteP256SessionKey
+        ));
     }
 
     #[test]
@@ -372,7 +378,7 @@ mod tests {
             account_address: [0xab; 20],
         });
         bincode_roundtrip(&SignAgentUserOpOutput {
-            signature: vec![0u8; 106],  // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
+            signature: vec![0u8; 106], // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
         });
     }
 
@@ -521,9 +527,18 @@ mod tests {
             types: vec![Eip712TypeDef {
                 name: "Transfer".into(),
                 fields: vec![
-                    Eip712TypeField { name: "to".into(), field_type: "address".into() },
-                    Eip712TypeField { name: "amount".into(), field_type: "uint256".into() },
-                    Eip712TypeField { name: "memo".into(), field_type: "string".into() },
+                    Eip712TypeField {
+                        name: "to".into(),
+                        field_type: "address".into(),
+                    },
+                    Eip712TypeField {
+                        name: "amount".into(),
+                        field_type: "uint256".into(),
+                    },
+                    Eip712TypeField {
+                        name: "memo".into(),
+                        field_type: "string".into(),
+                    },
                 ],
             }],
             message: vec![

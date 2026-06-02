@@ -2,22 +2,22 @@
 // Real TA integration only - requires OP-TEE environment
 // Deploy to QEMU for testing, production-ready architecture
 
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use hex;
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use anyhow::{Result, anyhow};
 use warp::Filter;
-use hex;
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-use p256::EncodedPoint;
 
 // Import from kms library and proto
-use kms::ta_client::TeeHandle;
+use kms::agent_jwt;
 use kms::db::{AgentKeyRow, KmsDb, WalletRow};
 use kms::rate_limit::RateLimiter;
+use kms::ta_client::TeeHandle;
 use kms::webauthn;
-use kms::agent_jwt;
 use proto;
 
 /// Estimated seconds per TEE operation with persistent session
@@ -144,15 +144,27 @@ pub struct SignRequest {
     // Old: KeyId + DerivationPath (backward compatibility)
     #[serde(rename = "KeyId", skip_serializing_if = "Option::is_none", default)]
     pub key_id: Option<String>,
-    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "DerivationPath",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub derivation_path: Option<String>,
     // Transaction signing mode (original)
-    #[serde(rename = "Transaction", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "Transaction",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub transaction: Option<EthereumTransaction>,
     // Message signing mode (new)
     #[serde(rename = "Message", skip_serializing_if = "Option::is_none", default)]
     pub message: Option<String>,
-    #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "SigningAlgorithm",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub signing_algorithm: Option<String>,
     /// Legacy: raw PassKey assertion (hex)
     #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
@@ -176,11 +188,19 @@ pub struct SignHashRequest {
     pub key_id: Option<String>,
     #[serde(rename = "Address", skip_serializing_if = "Option::is_none", default)]
     pub address: Option<String>,
-    #[serde(rename = "DerivationPath", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "DerivationPath",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub derivation_path: Option<String>,
     #[serde(rename = "Hash")]
     pub hash: String,
-    #[serde(rename = "SigningAlgorithm", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "SigningAlgorithm",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub signing_algorithm: Option<String>,
     /// Legacy: raw PassKey assertion (hex)
     #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
@@ -200,7 +220,10 @@ pub struct SignHashResponse {
 pub struct DeleteKeyRequest {
     #[serde(rename = "KeyId")]
     pub key_id: String,
-    #[serde(rename = "PendingWindowInDays", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "PendingWindowInDays",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pending_window_in_days: Option<i32>,
     /// Legacy: raw PassKey assertion (hex)
     #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
@@ -254,7 +277,7 @@ pub struct KeyStatusResponse {
     #[serde(rename = "KeyId")]
     pub key_id: String,
     #[serde(rename = "Status")]
-    pub status: String,  // "creating" | "deriving" | "ready" | "error"
+    pub status: String, // "creating" | "deriving" | "ready" | "error"
     #[serde(rename = "Address", skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     #[serde(rename = "PublicKey", skip_serializing_if = "Option::is_none")]
@@ -274,7 +297,6 @@ pub struct QueueStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<usize>,
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChangePasskeyRequest {
@@ -367,7 +389,9 @@ pub struct SignAgentRequest {
     pub account_address: String,
 }
 
-fn default_secp256k1() -> String { "secp256k1".to_string() }
+fn default_secp256k1() -> String {
+    "secp256k1".to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignAgentResponse {
@@ -465,7 +489,9 @@ pub struct SignTypedDataRequest {
     pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
-fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
+fn default_hd_path() -> String {
+    "m/44'/60'/0'/0/0".to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignTypedDataResponse {
@@ -547,11 +573,15 @@ pub struct SignP256UserOpResponse {
 fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
     let parts: Vec<&str> = key_id.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(anyhow!("Invalid agent keyId format (expected wallet_id:index): {}", key_id));
+        return Err(anyhow!(
+            "Invalid agent keyId format (expected wallet_id:index): {}",
+            key_id
+        ));
     }
     let wallet_id = Uuid::parse_str(parts[0])
         .map_err(|_| anyhow!("Invalid wallet_id in agent keyId: {}", parts[0]))?;
-    let agent_index: u32 = parts[1].parse()
+    let agent_index: u32 = parts[1]
+        .parse()
         .map_err(|_| anyhow!("Invalid agent_index in keyId: {}", parts[1]))?;
     Ok((wallet_id, agent_index))
 }
@@ -559,10 +589,14 @@ fn parse_agent_key_id(key_id: &str) -> Result<(Uuid, u32)> {
 /// Convert a JSON value to a proto::Eip712Value using the declared ABI type for guidance.
 ///
 /// Supported types: address, uint*, int*, bytes32, bytes*, bool, string
-fn json_to_eip712_value(json_val: &serde_json::Value, declared_type: &str) -> Result<proto::Eip712Value> {
+fn json_to_eip712_value(
+    json_val: &serde_json::Value,
+    declared_type: &str,
+) -> Result<proto::Eip712Value> {
     let t = declared_type.trim();
     if t == "address" {
-        let s = json_val.as_str()
+        let s = json_val
+            .as_str()
             .ok_or_else(|| anyhow!("address field must be a JSON string"))?;
         let bytes = hex::decode(s.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid address hex '{}': {}", s, e))?;
@@ -574,29 +608,36 @@ fn json_to_eip712_value(json_val: &serde_json::Value, declared_type: &str) -> Re
         return Ok(proto::Eip712Value::Address(arr));
     }
     if t == "bool" {
-        let b = json_val.as_bool()
+        let b = json_val
+            .as_bool()
             .ok_or_else(|| anyhow!("bool field must be a JSON boolean"))?;
         return Ok(proto::Eip712Value::Bool(b));
     }
     if t == "string" {
-        let s = json_val.as_str()
+        let s = json_val
+            .as_str()
             .ok_or_else(|| anyhow!("string field must be a JSON string"))?;
         return Ok(proto::Eip712Value::Str(s.to_string()));
     }
     if t == "bytes32" {
-        let s = json_val.as_str()
+        let s = json_val
+            .as_str()
             .ok_or_else(|| anyhow!("bytes32 field must be a JSON hex string"))?;
         let bytes = hex::decode(s.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid bytes32 hex '{}': {}", s, e))?;
         if bytes.len() != 32 {
-            return Err(anyhow!("bytes32 must be exactly 32 bytes, got {}", bytes.len()));
+            return Err(anyhow!(
+                "bytes32 must be exactly 32 bytes, got {}",
+                bytes.len()
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         return Ok(proto::Eip712Value::Bytes32(arr));
     }
     if t.starts_with("bytes") {
-        let s = json_val.as_str()
+        let s = json_val
+            .as_str()
             .ok_or_else(|| anyhow!("bytes field must be a JSON hex string"))?;
         let bytes = hex::decode(s.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid bytes hex '{}': {}", s, e))?;
@@ -609,16 +650,19 @@ fn json_to_eip712_value(json_val: &serde_json::Value, declared_type: &str) -> Re
         } else if let Some(s) = json_val.as_str() {
             let hex_str = s.trim_start_matches("0x");
             if s.starts_with("0x") {
-                hex::decode(hex_str)
-                    .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?
+                hex::decode(hex_str).map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?
             } else {
                 // Decimal string — parse as u128 max (covers uint8–uint128)
-                let n: u128 = s.parse()
+                let n: u128 = s
+                    .parse()
                     .map_err(|_| anyhow!("Invalid uint decimal '{}'", s))?;
                 n.to_be_bytes().to_vec()
             }
         } else {
-            return Err(anyhow!("uint/int field must be number or string, got {:?}", json_val));
+            return Err(anyhow!(
+                "uint/int field must be number or string, got {:?}",
+                json_val
+            ));
         };
         return Ok(proto::Eip712Value::Uint(be_bytes));
     }
@@ -632,10 +676,16 @@ fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     }
     let total_len = der[1] as usize;
     if total_len > 0x7F {
-        return Err(anyhow!("Invalid DER signature: long-form length not supported"));
+        return Err(anyhow!(
+            "Invalid DER signature: long-form length not supported"
+        ));
     }
     if 2 + total_len > der.len() {
-        return Err(anyhow!("Invalid DER signature: declared length {} exceeds data {}", total_len, der.len()));
+        return Err(anyhow!(
+            "Invalid DER signature: declared length {} exceeds data {}",
+            total_len,
+            der.len()
+        ));
     }
     let mut pos = 2;
     if pos >= der.len() || der[pos] != 0x02 {
@@ -648,7 +698,12 @@ fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     let r_len = der[pos] as usize;
     pos += 1;
     if pos + r_len > der.len() {
-        return Err(anyhow!("Invalid DER signature: r overflows buffer (r_len={} pos={} len={})", r_len, pos, der.len()));
+        return Err(anyhow!(
+            "Invalid DER signature: r overflows buffer (r_len={} pos={} len={})",
+            r_len,
+            pos,
+            der.len()
+        ));
     }
     let r_raw = &der[pos..pos + r_len];
     pos += r_len;
@@ -662,7 +717,12 @@ fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     let s_len = der[pos] as usize;
     pos += 1;
     if pos + s_len > der.len() {
-        return Err(anyhow!("Invalid DER signature: s overflows buffer (s_len={} pos={} len={})", s_len, pos, der.len()));
+        return Err(anyhow!(
+            "Invalid DER signature: s overflows buffer (s_len={} pos={} len={})",
+            s_len,
+            pos,
+            der.len()
+        ));
     }
     let s_raw = &der[pos..pos + s_len];
 
@@ -687,7 +747,10 @@ fn parse_der_signature(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
 // ========================================
 
 fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
-    let creation_date = w.created_at.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+    let creation_date = w
+        .created_at
+        .parse::<DateTime<Utc>>()
+        .unwrap_or_else(|_| Utc::now());
     KeyMetadata {
         key_id: w.key_id.clone(),
         address: w.address.clone(),
@@ -732,7 +795,10 @@ impl KmsApiServer {
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
         let agent_rate_limiter = RateLimiter::new(agent_rl_limit);
-        println!("⏱️  Agent rate limiter: {}/min per credential", agent_rl_limit);
+        println!(
+            "⏱️  Agent rate limiter: {}/min per credential",
+            agent_rl_limit
+        );
         Self {
             db,
             tee: TeeHandle::new(),
@@ -753,7 +819,10 @@ impl KmsApiServer {
     /// Accepted: m/44'/60'/0'/0/N where N is 0-9999.
     fn validate_derivation_path(path: &str) -> Result<()> {
         if path.len() > 64 {
-            return Err(anyhow!("Derivation path too long: {} chars (max 64)", path.len()));
+            return Err(anyhow!(
+                "Derivation path too long: {} chars (max 64)",
+                path.len()
+            ));
         }
         if !path.starts_with("m/") {
             return Err(anyhow!("Derivation path must start with 'm/': {}", path));
@@ -762,7 +831,11 @@ impl KmsApiServer {
         for part in path[2..].split('/') {
             let num_str = part.trim_end_matches('\'');
             if num_str.parse::<u32>().is_err() {
-                return Err(anyhow!("Invalid derivation path component '{}' in: {}", part, path));
+                return Err(anyhow!(
+                    "Invalid derivation path component '{}' in: {}",
+                    part,
+                    path
+                ));
             }
         }
         Ok(())
@@ -777,10 +850,12 @@ impl KmsApiServer {
     /// Validate hex-encoded hash (must be exactly 32 bytes = 64 hex chars).
     fn parse_address_hex(addr: &str) -> Result<[u8; 20]> {
         let hex_str = addr.trim_start_matches("0x");
-        let bytes = hex::decode(hex_str)
-            .map_err(|e| anyhow!("Invalid address hex: {}", e))?;
+        let bytes = hex::decode(hex_str).map_err(|e| anyhow!("Invalid address hex: {}", e))?;
         if bytes.len() != 20 {
-            return Err(anyhow!("Address must be exactly 20 bytes, got {}", bytes.len()));
+            return Err(anyhow!(
+                "Address must be exactly 20 bytes, got {}",
+                bytes.len()
+            ));
         }
         let mut arr = [0u8; 20];
         arr.copy_from_slice(&bytes);
@@ -789,10 +864,12 @@ impl KmsApiServer {
 
     fn validate_hash_hex(hash: &str) -> Result<[u8; 32]> {
         let hex_str = hash.trim_start_matches("0x");
-        let bytes = hex::decode(hex_str)
-            .map_err(|e| anyhow!("Invalid hash hex: {}", e))?;
+        let bytes = hex::decode(hex_str).map_err(|e| anyhow!("Invalid hash hex: {}", e))?;
         if bytes.len() != 32 {
-            return Err(anyhow!("Hash must be exactly 32 bytes, got {} bytes", bytes.len()));
+            return Err(anyhow!(
+                "Hash must be exactly 32 bytes, got {} bytes",
+                bytes.len()
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -803,7 +880,11 @@ impl KmsApiServer {
     fn validate_message(message: &str) -> Result<()> {
         let max_len = 64 * 1024; // 64KB
         if message.len() > max_len {
-            return Err(anyhow!("Message too large: {} bytes (max {})", message.len(), max_len));
+            return Err(anyhow!(
+                "Message too large: {} bytes (max {})",
+                message.len(),
+                max_len
+            ));
         }
         Ok(())
     }
@@ -813,8 +894,8 @@ impl KmsApiServer {
 
         // Decode and validate passkey public key (mandatory)
         let pk_hex = req.passkey_public_key.trim_start_matches("0x");
-        let passkey_pubkey = hex::decode(pk_hex)
-            .map_err(|e| anyhow!("Invalid PasskeyPublicKey hex: {}", e))?;
+        let passkey_pubkey =
+            hex::decode(pk_hex).map_err(|e| anyhow!("Invalid PasskeyPublicKey hex: {}", e))?;
         if passkey_pubkey.len() != 65 || passkey_pubkey[0] != 0x04 {
             return Err(anyhow!(
                 "PasskeyPublicKey must be 65 bytes uncompressed (0x04||x||y), got {} bytes",
@@ -866,17 +947,33 @@ impl KmsApiServer {
                 Ok((_wid, address_bytes, public_key, derivation_path)) => {
                     let address_hex = format!("0x{}", hex::encode(&address_bytes));
                     let pubkey_hex = format!("0x{}", hex::encode(&public_key));
-                    println!("✅ Background derivation done for {}: {}", wallet_id, address_hex);
+                    println!(
+                        "✅ Background derivation done for {}: {}",
+                        wallet_id, address_hex
+                    );
 
                     let _ = db.update_wallet_derived(
-                        &wallet_id.to_string(), &address_hex, &pubkey_hex, &derivation_path, "ready",
+                        &wallet_id.to_string(),
+                        &address_hex,
+                        &pubkey_hex,
+                        &derivation_path,
+                        "ready",
                     );
-                    let _ = db.upsert_address(&address_hex, &wallet_id.to_string(), &derivation_path, Some(&pubkey_hex));
+                    let _ = db.upsert_address(
+                        &address_hex,
+                        &wallet_id.to_string(),
+                        &derivation_path,
+                        Some(&pubkey_hex),
+                    );
                 }
                 Err(e) => {
                     let err_msg = format!("{}", e);
-                    eprintln!("❌ Background derivation failed for {}: {}", wallet_id, err_msg);
-                    let _ = db.update_wallet_status(&wallet_id.to_string(), "error", Some(&err_msg));
+                    eprintln!(
+                        "❌ Background derivation failed for {}: {}",
+                        wallet_id, err_msg
+                    );
+                    let _ =
+                        db.update_wallet_status(&wallet_id.to_string(), "error", Some(&err_msg));
                 }
             }
         });
@@ -890,26 +987,35 @@ impl KmsApiServer {
     pub async fn describe_key(&self, req: DescribeKeyRequest) -> Result<DescribeKeyResponse> {
         println!("📝 KMS DescribeKey API called for key: {}", req.key_id);
 
-        let w = self.db.get_wallet(&req.key_id)?
+        let w = self
+            .db
+            .get_wallet(&req.key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", req.key_id))?;
 
-        Ok(DescribeKeyResponse { key_metadata: wallet_to_metadata(&w) })
+        Ok(DescribeKeyResponse {
+            key_metadata: wallet_to_metadata(&w),
+        })
     }
 
     pub async fn list_keys(&self, _req: ListKeysRequest) -> Result<ListKeysResponse> {
         println!("📝 KMS ListKeys API called");
 
         let wallets = self.db.list_wallets()?;
-        let keys = wallets.iter().map(|w| KeyListEntry {
-            key_id: w.key_id.clone(),
-            key_arn: format!("arn:aws:kms:region:account:key/{}", w.key_id),
-        }).collect();
+        let keys = wallets
+            .iter()
+            .map(|w| KeyListEntry {
+                key_id: w.key_id.clone(),
+                key_arn: format!("arn:aws:kms:region:account:key/{}", w.key_id),
+            })
+            .collect();
 
         Ok(ListKeysResponse { keys })
     }
 
     pub async fn key_status(&self, key_id: &str) -> Result<KeyStatusResponse> {
-        let w = self.db.get_wallet(key_id)?
+        let w = self
+            .db
+            .get_wallet(key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
 
         let (status, error) = if w.status.starts_with("error") {
@@ -959,13 +1065,15 @@ impl KmsApiServer {
         }
 
         // Resolve current passkey assertion (WebAuthn or legacy hex)
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &req.key_id, req.passkey.as_ref(), req.webauthn.as_ref(),
-        ).await?;
+        let passkey_assertion = self
+            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .await?;
 
         // Change passkey in TEE secure storage (TA verifies current passkey first)
         let wallet_uuid = uuid::Uuid::parse_str(&req.key_id)?;
-        self.tee.register_passkey_ta(wallet_uuid, &pubkey_bytes, passkey_assertion).await?;
+        self.tee
+            .register_passkey_ta(wallet_uuid, &pubkey_bytes, passkey_assertion)
+            .await?;
 
         // Update DB
         let new_pk = format!("0x{}", pubkey_hex);
@@ -979,7 +1087,9 @@ impl KmsApiServer {
 
     /// Parse API-layer PasskeyAssertion (hex strings) into proto::PasskeyAssertion (bytes).
     /// Returns None if no assertion provided — TA will decide whether to allow or reject.
-    fn parse_passkey_assertion(passkey: Option<&PasskeyAssertion>) -> Result<Option<proto::PasskeyAssertion>> {
+    fn parse_passkey_assertion(
+        passkey: Option<&PasskeyAssertion>,
+    ) -> Result<Option<proto::PasskeyAssertion>> {
         let assertion = match passkey {
             Some(a) => a,
             None => return Ok(None),
@@ -1024,8 +1134,8 @@ impl KmsApiServer {
     /// Uses Verifier::verify(msg, sig) which internally hashes msg with SHA-256.
     fn verify_passkey_ca(pubkey_hex: &str, assertion: &proto::PasskeyAssertion) -> Result<()> {
         let pk_hex = pubkey_hex.trim_start_matches("0x");
-        let pk_bytes = hex::decode(pk_hex)
-            .map_err(|e| anyhow!("Invalid stored passkey pubkey hex: {}", e))?;
+        let pk_bytes =
+            hex::decode(pk_hex).map_err(|e| anyhow!("Invalid stored passkey pubkey hex: {}", e))?;
 
         let encoded_point = EncodedPoint::from_bytes(&pk_bytes)
             .map_err(|e| anyhow!("Invalid passkey public key point: {:?}", e))?;
@@ -1042,7 +1152,8 @@ impl KmsApiServer {
         let signature = Signature::from_scalars(assertion.signature_r, assertion.signature_s)
             .map_err(|e| anyhow!("Invalid passkey signature: {:?}", e))?;
 
-        verifying_key.verify(&msg, &signature)
+        verifying_key
+            .verify(&msg, &signature)
             .map_err(|_| anyhow!("PassKey verification failed (CA pre-check)"))?;
 
         Ok(())
@@ -1050,9 +1161,12 @@ impl KmsApiServer {
 
     /// Pre-verify passkey at CA level if metadata has pubkey and assertion is present.
     /// Rejects bad signatures before they reach TA queue.
-    async fn pre_verify_passkey(&self, key_id: &str, assertion: &Option<proto::PasskeyAssertion>) -> Result<()> {
-        let pubkey_hex = self.db.get_wallet(key_id)?
-            .and_then(|w| w.passkey_pubkey);
+    async fn pre_verify_passkey(
+        &self,
+        key_id: &str,
+        assertion: &Option<proto::PasskeyAssertion>,
+    ) -> Result<()> {
+        let pubkey_hex = self.db.get_wallet(key_id)?.and_then(|w| w.passkey_pubkey);
 
         if let (Some(ref pk), Some(ref a)) = (pubkey_hex, assertion) {
             Self::verify_passkey_ca(pk, a)?;
@@ -1072,7 +1186,9 @@ impl KmsApiServer {
     ) -> Result<Option<proto::PasskeyAssertion>> {
         if let Some(wa) = wa {
             // WebAuthn ceremony path
-            let challenge_row = self.db.consume_challenge(&wa.challenge_id)?
+            let challenge_row = self
+                .db
+                .consume_challenge(&wa.challenge_id)?
                 .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
 
             // challenge must be bound to this key
@@ -1082,10 +1198,13 @@ impl KmsApiServer {
                 }
             }
 
-            let w = self.db.get_wallet(key_id)?
+            let w = self
+                .db
+                .get_wallet(key_id)?
                 .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
 
-            let pubkey_hex = w.passkey_pubkey
+            let pubkey_hex = w
+                .passkey_pubkey
                 .ok_or_else(|| anyhow!("Wallet has no passkey public key"))?;
             let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
@@ -1100,7 +1219,9 @@ impl KmsApiServer {
             )?;
 
             // Update sign_count in DB
-            let _ = self.db.update_wallet_sign_count(key_id, verified.new_counter);
+            let _ = self
+                .db
+                .update_wallet_sign_count(key_id, verified.new_counter);
 
             Ok(Some(verified.proto_assertion))
         } else if raw.is_some() {
@@ -1126,10 +1247,13 @@ impl KmsApiServer {
         if !self.db.wallet_exists(&req.key_id)? {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &req.key_id, req.passkey.as_ref(), req.webauthn.as_ref(),
-        ).await?;
-        let address_bytes = self.tee.derive_address(wallet_uuid, &req.derivation_path, passkey_assertion).await?;
+        let passkey_assertion = self
+            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .await?;
+        let address_bytes = self
+            .tee
+            .derive_address(wallet_uuid, &req.derivation_path, passkey_assertion)
+            .await?;
 
         let address = format!("0x{}", hex::encode(&address_bytes));
 
@@ -1149,12 +1273,19 @@ impl KmsApiServer {
         let (wallet_uuid, derivation_path) = if let Some(ref address) = req.address {
             println!("📝 KMS Sign API called with Address: {}", address);
 
-            let row = self.db.lookup_address(address)?
+            let row = self
+                .db
+                .lookup_address(address)?
                 .ok_or_else(|| anyhow!("Address not found: {}", address))?;
 
             (Uuid::parse_str(&row.key_id)?, row.derivation_path)
-        } else if let (Some(ref key_id), Some(ref path)) = (req.key_id.as_ref(), req.derivation_path.as_ref()) {
-            println!("📝 KMS Sign API called with KeyId: {}, Path: {}", key_id, path);
+        } else if let (Some(ref key_id), Some(ref path)) =
+            (req.key_id.as_ref(), req.derivation_path.as_ref())
+        {
+            println!(
+                "📝 KMS Sign API called with KeyId: {}, Path: {}",
+                key_id, path
+            );
 
             if !self.db.wallet_exists(key_id)? {
                 return Err(anyhow!("Key not found: {}", key_id));
@@ -1169,9 +1300,9 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, req.passkey.as_ref(), req.webauthn.as_ref(),
-        ).await?;
+        let passkey_assertion = self
+            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .await?;
 
         // Prepare sign payload
         let signature = if let Some(transaction) = req.transaction {
@@ -1182,7 +1313,10 @@ impl KmsApiServer {
                 hex::decode(&transaction.to)
             }?;
             if to_bytes.len() != 20 {
-                return Err(anyhow!("Transaction.to must be 20 bytes (40 hex chars), got {} bytes", to_bytes.len()));
+                return Err(anyhow!(
+                    "Transaction.to must be 20 bytes (40 hex chars), got {} bytes",
+                    to_bytes.len()
+                ));
             }
             let mut to_array = [0u8; 20];
             to_array.copy_from_slice(&to_bytes);
@@ -1198,11 +1332,21 @@ impl KmsApiServer {
                 nonce: transaction.nonce as u128,
                 to: Some(to_array),
                 value: u128::from_str_radix(&transaction.value.trim_start_matches("0x"), 16)?,
-                gas_price: u128::from_str_radix(&transaction.gas_price.trim_start_matches("0x"), 16)?,
+                gas_price: u128::from_str_radix(
+                    &transaction.gas_price.trim_start_matches("0x"),
+                    16,
+                )?,
                 gas: transaction.gas as u128,
                 data,
             };
-            self.tee.sign_transaction(wallet_uuid, &derivation_path, eth_transaction, passkey_assertion.clone()).await?
+            self.tee
+                .sign_transaction(
+                    wallet_uuid,
+                    &derivation_path,
+                    eth_transaction,
+                    passkey_assertion.clone(),
+                )
+                .await?
         } else if let Some(message) = req.message {
             println!("  📝 Message signing mode");
             let message_bytes = if message.starts_with("0x") {
@@ -1210,7 +1354,14 @@ impl KmsApiServer {
             } else {
                 base64::decode(&message).unwrap_or_else(|_| message.as_bytes().to_vec())
             };
-            self.tee.sign_message(wallet_uuid, &derivation_path, &message_bytes, passkey_assertion).await?
+            self.tee
+                .sign_message(
+                    wallet_uuid,
+                    &derivation_path,
+                    &message_bytes,
+                    passkey_assertion,
+                )
+                .await?
         } else {
             return Err(anyhow!("Either Transaction or Message must be provided"));
         };
@@ -1232,17 +1383,22 @@ impl KmsApiServer {
         let (wallet_uuid, derivation_path) = if let Some(address) = &req.address {
             println!("📝 KMS SignHash API called with Address: {}", address);
 
-            let row = self.db.lookup_address(address)?
+            let row = self
+                .db
+                .lookup_address(address)?
                 .ok_or_else(|| anyhow!("Address not found: {}", address))?;
 
             (Self::validate_key_id(&row.key_id)?, row.derivation_path)
         } else if let Some(key_id) = &req.key_id {
             println!("📝 KMS SignHash API called with KeyId: {}", key_id);
 
-            let w = self.db.get_wallet(key_id)?
+            let w = self
+                .db
+                .get_wallet(key_id)?
                 .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
 
-            let derivation_path = req.derivation_path
+            let derivation_path = req
+                .derivation_path
                 .or(w.derivation_path)
                 .ok_or_else(|| anyhow!("No derivation path available for this key"))?;
 
@@ -1256,11 +1412,19 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &key_id_str, req.passkey.as_ref(), req.webauthn.as_ref(),
-        ).await?;
+        let passkey_assertion = self
+            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .await?;
 
-        let signature = self.tee.sign_hash(wallet_uuid, &derivation_path, &hash_array, passkey_assertion).await?;
+        let signature = self
+            .tee
+            .sign_hash(
+                wallet_uuid,
+                &derivation_path,
+                &hash_array,
+                passkey_assertion,
+            )
+            .await?;
 
         Ok(SignHashResponse {
             signature: hex::encode(&signature),
@@ -1270,12 +1434,16 @@ impl KmsApiServer {
     pub async fn get_public_key(&self, req: GetPublicKeyRequest) -> Result<GetPublicKeyResponse> {
         println!("📝 KMS GetPublicKey API called for key: {}", req.key_id);
 
-        let w = self.db.get_wallet(&req.key_id)?
+        let w = self
+            .db
+            .get_wallet(&req.key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", req.key_id))?;
 
         Ok(GetPublicKeyResponse {
             key_id: req.key_id,
-            public_key: w.public_key.unwrap_or_else(|| "[PUBLIC_KEY_PENDING]".to_string()),
+            public_key: w
+                .public_key
+                .unwrap_or_else(|| "[PUBLIC_KEY_PENDING]".to_string()),
             key_usage: w.key_usage,
             key_spec: w.key_spec,
         })
@@ -1285,10 +1453,12 @@ impl KmsApiServer {
         println!("📝 KMS DeleteKey API called for key: {}", req.key_id);
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let passkey_assertion = self.resolve_passkey_assertion(
-            &req.key_id, req.passkey.as_ref(), req.webauthn.as_ref(),
-        ).await?;
-        self.tee.remove_wallet(wallet_uuid, passkey_assertion).await?;
+        let passkey_assertion = self
+            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .await?;
+        self.tee
+            .remove_wallet(wallet_uuid, passkey_assertion)
+            .await?;
 
         // Remove from DB (CASCADE deletes address_index entries)
         self.db.delete_wallet(&req.key_id)?;
@@ -1325,17 +1495,38 @@ impl KmsApiServer {
         self.rp_ids[0].clone()
     }
 
-    pub async fn begin_registration(&self, req: webauthn::BeginRegistrationRequest, origin_header: Option<&str>) -> Result<webauthn::RegistrationOptionsResponse> {
+    pub async fn begin_registration(
+        &self,
+        req: webauthn::BeginRegistrationRequest,
+        origin_header: Option<&str>,
+    ) -> Result<webauthn::RegistrationOptionsResponse> {
         let user_name = req.user_name.as_deref().unwrap_or("wallet-user");
-        let user_display = req.user_display_name.as_deref().unwrap_or("AirAccount Wallet");
+        let user_display = req
+            .user_display_name
+            .as_deref()
+            .unwrap_or("AirAccount Wallet");
         let rp_id = self.resolve_rp_id(origin_header);
-        println!("🔑 WebAuthn rpId resolved: {} (from origin: {:?})", rp_id, req.origin);
-
-        let (challenge_id, challenge_bytes, resp) = webauthn::generate_registration_options(
-            &self.rp_name, &rp_id, user_name, user_display, vec![],
+        println!(
+            "🔑 WebAuthn rpId resolved: {} (from origin: {:?})",
+            rp_id, req.origin
         );
 
-        self.db.store_challenge(&challenge_id, &challenge_bytes, None, "registration", &rp_id, 300)?;
+        let (challenge_id, challenge_bytes, resp) = webauthn::generate_registration_options(
+            &self.rp_name,
+            &rp_id,
+            user_name,
+            user_display,
+            vec![],
+        );
+
+        self.db.store_challenge(
+            &challenge_id,
+            &challenge_bytes,
+            None,
+            "registration",
+            &rp_id,
+            300,
+        )?;
 
         // Stash description/key_usage/etc in challenge metadata (store as JSON in key_id field)
         let meta_json = serde_json::to_string(&serde_json::json!({
@@ -1347,33 +1538,51 @@ impl KmsApiServer {
         // Re-store with metadata in key_id field
         self.db.store_challenge(
             &format!("{}_meta", challenge_id),
-            meta_json.as_bytes(), None, "registration_meta", &rp_id, 300,
+            meta_json.as_bytes(),
+            None,
+            "registration_meta",
+            &rp_id,
+            300,
         )?;
 
-        println!("📝 WebAuthn BeginRegistration: challenge_id={}", challenge_id);
+        println!(
+            "📝 WebAuthn BeginRegistration: challenge_id={}",
+            challenge_id
+        );
         Ok(resp)
     }
 
-    pub async fn complete_registration(&self, req: webauthn::CompleteRegistrationRequest) -> Result<webauthn::CompleteRegistrationResponse> {
+    pub async fn complete_registration(
+        &self,
+        req: webauthn::CompleteRegistrationRequest,
+    ) -> Result<webauthn::CompleteRegistrationResponse> {
         // 1. Consume challenge
-        let challenge_row = self.db.consume_challenge(&req.challenge_id)?
+        let challenge_row = self
+            .db
+            .consume_challenge(&req.challenge_id)?
             .ok_or_else(|| anyhow!("Challenge not found or expired: {}", req.challenge_id))?;
 
         // 2. Load stashed metadata
-        let meta_row = self.db.consume_challenge(&format!("{}_meta", req.challenge_id))?;
+        let meta_row = self
+            .db
+            .consume_challenge(&format!("{}_meta", req.challenge_id))?;
         let (description, key_usage, key_spec, origin) = if let Some(mr) = meta_row {
             let v: serde_json::Value = serde_json::from_slice(&mr.challenge).unwrap_or_default();
             (
                 v["description"].as_str().unwrap_or("").to_string(),
                 v["key_usage"].as_str().unwrap_or("SIGN_VERIFY").to_string(),
-                v["key_spec"].as_str().unwrap_or("ECC_SECG_P256K1").to_string(),
+                v["key_spec"]
+                    .as_str()
+                    .unwrap_or("ECC_SECG_P256K1")
+                    .to_string(),
                 v["origin"].as_str().unwrap_or("EXTERNAL_KMS").to_string(),
             )
         } else {
             (
                 req.description.unwrap_or_default(),
                 req.key_usage.unwrap_or_else(|| "SIGN_VERIFY".to_string()),
-                req.key_spec.unwrap_or_else(|| "ECC_SECG_P256K1".to_string()),
+                req.key_spec
+                    .unwrap_or_else(|| "ECC_SECG_P256K1".to_string()),
                 req.origin.unwrap_or_else(|| "EXTERNAL_KMS".to_string()),
             )
         };
@@ -1381,11 +1590,17 @@ impl KmsApiServer {
         // 3. Verify attestation (use rpId from stored challenge, not hardcoded)
         let rp_id = &challenge_row.rp_id;
         let verified = webauthn::verify_registration_response(
-            &req.credential, &challenge_row.challenge, &self.expected_origins, rp_id,
+            &req.credential,
+            &challenge_row.challenge,
+            &self.expected_origins,
+            rp_id,
         )?;
 
-        println!("✅ WebAuthn registration verified, pubkey {} bytes, credential_id {} bytes",
-            verified.public_key.len(), verified.credential_id.len());
+        println!(
+            "✅ WebAuthn registration verified, pubkey {} bytes, credential_id {} bytes",
+            verified.public_key.len(),
+            verified.credential_id.len()
+        );
 
         // 4. Create wallet in TA with extracted P-256 pubkey
         let wallet_id = self.tee.create_wallet(&verified.public_key).await?;
@@ -1419,15 +1634,31 @@ impl KmsApiServer {
                 Ok((_wid, address_bytes, public_key, derivation_path)) => {
                     let address_hex = format!("0x{}", hex::encode(&address_bytes));
                     let pubkey_hex = format!("0x{}", hex::encode(&public_key));
-                    println!("✅ Background derivation done for {}: {}", wallet_id, address_hex);
-                    let _ = db.update_wallet_derived(
-                        &wallet_id.to_string(), &address_hex, &pubkey_hex, &derivation_path, "ready",
+                    println!(
+                        "✅ Background derivation done for {}: {}",
+                        wallet_id, address_hex
                     );
-                    let _ = db.upsert_address(&address_hex, &wallet_id.to_string(), &derivation_path, Some(&pubkey_hex));
+                    let _ = db.update_wallet_derived(
+                        &wallet_id.to_string(),
+                        &address_hex,
+                        &pubkey_hex,
+                        &derivation_path,
+                        "ready",
+                    );
+                    let _ = db.upsert_address(
+                        &address_hex,
+                        &wallet_id.to_string(),
+                        &derivation_path,
+                        Some(&pubkey_hex),
+                    );
                 }
                 Err(e) => {
                     eprintln!("❌ Background derivation failed for {}: {}", wallet_id, e);
-                    let _ = db.update_wallet_status(&wallet_id.to_string(), "error", Some(&e.to_string()));
+                    let _ = db.update_wallet_status(
+                        &wallet_id.to_string(),
+                        "error",
+                        Some(&e.to_string()),
+                    );
                 }
             }
         });
@@ -1439,19 +1670,27 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn begin_authentication(&self, req: webauthn::BeginAuthenticationRequest, origin_header: Option<&str>) -> Result<webauthn::AuthenticationOptionsResponse> {
+    pub async fn begin_authentication(
+        &self,
+        req: webauthn::BeginAuthenticationRequest,
+        origin_header: Option<&str>,
+    ) -> Result<webauthn::AuthenticationOptionsResponse> {
         // Resolve key_id from KeyId or Address
         let key_id = if let Some(ref kid) = req.key_id {
             kid.clone()
         } else if let Some(ref addr) = req.address {
-            let row = self.db.lookup_address(addr)?
+            let row = self
+                .db
+                .lookup_address(addr)?
                 .ok_or_else(|| anyhow!("Address not found: {}", addr))?;
             row.key_id
         } else {
             return Err(anyhow!("Must provide either KeyId or Address"));
         };
 
-        let w = self.db.get_wallet(&key_id)?
+        let w = self
+            .db
+            .get_wallet(&key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
 
         let allow_credentials = if let Some(ref cid) = w.credential_id {
@@ -1465,13 +1704,22 @@ impl KmsApiServer {
         };
 
         let rp_id = self.resolve_rp_id(origin_header);
-        let (challenge_id, challenge_bytes, resp) = webauthn::generate_authentication_options(
-            &rp_id, allow_credentials,
+        let (challenge_id, challenge_bytes, resp) =
+            webauthn::generate_authentication_options(&rp_id, allow_credentials);
+
+        self.db.store_challenge(
+            &challenge_id,
+            &challenge_bytes,
+            Some(&key_id),
+            "authentication",
+            &rp_id,
+            300,
+        )?;
+
+        println!(
+            "📝 WebAuthn BeginAuthentication: challenge_id={}, key_id={}",
+            challenge_id, key_id
         );
-
-        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(&key_id), "authentication", &rp_id, 300)?;
-
-        println!("📝 WebAuthn BeginAuthentication: challenge_id={}, key_id={}", challenge_id, key_id);
         Ok(resp)
     }
 
@@ -1479,11 +1727,16 @@ impl KmsApiServer {
     // Agent Key methods
     // ========================================
 
-    pub async fn create_agent_key(&self, req: CreateAgentKeyRequest) -> Result<CreateAgentKeyResponse> {
+    pub async fn create_agent_key(
+        &self,
+        req: CreateAgentKeyRequest,
+    ) -> Result<CreateAgentKeyResponse> {
         let wallet_id = Self::validate_key_id(&req.human_key_id)?;
 
         // Verify human wallet exists
-        let _wallet = self.db.get_wallet(&req.human_key_id)?
+        let _wallet = self
+            .db
+            .get_wallet(&req.human_key_id)?
             .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
 
         // Agent operations MUST use WebAuthn ceremony (challenge-based) to prevent replay attacks.
@@ -1491,11 +1744,13 @@ impl KmsApiServer {
         if req.webauthn_assertion.is_none() {
             return Err(anyhow!("create-agent-key requires WebAuthn ceremony (BeginAuthentication flow). Legacy passkey assertions are not accepted for agent operations."));
         }
-        let assertion = self.resolve_passkey_assertion(
-            &req.human_key_id,
-            None,  // reject legacy path
-            req.webauthn_assertion.as_ref(),
-        ).await?;
+        let assertion = self
+            .resolve_passkey_assertion(
+                &req.human_key_id,
+                None, // reject legacy path
+                req.webauthn_assertion.as_ref(),
+            )
+            .await?;
         if assertion.is_none() {
             return Err(anyhow!("Passkey assertion required to create agent key"));
         }
@@ -1518,7 +1773,8 @@ impl KmsApiServer {
             agent_index,
             &agent_address,
             3 * 24 * 3600,
-        ).await?;
+        )
+        .await?;
 
         // Store in DB — only credential_hash, never the full JWT
         let now = Utc::now().to_rfc3339();
@@ -1539,7 +1795,10 @@ impl KmsApiServer {
         })?;
 
         let key_id = format!("{}:{}", req.human_key_id, agent_index);
-        println!("✅ CreateAgentKey: wallet={} idx={} addr={}", req.human_key_id, agent_index, agent_address);
+        println!(
+            "✅ CreateAgentKey: wallet={} idx={} addr={}",
+            req.human_key_id, agent_index, agent_address
+        );
 
         Ok(CreateAgentKeyResponse {
             key_id,
@@ -1550,9 +1809,14 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_agent(&self, bearer_jwt: String, req: SignAgentRequest) -> Result<SignAgentResponse> {
+    pub async fn sign_agent(
+        &self,
+        bearer_jwt: String,
+        req: SignAgentRequest,
+    ) -> Result<SignAgentResponse> {
         // Verify JWT via TEE HMAC
-        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
+        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt)
+            .await
             .map_err(|e| anyhow!("Invalid agent credential: {}", e))?;
 
         // Validate keyId matches JWT payload
@@ -1565,11 +1829,19 @@ impl KmsApiServer {
         // Per-credential rate limit (design §2.2): prevents single compromised key from
         // flooding TEE signing. Keyed by wallet_id/agent_index — independent of global API key limit.
         let cred_rl_key = format!("{}/{}", wallet_id_str, agent_index);
-        self.agent_rate_limiter.check(&cred_rl_key)
-            .map_err(|limit| anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit))?;
+        self.agent_rate_limiter
+            .check(&cred_rl_key)
+            .map_err(|limit| {
+                anyhow!(
+                    "Per-credential rate limit exceeded ({}/min). Retry after 60s.",
+                    limit
+                )
+            })?;
 
         // Check agent key is active in DB + credential_hash matches
-        let agent_key = self.db.get_agent_key(&wallet_id_str, agent_index)?
+        let agent_key = self
+            .db
+            .get_agent_key(&wallet_id_str, agent_index)?
             .ok_or_else(|| anyhow!("Agent key not found: {}", req.key_id))?;
         if agent_key.status != "active" {
             return Err(anyhow!("Agent key is revoked"));
@@ -1592,13 +1864,23 @@ impl KmsApiServer {
 
         // Sign in TEE — TA re-verifies JWT HMAC before signing; EIP-191 inside TEE; V=27/28
         // Returns 106-byte v0.17.2 format: [0x08][account(20)][key(20)][ECDSA(65)]
-        let sig_bytes = self.tee.sign_agent_user_op(
-            wallet_uuid, agent_index, &user_op_hash,
-            jwt_kid, jwt_signing_input, jwt_hmac,
-            account_address,
-        ).await?;
+        let sig_bytes = self
+            .tee
+            .sign_agent_user_op(
+                wallet_uuid,
+                agent_index,
+                &user_op_hash,
+                jwt_kid,
+                jwt_signing_input,
+                jwt_hmac,
+                account_address,
+            )
+            .await?;
 
-        println!("✅ SignAgent: wallet={} idx={} addr={}", wallet_id_str, agent_index, agent_key.agent_address);
+        println!(
+            "✅ SignAgent: wallet={} idx={} addr={}",
+            wallet_id_str, agent_index, agent_key.agent_address
+        );
 
         Ok(SignAgentResponse {
             key_id: req.key_id,
@@ -1607,7 +1889,10 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_typed_data(&self, req: SignTypedDataRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_typed_data(
+        &self,
+        req: SignTypedDataRequest,
+    ) -> Result<SignTypedDataResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
 
         // Passkey verification (optional — wallet may or may not have one bound)
@@ -1619,7 +1904,10 @@ impl KmsApiServer {
                 let bytes = hex::decode(hex_str.trim_start_matches("0x"))
                     .map_err(|e| anyhow!("Invalid verifyingContract hex: {}", e))?;
                 if bytes.len() != 20 {
-                    return Err(anyhow!("verifyingContract must be 20 bytes, got {}", bytes.len()));
+                    return Err(anyhow!(
+                        "verifyingContract must be 20 bytes, got {}",
+                        bytes.len()
+                    ));
                 }
                 let mut arr = [0u8; 20];
                 arr.copy_from_slice(&bytes);
@@ -1636,28 +1924,47 @@ impl KmsApiServer {
             verifying_contract,
         };
 
-        let types: Vec<proto::Eip712TypeDef> = req.types.iter().map(|td| proto::Eip712TypeDef {
-            name: td.name.clone(),
-            fields: td.fields.iter().map(|f| proto::Eip712TypeField {
-                name: f.name.clone(),
-                field_type: f.field_type.clone(),
-            }).collect(),
-        }).collect();
+        let types: Vec<proto::Eip712TypeDef> = req
+            .types
+            .iter()
+            .map(|td| proto::Eip712TypeDef {
+                name: td.name.clone(),
+                fields: td
+                    .fields
+                    .iter()
+                    .map(|f| proto::Eip712TypeField {
+                        name: f.name.clone(),
+                        field_type: f.field_type.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
 
         // Find the primary type definition to help with value conversion
-        let primary_type_def = req.types.iter()
+        let primary_type_def = req
+            .types
+            .iter()
             .find(|td| td.name == req.primary_type)
             .ok_or_else(|| anyhow!("Primary type '{}' not in types list", req.primary_type))?;
 
         // Convert JSON field values to proto Eip712Value using declared field types for guidance
-        let message = req.message.iter().map(|fv| {
-            let declared_type = primary_type_def.fields.iter()
-                .find(|f| f.name == fv.name)
-                .map(|f| f.field_type.as_str())
-                .unwrap_or("");
-            let value = json_to_eip712_value(&fv.value, declared_type)?;
-            Ok(proto::Eip712FieldValue { name: fv.name.clone(), value })
-        }).collect::<Result<Vec<_>>>()?;
+        let message = req
+            .message
+            .iter()
+            .map(|fv| {
+                let declared_type = primary_type_def
+                    .fields
+                    .iter()
+                    .find(|f| f.name == fv.name)
+                    .map(|f| f.field_type.as_str())
+                    .unwrap_or("");
+                let value = json_to_eip712_value(&fv.value, declared_type)?;
+                Ok(proto::Eip712FieldValue {
+                    name: fv.name.clone(),
+                    value,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let ta_input = proto::SignTypedDataInput {
             wallet_id,
@@ -1671,16 +1978,24 @@ impl KmsApiServer {
 
         let output = self.tee.sign_typed_data(ta_input).await?;
 
-        println!("✅ SignTypedData: keyId={} primaryType={}", req.key_id, req.primary_type);
+        println!(
+            "✅ SignTypedData: keyId={} primaryType={}",
+            req.key_id, req.primary_type
+        );
         Ok(SignTypedDataResponse {
             key_id: req.key_id,
             signature: format!("0x{}", hex::encode(&output.signature)),
         })
     }
 
-    pub async fn refresh_agent_credential(&self, bearer_jwt: String, req: RefreshAgentCredentialRequest) -> Result<CreateAgentKeyResponse> {
+    pub async fn refresh_agent_credential(
+        &self,
+        bearer_jwt: String,
+        req: RefreshAgentCredentialRequest,
+    ) -> Result<CreateAgentKeyResponse> {
         // Verify current JWT is still valid
-        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt).await
+        let payload = agent_jwt::verify_credential(&self.tee, &bearer_jwt)
+            .await
             .map_err(|e| anyhow!("Invalid agent credential: {}", e))?;
 
         let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
@@ -1693,17 +2008,23 @@ impl KmsApiServer {
         if req.webauthn_assertion.is_none() {
             return Err(anyhow!("refresh-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
         }
-        let assertion = self.resolve_passkey_assertion(
-            &wallet_id_str,
-            None,  // reject legacy path
-            req.webauthn_assertion.as_ref(),
-        ).await?;
+        let assertion = self
+            .resolve_passkey_assertion(
+                &wallet_id_str,
+                None, // reject legacy path
+                req.webauthn_assertion.as_ref(),
+            )
+            .await?;
         if assertion.is_none() {
-            return Err(anyhow!("Passkey assertion required to refresh agent credential"));
+            return Err(anyhow!(
+                "Passkey assertion required to refresh agent credential"
+            ));
         }
 
         // Check agent key is active
-        let agent_key = self.db.get_agent_key(&wallet_id_str, agent_index)?
+        let agent_key = self
+            .db
+            .get_agent_key(&wallet_id_str, agent_index)?
             .ok_or_else(|| anyhow!("Agent key not found: {}", req.key_id))?;
         if agent_key.status != "active" {
             return Err(anyhow!("Agent key is revoked"));
@@ -1717,13 +2038,18 @@ impl KmsApiServer {
             agent_index,
             &agent_key.agent_address,
             3 * 24 * 3600,
-        ).await?;
+        )
+        .await?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
-        self.db.update_agent_credential(&wallet_id_str, agent_index, &cred_hash, expires_at)?;
+        self.db
+            .update_agent_credential(&wallet_id_str, agent_index, &cred_hash, expires_at)?;
 
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
-        println!("✅ RefreshAgentCredential: wallet={} idx={}", wallet_id_str, agent_index);
+        println!(
+            "✅ RefreshAgentCredential: wallet={} idx={}",
+            wallet_id_str, agent_index
+        );
 
         Ok(CreateAgentKeyResponse {
             key_id: req.key_id,
@@ -1734,7 +2060,10 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn revoke_agent_credential(&self, req: RevokeAgentCredentialRequest) -> Result<RevokeAgentCredentialResponse> {
+    pub async fn revoke_agent_credential(
+        &self,
+        req: RevokeAgentCredentialRequest,
+    ) -> Result<RevokeAgentCredentialResponse> {
         let (wallet_uuid, agent_index) = parse_agent_key_id(&req.key_id)?;
         let wallet_id_str = wallet_uuid.to_string();
 
@@ -1742,11 +2071,13 @@ impl KmsApiServer {
         if req.webauthn_assertion.is_none() {
             return Err(anyhow!("revoke-agent-credential requires WebAuthn ceremony. Legacy passkey assertions are not accepted for agent operations."));
         }
-        let assertion = self.resolve_passkey_assertion(
-            &wallet_id_str,
-            None,  // reject legacy path
-            req.webauthn_assertion.as_ref(),
-        ).await?;
+        let assertion = self
+            .resolve_passkey_assertion(
+                &wallet_id_str,
+                None, // reject legacy path
+                req.webauthn_assertion.as_ref(),
+            )
+            .await?;
         if assertion.is_none() {
             return Err(anyhow!("Passkey assertion required to revoke agent key"));
         }
@@ -1754,13 +2085,22 @@ impl KmsApiServer {
         // Revoke in DB
         let revoked = self.db.revoke_agent_key(&wallet_id_str, agent_index)?;
         if !revoked {
-            return Err(anyhow!("Agent key not found or already revoked: {}", req.key_id));
+            return Err(anyhow!(
+                "Agent key not found or already revoked: {}",
+                req.key_id
+            ));
         }
 
         let revoked_at = Utc::now().timestamp();
-        println!("✅ RevokeAgentCredential: wallet={} idx={}", wallet_id_str, agent_index);
+        println!(
+            "✅ RevokeAgentCredential: wallet={} idx={}",
+            wallet_id_str, agent_index
+        );
 
-        Ok(RevokeAgentCredentialResponse { success: true, revoked_at })
+        Ok(RevokeAgentCredentialResponse {
+            success: true,
+            revoked_at,
+        })
     }
 
     /// Lazy GC: delete expired P256 session keys for a wallet from DB and TEE.
@@ -1792,7 +2132,11 @@ impl KmsApiServer {
             }
         };
         for session_index in unconfirmed {
-            match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+            match self
+                .tee
+                .delete_p256_session_key(wallet_uuid, session_index)
+                .await
+            {
                 Ok(_) => {
                     let _ = self.db.mark_p256_tee_deleted(wallet_id_str, session_index);
                     println!(
@@ -1826,10 +2170,16 @@ impl KmsApiServer {
         for session_index in expired {
             // Step 1: Atomically claim the key in DB (status → 'revoked', tee_deleted=0).
             // If claim fails (0 rows: already revoked), skip — another path handled it.
-            let claimed = match self.db.mark_p256_session_key_gc(wallet_id_str, session_index) {
+            let claimed = match self
+                .db
+                .mark_p256_session_key_gc(wallet_id_str, session_index)
+            {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("⚠️  P256 GC: DB claim failed for {}:{}: {}", wallet_id_str, session_index, e);
+                    eprintln!(
+                        "⚠️  P256 GC: DB claim failed for {}:{}: {}",
+                        wallet_id_str, session_index, e
+                    );
                     continue;
                 }
             };
@@ -1838,7 +2188,11 @@ impl KmsApiServer {
             }
 
             // Step 2: Delete TEE key (idempotent — stuck-pending rows may have no TEE key).
-            match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+            match self
+                .tee
+                .delete_p256_session_key(wallet_uuid, session_index)
+                .await
+            {
                 Ok(tee_deleted) => {
                     let _ = self.db.mark_p256_tee_deleted(wallet_id_str, session_index);
                     println!(
@@ -1882,23 +2236,24 @@ impl KmsApiServer {
             .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
             .await?;
         if assertion.is_none() {
-            return Err(anyhow!("Passkey assertion required to create P256 session key"));
+            return Err(anyhow!(
+                "Passkey assertion required to create P256 session key"
+            ));
         }
 
         // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
-        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None).await;
+        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None)
+            .await;
 
         // Atomically check active/pending count and allocate next session_index.
         // Both happen under a single Mutex+BEGIN IMMEDIATE to prevent concurrent over-allocation.
         // Max 2 = one active key + one during rotation overlap; pending slots always count.
-        let session_index = self
-            .db
-            .allocate_p256_session_key_pending(
-                &req.human_key_id,
-                &req.human_key_id,
-                Utc::now().timestamp(),
-                2,
-            )?;
+        let session_index = self.db.allocate_p256_session_key_pending(
+            &req.human_key_id,
+            &req.human_key_id,
+            Utc::now().timestamp(),
+            2,
+        )?;
 
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
@@ -1912,9 +2267,15 @@ impl KmsApiServer {
                 // written it before the error). Attempt TEE cleanup (idempotent):
                 // - TEE delete succeeds / not-found → safe to delete DB pending row (clean state)
                 // - TEE delete fails → keep DB pending row so GC can retry TEE delete
-                match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+                match self
+                    .tee
+                    .delete_p256_session_key(wallet_id, session_index)
+                    .await
+                {
                     Ok(_) => {
-                        let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                        let _ = self
+                            .db
+                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
                     }
                     Err(tee_del_err) => {
                         eprintln!(
@@ -1949,9 +2310,15 @@ impl KmsApiServer {
                 // - If TEE delete fails: leave the DB pending row so GC can retry TEE delete
                 //   after PENDING_TTL_SECS (stuck-pending path). Never silently lose track
                 //   of key material by deleting DB while TEE delete is unknown.
-                match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+                match self
+                    .tee
+                    .delete_p256_session_key(wallet_id, session_index)
+                    .await
+                {
                     Ok(_) => {
-                        let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                        let _ = self
+                            .db
+                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
                     }
                     Err(tee_err) => {
                         eprintln!(
@@ -1978,9 +2345,15 @@ impl KmsApiServer {
         ) {
             // DB activation failed after TEE key and JWT were created. Same TEE-cleanup
             // strategy: keep DB pending row if TEE delete fails so GC can retry.
-            match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+            match self
+                .tee
+                .delete_p256_session_key(wallet_id, session_index)
+                .await
+            {
                 Ok(_) => {
-                    let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                    let _ = self
+                        .db
+                        .delete_p256_session_key_pending(&req.human_key_id, session_index);
                 }
                 Err(tee_err) => {
                     eprintln!(
@@ -2029,7 +2402,8 @@ impl KmsApiServer {
 
         // Lazy GC: clean up other expired P256 session keys for this wallet.
         // Exclude the current session_index to avoid GC-ing the key being signed.
-        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, Some(session_index)).await;
+        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, Some(session_index))
+            .await;
 
         // Per-credential rate limit
         let cred_rl_key = format!("p256/{}/{}", wallet_id_str, session_index);
@@ -2052,7 +2426,9 @@ impl KmsApiServer {
         }
         let current_hash = agent_jwt::credential_hash(&bearer_jwt);
         if session_key.credential_hash.as_deref() != Some(current_hash.as_str()) {
-            return Err(anyhow!("P256 session credential has been superseded or revoked"));
+            return Err(anyhow!(
+                "P256 session credential has been superseded or revoked"
+            ));
         }
 
         // Validate userOpHash (exactly 32 bytes)
@@ -2063,9 +2439,8 @@ impl KmsApiServer {
             .map_err(|e| anyhow!("Invalid accountAddress: {}", e))?;
 
         // Extract JWT proof for TA-side authorization (defense-in-depth)
-        let (jwt_kid, jwt_signing_input, jwt_hmac) =
-            agent_jwt::extract_signing_proof(&bearer_jwt)
-                .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+        let (jwt_kid, jwt_signing_input, jwt_hmac) = agent_jwt::extract_signing_proof(&bearer_jwt)
+            .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
 
         // Sign in TEE — 149-byte P256 format
         let sig_bytes = self
@@ -2119,14 +2494,19 @@ impl KmsApiServer {
             .resolve_passkey_assertion(&wallet_id_str, None, req.webauthn_assertion.as_ref())
             .await?;
         if assertion.is_none() {
-            return Err(anyhow!("Passkey assertion required to revoke P256 session key"));
+            return Err(anyhow!(
+                "Passkey assertion required to revoke P256 session key"
+            ));
         }
 
         // Lazy GC: clean up other expired P256 session keys for this wallet.
-        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, None).await;
+        self.gc_expired_p256_session_keys(&wallet_id_str, wallet_uuid, None)
+            .await;
 
         // Atomically mark the target key as revoked in DB.
-        let claimed = self.db.mark_p256_session_key_gc(&wallet_id_str, session_index)?;
+        let claimed = self
+            .db
+            .mark_p256_session_key_gc(&wallet_id_str, session_index)?;
         if !claimed {
             // mark_p256_session_key_gc returned 0 rows — either already revoked or not found.
             let already_revoked = self
@@ -2135,7 +2515,11 @@ impl KmsApiServer {
             if already_revoked {
                 // Idempotent: key is already revoked. Retry TEE delete in case it failed before,
                 // then confirm tee_deleted so GC's Pass 0 stops retrying this row.
-                match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+                match self
+                    .tee
+                    .delete_p256_session_key(wallet_uuid, session_index)
+                    .await
+                {
                     Ok(_) => {
                         let _ = self.db.mark_p256_tee_deleted(&wallet_id_str, session_index);
                     }
@@ -2151,14 +2535,21 @@ impl KmsApiServer {
                     "✅ RevokeP256SessionKey (idempotent): wallet={} idx={}",
                     wallet_id_str, session_index
                 );
-                return Ok(RevokeP256SessionKeyResponse { success: true, revoked_at });
+                return Ok(RevokeP256SessionKeyResponse {
+                    success: true,
+                    revoked_at,
+                });
             }
             return Err(anyhow!("P256 session key not found: {}", req.key_id));
         }
 
         // Delete TEE key material — best-effort, idempotent.
         // If this fails, tee_deleted stays 0; GC's Pass 0 retries on the next trigger.
-        match self.tee.delete_p256_session_key(wallet_uuid, session_index).await {
+        match self
+            .tee
+            .delete_p256_session_key(wallet_uuid, session_index)
+            .await
+        {
             Ok(_) => {
                 let _ = self.db.mark_p256_tee_deleted(&wallet_id_str, session_index);
             }
@@ -2195,7 +2586,10 @@ fn render_stats_page(server: &KmsApiServer) -> String {
     let tx = server.db.get_tx_stats().unwrap_or_default();
     let total = wallets.len();
     let with_addr = wallets.iter().filter(|w| w.address.is_some()).count();
-    let with_pk = wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count();
+    let with_pk = wallets
+        .iter()
+        .filter(|w| w.passkey_pubkey.is_some())
+        .count();
     let enabled = wallets.iter().filter(|w| w.status == "ready").count();
     let api_keys = server.db.list_api_keys().map(|v| v.len()).unwrap_or(0);
 
@@ -2203,8 +2597,16 @@ fn render_stats_page(server: &KmsApiServer) -> String {
     for w in &wallets {
         let addr = if w.address.is_some() { "&#10003;" } else { "-" };
         let addr_cls = if w.address.is_some() { "ok" } else { "dim" };
-        let pk = if w.passkey_pubkey.is_some() { "&#10003;" } else { "-" };
-        let pk_cls = if w.passkey_pubkey.is_some() { "ok" } else { "dim" };
+        let pk = if w.passkey_pubkey.is_some() {
+            "&#10003;"
+        } else {
+            "-"
+        };
+        let pk_cls = if w.passkey_pubkey.is_some() {
+            "ok"
+        } else {
+            "dim"
+        };
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
@@ -2219,13 +2621,22 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         ));
     }
 
-    let cb = if qs.circuit_breaker_open.unwrap_or(false) { "OPEN" } else { "closed" };
-    let cb_cls = if qs.circuit_breaker_open.unwrap_or(false) { "warn" } else { "ok" };
+    let cb = if qs.circuit_breaker_open.unwrap_or(false) {
+        "OPEN"
+    } else {
+        "closed"
+    };
+    let cb_cls = if qs.circuit_breaker_open.unwrap_or(false) {
+        "warn"
+    } else {
+        "ok"
+    };
     let fails = qs.consecutive_failures.unwrap_or(0);
     let panic_cls = if tx.panic_count > 0 { "warn" } else { "ok" };
     let error_cls = if tx.error_count > 0 { "warn" } else { "ok" };
 
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2340,20 +2751,31 @@ async fn version_check() -> Result<impl warp::Reply, warp::Rejection> {
 
 async fn handle_create_key(
     body: CreateKeyRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
     match server.create_key(body).await {
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ CreateKey OK {}ms", elapsed);
-            let _ = server.db.record_tx("CreateKey", Some(&response.key_metadata.key_id), None, false, elapsed as u64, true, false);
+            let _ = server.db.record_tx(
+                "CreateKey",
+                Some(&response.key_metadata.key_id),
+                None,
+                false,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             eprintln!("CreateKey error: {} {}ms", e, elapsed);
-            let _ = server.db.record_tx("CreateKey", None, None, false, elapsed as u64, false, false);
+            let _ =
+                server
+                    .db
+                    .record_tx("CreateKey", None, None, false, elapsed as u64, false, false);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -2361,7 +2783,7 @@ async fn handle_create_key(
 
 async fn handle_describe_key(
     body: DescribeKeyRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match server.describe_key(body).await {
         Ok(response) => Ok(warp::reply::json(&response)),
@@ -2374,7 +2796,7 @@ async fn handle_describe_key(
 
 async fn handle_list_keys(
     body: ListKeysRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match server.list_keys(body).await {
         Ok(response) => Ok(warp::reply::json(&response)),
@@ -2387,7 +2809,7 @@ async fn handle_list_keys(
 
 async fn handle_derive_address(
     body: DeriveAddressRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let key = body.key_id.clone();
     let t0 = std::time::Instant::now();
@@ -2395,16 +2817,37 @@ async fn handle_derive_address(
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ DeriveAddress OK key={} {}ms", key, elapsed);
-            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, true, false);
+            let _ = server.db.record_tx(
+                "DeriveAddress",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
-            eprintln!("{}DeriveAddress error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
-            let _ = server.db.record_tx("DeriveAddress", Some(&key), None, false, elapsed as u64, false, is_panic);
+            eprintln!(
+                "{}DeriveAddress error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" },
+                msg,
+                key,
+                elapsed
+            );
+            let _ = server.db.record_tx(
+                "DeriveAddress",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                false,
+                is_panic,
+            );
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -2412,7 +2855,7 @@ async fn handle_derive_address(
 
 async fn handle_sign(
     body: SignRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let addr = body.address.clone().unwrap_or_default();
     let path = body.webauthn.is_some();
@@ -2421,16 +2864,33 @@ async fn handle_sign(
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ Sign OK addr={} webauthn={} {}ms", addr, path, elapsed);
-            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, true, false);
+            let _ =
+                server
+                    .db
+                    .record_tx("Sign", None, Some(&addr), path, elapsed as u64, true, false);
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
-            eprintln!("{}Sign error: {} addr={} webauthn={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
-            let _ = server.db.record_tx("Sign", None, Some(&addr), path, elapsed as u64, false, is_panic);
+            eprintln!(
+                "{}Sign error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" },
+                msg,
+                addr,
+                path,
+                elapsed
+            );
+            let _ = server.db.record_tx(
+                "Sign",
+                None,
+                Some(&addr),
+                path,
+                elapsed as u64,
+                false,
+                is_panic,
+            );
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -2438,7 +2898,7 @@ async fn handle_sign(
 
 async fn handle_sign_hash(
     body: SignHashRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let addr = body.address.clone().unwrap_or_default();
     let path = body.webauthn.is_some();
@@ -2446,26 +2906,50 @@ async fn handle_sign_hash(
     match server.sign_hash(body).await {
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
-            println!("✅ SignHash OK addr={} webauthn={} {}ms", addr, path, elapsed);
-            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, true, false);
+            println!(
+                "✅ SignHash OK addr={} webauthn={} {}ms",
+                addr, path, elapsed
+            );
+            let _ = server.db.record_tx(
+                "SignHash",
+                None,
+                Some(&addr),
+                path,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
-            eprintln!("{}SignHash error: {} addr={} webauthn={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, addr, path, elapsed);
-            let _ = server.db.record_tx("SignHash", None, Some(&addr), path, elapsed as u64, false, is_panic);
+            eprintln!(
+                "{}SignHash error: {} addr={} webauthn={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" },
+                msg,
+                addr,
+                path,
+                elapsed
+            );
+            let _ = server.db.record_tx(
+                "SignHash",
+                None,
+                Some(&addr),
+                path,
+                elapsed as u64,
+                false,
+                is_panic,
+            );
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
 }
 
-
 async fn handle_get_public_key(
     body: GetPublicKeyRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match server.get_public_key(body).await {
         Ok(response) => Ok(warp::reply::json(&response)),
@@ -2478,7 +2962,7 @@ async fn handle_get_public_key(
 
 async fn handle_delete_key(
     body: DeleteKeyRequest,
-    server: Arc<KmsApiServer>
+    server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let key = body.key_id.clone();
     let t0 = std::time::Instant::now();
@@ -2486,16 +2970,37 @@ async fn handle_delete_key(
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ DeleteKey OK key={} {}ms", key, elapsed);
-            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, true, false);
+            let _ = server.db.record_tx(
+                "DeleteKey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
-            eprintln!("{}DeleteKey error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
-            let _ = server.db.record_tx("DeleteKey", Some(&key), None, false, elapsed as u64, false, is_panic);
+            eprintln!(
+                "{}DeleteKey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" },
+                msg,
+                key,
+                elapsed
+            );
+            let _ = server.db.record_tx(
+                "DeleteKey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                false,
+                is_panic,
+            );
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -2511,16 +3016,37 @@ async fn handle_change_passkey(
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ ChangePasskey OK key={} {}ms", key, elapsed);
-            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, true, false);
+            let _ = server.db.record_tx(
+                "ChangePasskey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             let msg = e.to_string();
             let is_panic = msg.contains("panicked") || msg.contains("0xffff3024");
-            eprintln!("{}ChangePasskey error: {} key={} {}ms",
-                if is_panic { "💀 TA PANIC — " } else { "" }, msg, key, elapsed);
-            let _ = server.db.record_tx("ChangePasskey", Some(&key), None, false, elapsed as u64, false, is_panic);
+            eprintln!(
+                "{}ChangePasskey error: {} key={} {}ms",
+                if is_panic { "💀 TA PANIC — " } else { "" },
+                msg,
+                key,
+                elapsed
+            );
+            let _ = server.db.record_tx(
+                "ChangePasskey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                false,
+                is_panic,
+            );
             Err(warp::reject::custom(ApiError(msg)))
         }
     }
@@ -2531,7 +3057,10 @@ async fn handle_begin_registration(
     server: Arc<KmsApiServer>,
     origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_registration(body, origin_header.as_deref()).await {
+    match server
+        .begin_registration(body, origin_header.as_deref())
+        .await
+    {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginRegistration error: {}", e);
@@ -2549,13 +3078,29 @@ async fn handle_complete_registration(
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ CompleteRegistration OK {}ms", elapsed);
-            let _ = server.db.record_tx("Registration", Some(&response.key_id), None, true, elapsed as u64, true, false);
+            let _ = server.db.record_tx(
+                "Registration",
+                Some(&response.key_id),
+                None,
+                true,
+                elapsed as u64,
+                true,
+                false,
+            );
             Ok(warp::reply::json(&response))
         }
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             eprintln!("CompleteRegistration error: {} {}ms", e, elapsed);
-            let _ = server.db.record_tx("Registration", None, None, true, elapsed as u64, false, false);
+            let _ = server.db.record_tx(
+                "Registration",
+                None,
+                None,
+                true,
+                elapsed as u64,
+                false,
+                false,
+            );
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -2566,7 +3111,10 @@ async fn handle_begin_authentication(
     server: Arc<KmsApiServer>,
     origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_authentication(body, origin_header.as_deref()).await {
+    match server
+        .begin_authentication(body, origin_header.as_deref())
+        .await
+    {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginAuthentication error: {}", e);
@@ -2618,8 +3166,11 @@ async fn handle_sign_agent(
     body: SignAgentRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let jwt = auth_header.strip_prefix("Bearer ")
-        .ok_or_else(|| warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string())))?
+    let jwt = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| {
+            warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string()))
+        })?
         .to_string();
     let t0 = std::time::Instant::now();
     match server.sign_agent(jwt, body).await {
@@ -2641,8 +3192,11 @@ async fn handle_refresh_agent_credential(
     body: RefreshAgentCredentialRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let jwt = auth_header.strip_prefix("Bearer ")
-        .ok_or_else(|| warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string())))?
+    let jwt = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| {
+            warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string()))
+        })?
         .to_string();
     let t0 = std::time::Instant::now();
     match server.refresh_agent_credential(jwt, body).await {
@@ -2743,9 +3297,7 @@ async fn handle_sign_p256_user_op(
     let jwt = auth_header
         .strip_prefix("Bearer ")
         .ok_or_else(|| {
-            warp::reject::custom(ApiError(
-                "Authorization must be 'Bearer <jwt>'".to_string(),
-            ))
+            warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string()))
         })?
         .to_string();
     let t0 = std::time::Instant::now();
@@ -2768,7 +3320,9 @@ struct ApiError(String);
 
 impl warp::reject::Reject for ApiError {}
 
-async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+async fn handle_rejection(
+    err: warp::Rejection,
+) -> Result<impl warp::Reply, std::convert::Infallible> {
     if let Some(rl_error) = err.find::<RateLimitError>() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
@@ -2782,7 +3336,10 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
             warp::http::StatusCode::UNAUTHORIZED
         } else if api_error.0.contains("circuit breaker") {
             warp::http::StatusCode::SERVICE_UNAVAILABLE
-        } else if api_error.0.contains("0xffff") || api_error.0.contains("panicked") || api_error.0.contains("TEE error") {
+        } else if api_error.0.contains("0xffff")
+            || api_error.0.contains("panicked")
+            || api_error.0.contains("TEE error")
+        {
             // TA / TEE errors are server-side faults, not bad requests
             warp::http::StatusCode::INTERNAL_SERVER_ERROR
         } else {
@@ -2819,15 +3376,15 @@ fn aws_kms_body<T: serde::de::DeserializeOwned + Send>(
             if bytes.len() > MAX_REQUEST_BODY_BYTES {
                 return Err(warp::reject::custom(ApiError(format!(
                     "Request body too large: {} bytes (max {}KB)",
-                    bytes.len(), MAX_REQUEST_BODY_BYTES / 1024
+                    bytes.len(),
+                    MAX_REQUEST_BODY_BYTES / 1024
                 ))));
             }
             let data: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
-            serde_json::from_slice(data)
-                .map_err(|e| {
-                    eprintln!("JSON parse error: {}", e);
-                    warp::reject::custom(ApiError(format!("Invalid JSON: {}", e)))
-                })
+            serde_json::from_slice(data).map_err(|e| {
+                eprintln!("JSON parse error: {}", e);
+                warp::reject::custom(ApiError(format!("Invalid JSON: {}", e)))
+            })
         })
 }
 
@@ -2884,7 +3441,9 @@ fn db_api_key_filter(
                     Some(k) => {
                         // Check legacy env var first
                         if let Some(ref lk) = legacy_key {
-                            if k == *lk { return Ok(()); }
+                            if k == *lk {
+                                return Ok(());
+                            }
                         }
                         // Check DB
                         match db.validate_api_key(&k) {
@@ -2924,14 +3483,18 @@ pub async fn start_kms_server() -> Result<()> {
     // In production, set KMS_REQUIRE_API_KEY=1 to fail-closed even before key provisioning.
     let legacy_key = std::env::var("KMS_API_KEY").ok();
     let has_db_keys = db.has_api_keys().unwrap_or(false);
-    let force_required = std::env::var("KMS_REQUIRE_API_KEY").map(|v| v == "1").unwrap_or(false);
+    let force_required = std::env::var("KMS_REQUIRE_API_KEY")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let api_key_enabled = has_db_keys || legacy_key.is_some() || force_required;
     if api_key_enabled {
         let source = match (has_db_keys, legacy_key.is_some(), force_required) {
             (true, true, _) => "DB + env",
             (true, false, _) => "DB",
             (false, true, _) => "env (KMS_API_KEY)",
-            (false, false, true) => "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)",
+            (false, false, true) => {
+                "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)"
+            }
             _ => unreachable!(),
         };
         println!("🔑 API Key authentication: ENABLED (source: {})", source);
@@ -2946,9 +3509,7 @@ pub async fn start_kms_server() -> Result<()> {
     let server_index = server.clone();
     let index = warp::path::end()
         .and(warp::get())
-        .map(move || {
-            warp::reply::html(render_stats_page(&server_index))
-        });
+        .map(move || warp::reply::html(render_stats_page(&server_index)));
 
     // Test UI page
     let test_ui = warp::path("test")
@@ -2961,9 +3522,7 @@ pub async fn start_kms_server() -> Result<()> {
         });
 
     // Health check
-    let health = warp::path("health")
-        .and(warp::get())
-        .and_then(health_check);
+    let health = warp::path("health").and(warp::get()).and_then(health_check);
 
     // Version check
     let version = warp::path("version")
@@ -3019,7 +3578,10 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact("x-amz-target", "TrentService.CreateKey"))
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.CreateKey",
+        ))
         .and(aws_kms_body())
         .and(warp::any().map(move || server1.clone()))
         .and_then(handle_create_key);
@@ -3028,7 +3590,10 @@ pub async fn start_kms_server() -> Result<()> {
     let describe_key = warp::path("DescribeKey")
         .and(warp::post())
         .and(api_key_filter.clone())
-        .and(warp::header::exact("x-amz-target", "TrentService.DescribeKey"))
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.DescribeKey",
+        ))
         .and(aws_kms_body())
         .and(warp::any().map(move || server2.clone()))
         .and_then(handle_describe_key);
@@ -3047,7 +3612,10 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact("x-amz-target", "TrentService.DeriveAddress"))
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.DeriveAddress",
+        ))
         .and(aws_kms_body())
         .and(warp::any().map(move || server4.clone()))
         .and_then(handle_derive_address);
@@ -3078,7 +3646,10 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact("x-amz-target", "TrentService.GetPublicKey"))
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.GetPublicKey",
+        ))
         .and(aws_kms_body())
         .and(warp::any().map(move || server6.clone()))
         .and_then(handle_get_public_key);
@@ -3089,7 +3660,10 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact("x-amz-target", "TrentService.ScheduleKeyDeletion"))
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.ScheduleKeyDeletion",
+        ))
         .and(aws_kms_body())
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
@@ -3218,22 +3792,26 @@ pub async fn start_kms_server() -> Result<()> {
             match server_rot.tee.jwt_rotate_secret(false).await {
                 Ok(result) => {
                     let now = Utc::now().to_rfc3339();
-                    let _ = server_rot.db.upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
-                        kid: result.new_kid.clone(),
-                        status: "current".to_string(),
-                        created_at: now.clone(),
-                        retired_at: None,
-                        expires_at: None,
-                    });
+                    let _ = server_rot
+                        .db
+                        .upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
+                            kid: result.new_kid.clone(),
+                            status: "current".to_string(),
+                            created_at: now.clone(),
+                            retired_at: None,
+                            expires_at: None,
+                        });
                     if let Some(old_kid) = result.retired_kid {
                         let retire_ts = Utc::now().timestamp() + 7 * 24 * 3600;
-                        let _ = server_rot.db.upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
-                            kid: old_kid,
-                            status: "verify-only".to_string(),
-                            created_at: now,
-                            retired_at: None,
-                            expires_at: Some(retire_ts),
-                        });
+                        let _ = server_rot
+                            .db
+                            .upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
+                                kid: old_kid,
+                                status: "verify-only".to_string(),
+                                created_at: now,
+                                retired_at: None,
+                                expires_at: Some(retire_ts),
+                            });
                     }
                     println!("🔑 JWT secret auto-rotated: new kid={}", result.new_kid);
                 }
@@ -3270,7 +3848,10 @@ pub async fn start_kms_server() -> Result<()> {
         .or(revoke_p256_session_key)
         .recover(handle_rejection);
 
-    println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);
+    println!(
+        "🚀 KMS API Server v{} starting on http://0.0.0.0:3000",
+        KMS_VERSION
+    );
     println!("📚 Supported APIs:");
     println!("   GET  /              - Welcome page");
     println!("   GET  /test          - Interactive test UI");
@@ -3300,9 +3881,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
 
-    warp::serve(routes)
-        .run(([0, 0, 0, 0], 3000))
-        .await;
+    warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
 
     Ok(())
 }

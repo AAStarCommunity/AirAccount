@@ -783,7 +783,9 @@ impl TeeHandle {
             session_index,
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
-        let out = self.call(proto::Command::CreateP256SessionKey, input).await?;
+        let out = self
+            .call(proto::Command::CreateP256SessionKey, input)
+            .await?;
         let output: proto::CreateP256SessionKeyOutput = bincode::deserialize(&out)
             .context("Failed to deserialize CreateP256SessionKeyOutput")?;
         Ok(output)
@@ -827,9 +829,11 @@ impl TeeHandle {
             session_index,
         })
         .context("Failed to serialize DeleteP256SessionKeyInput")?;
-        let out = self.call(proto::Command::DeleteP256SessionKey, input).await?;
-        let output: proto::DeleteP256SessionKeyOutput =
-            bincode::deserialize(&out).context("Failed to deserialize DeleteP256SessionKeyOutput")?;
+        let out = self
+            .call(proto::Command::DeleteP256SessionKey, input)
+            .await?;
+        let output: proto::DeleteP256SessionKeyOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize DeleteP256SessionKeyOutput")?;
         Ok(output.deleted)
     }
 }
