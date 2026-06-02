@@ -16,6 +16,9 @@ CONTAINER_NAME="teaclave_dev_env"
 TEACLAVE_SDK="$REPO_ROOT/third_party/teaclave-trustzone-sdk"
 SHARED_DIR="/opt/teaclave/shared"
 IMG_DIR="/opt/teaclave/images"
+# 容器内镜像路径（OrbStack VirtioFS 无法共享 /opt/teaclave/images，
+# 通过 docker cp 将镜像复制到容器内 /opt/qemu-images/）
+CONTAINER_IMG_DIR="/opt/qemu-images"
 IMG_NAME="x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory"
 
 # ── 平台检测 ─────────────────────────────────────────────────────────────
@@ -151,6 +154,55 @@ start_dev_container() {
     log_info "Container started: $(docker ps --filter "name=$CONTAINER_NAME" --format "{{.Status}}")"
 }
 
+# ── 把 QEMU 镜像复制进容器 ────────────────────────────────────────────────
+# OrbStack VirtioFS 在 Apple Silicon 上无法将 /opt/teaclave/images 暴露给
+# x86_64 容器（卷挂载显示为空目录）。解决方案：用 docker cp 直接复制。
+copy_images_into_container() {
+    log_step "将 QEMU 镜像复制到容器内 $CONTAINER_IMG_DIR"
+    local src="$IMG_DIR/$IMG_NAME"
+    local dst="$CONTAINER_IMG_DIR"
+
+    if [ ! -d "$src" ] || [ ! -f "$src/bl1.bin" ]; then
+        log_error "本机 QEMU 镜像不存在：$src"
+        log_error "请先运行 extract_qemu_images 或手动解压镜像"
+        exit 1
+    fi
+
+    # 检查容器内是否已有镜像
+    if docker exec "$CONTAINER_NAME" test -f "$dst/$IMG_NAME/bl1.bin" 2>/dev/null; then
+        log_info "容器内镜像已存在，跳过复制"
+        return
+    fi
+
+    log_info "复制 $src → 容器内 $dst/$IMG_NAME （约 270MB，首次约需 1-2 分钟）..."
+    docker exec "$CONTAINER_NAME" mkdir -p "$dst"
+    docker cp "$src/." "$CONTAINER_NAME:$dst/$IMG_NAME/"
+    log_info "QEMU 镜像已复制到容器内 $dst/$IMG_NAME"
+    docker exec "$CONTAINER_NAME" ls -lh "$dst/$IMG_NAME/" | grep -E "bl1|Image|rootfs|qemu" | head -5
+}
+
+# ── 容器内 Rust 工具链配置 ────────────────────────────────────────────────
+setup_container_toolchain() {
+    log_step "配置容器内 Rust 工具链"
+
+    # 为 CA 构建安装 stable aarch64 target
+    docker exec "$CONTAINER_NAME" bash -l -c "
+        rustup target add aarch64-unknown-linux-gnu --toolchain stable 2>/dev/null || true
+        echo 'aarch64-unknown-linux-gnu target: OK'
+    " || log_warn "rustup target add 失败（可能需要网络）"
+
+    # 创建 third_party symlink（CA 的 Cargo.toml 引用相对路径）
+    docker exec "$CONTAINER_NAME" bash -c "
+        mkdir -p /root/teaclave_sdk_src/projects/web3
+        if [ ! -L '/root/teaclave_sdk_src/projects/web3/third_party' ]; then
+            ln -sf /root/teaclave_sdk_src /root/teaclave_sdk_src/projects/web3/third_party
+            echo 'third_party symlink: OK'
+        else
+            echo 'third_party symlink: already exists'
+        fi
+    "
+}
+
 # ── 验证环境 ──────────────────────────────────────────────────────────────
 verify_environment() {
     log_step "验证环境"
@@ -159,7 +211,7 @@ verify_environment() {
         echo '=== xargo ===' && which xargo 2>/dev/null && xargo --version 2>/dev/null || true
         echo '=== Cross compiler ===' && aarch64-linux-gnu-gcc --version | head -1 2>/dev/null || true
         echo '=== OP-TEE TA Dev Kit ===' && ls \$TA_DEV_KIT_DIR/scripts/ 2>/dev/null | head -5 || true
-        echo '=== switch_config ===' && switch_config --status 2>/dev/null || true
+        echo '=== QEMU images ===' && ls /opt/qemu-images/ 2>/dev/null || echo 'not yet copied'
     " || log_warn "Some verification steps failed (may be OK if container just started)"
 }
 
@@ -208,5 +260,7 @@ setup_directories
 pull_docker_image
 $SKIP_EXTRACT || extract_qemu_images
 start_dev_container
+copy_images_into_container
+setup_container_toolchain
 verify_environment
 print_summary

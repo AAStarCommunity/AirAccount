@@ -26,30 +26,33 @@ check_container() {
 
 build_ta() {
     log_step "构建 TA (aarch64-unknown-optee)"
+    # 使用 nightly-2024-05-15 工具链（OP-TEE std 构建要求）
+    # --config 显式设置 aarch64 linker，避免 x86_64 容器中 ld 不支持 aarch64 的问题
     docker exec "$CONTAINER_NAME" bash -l -c "
         set -e
+        export RUSTUP_TOOLCHAIN=nightly-2024-05-15-x86_64-unknown-linux-gnu
+        export RUSTFLAGS='-C panic=abort'
         cd ${KMS_PROJECT}/ta
-        echo '--- Rust target ---'
-        rustup target list --installed | grep optee || true
 
         CC=aarch64-linux-gnu-gcc \
-        xargo build --target aarch64-unknown-optee --release 2>&1
+        xargo build --target aarch64-unknown-optee --release \
+          --config 'target.aarch64-unknown-optee.linker=\"aarch64-linux-gnu-gcc\"' 2>&1
 
         echo '--- 签名 TA ---'
+        UUID=\$(cat ${KMS_PROJECT}/uuid.txt)
         aarch64-linux-gnu-objcopy --strip-unneeded \
             target/aarch64-unknown-optee/release/ta \
             target/aarch64-unknown-optee/release/stripped_ta
 
-        python3 \$TA_DEV_KIT_DIR/scripts/sign_encrypt.py sign-enc \
-            --uuid ${TA_UUID} \
-            --ta-version 1 \
+        python3 \$TA_DEV_KIT_DIR/scripts/sign_encrypt.py \
+            --uuid \$UUID \
+            --key \$TA_DEV_KIT_DIR/keys/default_ta.pem \
             --in  target/aarch64-unknown-optee/release/stripped_ta \
-            --out target/aarch64-unknown-optee/release/${TA_UUID}.ta \
-            --key \$TA_DEV_KIT_DIR/keys/default_ta.pem
+            --out target/aarch64-unknown-optee/release/\${UUID}.ta
 
         echo '--- 部署 TA 到 shared ---'
         mkdir -p ${SHARED_DIR}/ta
-        cp target/aarch64-unknown-optee/release/${TA_UUID}.ta ${SHARED_DIR}/ta/
+        cp target/aarch64-unknown-optee/release/\${UUID}.ta ${SHARED_DIR}/ta/
         ls -lh ${SHARED_DIR}/ta/
     "
     log_info "TA 构建完成：${TA_UUID}.ta"
@@ -57,8 +60,11 @@ build_ta() {
 
 build_ca() {
     log_step "构建 CA (aarch64-unknown-linux-gnu)"
+    # 使用 stable 工具链构建 CA（nightly-2024-05-15 不支持 edition2024 依赖）
+    # 第三方依赖路径通过 symlink 解决（在 setup.sh 中创建）
     docker exec "$CONTAINER_NAME" bash -l -c "
         set -e
+        export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
         cd ${KMS_PROJECT}/host
         cargo build --target aarch64-unknown-linux-gnu --release --bin kms-api-server 2>&1
 

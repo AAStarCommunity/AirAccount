@@ -356,6 +356,10 @@ pub struct SignTypedDataOutput {
 pub struct CreateP256SessionKeyInput {
     pub wallet_id: Uuid,
     pub session_index: u32,
+    /// JWT sub claim (typically the human key ID string).
+    pub subject: String,
+    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    pub ttl_secs: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -364,6 +368,11 @@ pub struct CreateP256SessionKeyOutput {
     pub pub_key_x: [u8; 32],
     /// P-256 public key Y coordinate (32 bytes big-endian)
     pub pub_key_y: [u8; 32],
+    /// JWT material for assembling the session credential on the host side.
+    pub jwt_kid: String,
+    pub jwt_header_b64: String,
+    pub jwt_payload_b64: String,
+    pub jwt_hmac: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

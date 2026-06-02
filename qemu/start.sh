@@ -16,7 +16,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$REPO_ROOT/qemu/lib/log.sh"
 
 CONTAINER_NAME="teaclave_dev_env"
-IMG_DIR="/opt/teaclave/images"
+# OrbStack VirtioFS 无法将 /opt/teaclave/images 暴露给容器，
+# setup.sh 通过 docker cp 将镜像复制到容器内 /opt/qemu-images/
+IMG_DIR="/opt/qemu-images"
 IMG_NAME="x86_64-optee-qemuv8-ubuntu-24.04-expand-ta-memory"
 SHARED_DIR="/opt/teaclave/shared"
 SESSION="kms-qemu"
@@ -54,12 +56,14 @@ kill_old_qemu() {
 }
 
 # QEMU 启动命令（含 KMS 3000 端口转发）
-# 注意：start_qemuv8 只转发 54433，我们用自定义命令添加 3000
+# 串口使用 Unix socket（比 TCP 更可靠，避免端口冲突）
+# Normal World 串口: /tmp/qemu-normal.sock
+# Secure World 日志: /tmp/qemu-secure.log
 QEMU_CMD="cd $IMG_DIR/$IMG_NAME && ./qemu-system-aarch64 \
     -nodefaults \
     -nographic \
-    -serial tcp:localhost:54320 \
-    -serial tcp:localhost:54321 \
+    -serial unix:/tmp/qemu-normal.sock,server,nowait \
+    -serial file:/tmp/qemu-secure.log \
     -smp 2 \
     -s \
     -machine virt,secure=on,acpi=off,gic-version=3 \
@@ -86,19 +90,19 @@ start_tmux() {
     # 窗格布局：左=QEMU主控，右上=Guest Shell，右下=TA日志
     tmux new-session -d -s "$SESSION" -x 220 -y 55
 
-    # 窗格 0：Secure World 日志（先启动监听，等 QEMU 连接）
+    # 窗格 0：Secure World 日志（tail 文件，QEMU 将 TA 输出写入 /tmp/qemu-secure.log）
     tmux send-keys -t "$SESSION:0" \
-        "echo '🔒 Secure World Log (port 54321)' && docker exec -it $CONTAINER_NAME bash -l -c 'listen_on_secure_world_log'" Enter
+        "echo 'Secure World Log' && docker exec -it $CONTAINER_NAME bash -c 'tail -f /tmp/qemu-secure.log 2>/dev/null || sleep 5 && tail -f /tmp/qemu-secure.log'" Enter
 
-    # 竖向分割 → 窗格 1：Guest VM Shell
+    # 竖向分割 → 窗格 1：Guest VM Shell（通过 Unix socket 连接）
     tmux split-window -t "$SESSION:0" -v
     tmux send-keys -t "$SESSION:0.1" \
-        "echo '🖥️  Guest VM Shell (port 54320)' && docker exec -it $CONTAINER_NAME bash -l -c 'listen_on_guest_vm_shell'" Enter
+        "echo 'Guest VM Shell (wait ~90s for boot)' && sleep 5 && docker exec -it $CONTAINER_NAME bash -c 'socat - UNIX:/tmp/qemu-normal.sock'" Enter
 
     # 横向分割 → 窗格 2：QEMU 主控
     tmux split-window -t "$SESSION:0.0" -h
     tmux send-keys -t "$SESSION:0.2" \
-        "echo '🚀 QEMU starting...' && sleep 2 && docker exec -it $CONTAINER_NAME bash -l -c \"$QEMU_CMD\"" Enter
+        "echo 'QEMU starting...' && sleep 2 && docker exec -it $CONTAINER_NAME bash -l -c \"$QEMU_CMD\"" Enter
 
     sleep 1
     tmux attach-session -t "$SESSION"
@@ -106,14 +110,10 @@ start_tmux() {
 
 start_no_tmux() {
     log_step "启动 QEMU（单终端模式，日志写 /tmp/qemu-secure.log）"
-    log_info "Guest VM Shell: socat TCP:localhost:54320 -"
-    log_info "Secure World 日志: tail -f /tmp/qemu-secure.log"
+    log_info "Guest VM Shell: docker exec $CONTAINER_NAME socat - UNIX:/tmp/qemu-normal.sock"
+    log_info "Secure World 日志: docker exec $CONTAINER_NAME tail -f /tmp/qemu-secure.log"
 
-    # 后台启动监听
-    docker exec -d "$CONTAINER_NAME" bash -l -c "listen_on_guest_vm_shell" 2>/dev/null || true
-    docker exec -d "$CONTAINER_NAME" bash -l -c "listen_on_secure_world_log > /tmp/secure-world.log 2>&1" || true
-
-    # 前台启动 QEMU
+    # 前台启动 QEMU（串口写 Unix socket + 文件）
     docker exec -it "$CONTAINER_NAME" bash -l -c "$QEMU_CMD"
 }
 
