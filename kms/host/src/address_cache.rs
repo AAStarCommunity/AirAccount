@@ -3,7 +3,7 @@
 //! This module provides Normal World caching for address → (wallet_id, derivation_path) mappings
 //! The cache can be rebuilt from TEE if lost, using the kms-recovery-cli tool
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -31,22 +31,19 @@ pub fn load_address_map() -> Result<AddressMap> {
         return Ok(HashMap::new());
     }
 
-    let content = fs::read_to_string(path)
-        .context("Failed to read address_map.json")?;
+    let content = fs::read_to_string(path).context("Failed to read address_map.json")?;
 
-    let map: AddressMap = serde_json::from_str(&content)
-        .context("Failed to parse address_map.json")?;
+    let map: AddressMap =
+        serde_json::from_str(&content).context("Failed to parse address_map.json")?;
 
     Ok(map)
 }
 
 /// Save address map to disk
 pub fn save_address_map(map: &AddressMap) -> Result<()> {
-    let content = serde_json::to_string_pretty(map)
-        .context("Failed to serialize address_map")?;
+    let content = serde_json::to_string_pretty(map).context("Failed to serialize address_map")?;
 
-    fs::write(ADDRESS_MAP_PATH, content)
-        .context("Failed to write address_map.json")?;
+    fs::write(ADDRESS_MAP_PATH, content).context("Failed to write address_map.json")?;
 
     Ok(())
 }
@@ -60,12 +57,15 @@ pub fn update_address_entry(
 ) -> Result<()> {
     let mut map = load_address_map()?;
 
-    map.insert(address.to_string(), AddressMetadata {
-        wallet_id,
-        derivation_path: derivation_path.to_string(),
-        public_key: public_key.to_string(),
-        created_at: current_timestamp(),
-    });
+    map.insert(
+        address.to_string(),
+        AddressMetadata {
+            wallet_id,
+            derivation_path: derivation_path.to_string(),
+            public_key: public_key.to_string(),
+            created_at: current_timestamp(),
+        },
+    );
 
     save_address_map(&map)?;
     Ok(())
@@ -139,7 +139,10 @@ mod tests {
             "created_at": 1700000000
         }"#;
         let meta: AddressMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.wallet_id.to_string(), "4319f351-0b24-4097-b659-80ee4f824cdd");
+        assert_eq!(
+            meta.wallet_id.to_string(),
+            "4319f351-0b24-4097-b659-80ee4f824cdd"
+        );
         assert_eq!(meta.created_at, 1700000000);
     }
 

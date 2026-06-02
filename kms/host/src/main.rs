@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use kms::{cli, tests, create_wallet, derive_address, sign_transaction};
+use kms::{cli, create_wallet, derive_address, sign_transaction, tests};
 
 use anyhow::{bail, Result};
 use structopt::StructOpt;
