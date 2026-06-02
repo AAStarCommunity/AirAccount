@@ -263,9 +263,7 @@ impl KmsDb {
                     Err(alter_err) => {
                         // Re-verify: concurrent process may have added the column between
                         // our check and the ALTER. Only propagate if column still absent.
-                        if !check_col_exists(&conn)
-                            .context("Re-check after ALTER TABLE failure")?
-                        {
+                        if !check_col_exists(&conn).context("Re-check after ALTER TABLE failure")? {
                             return Err(alter_err)
                                 .context("Failed to add tee_deleted column to p256_session_keys");
                         }
@@ -812,7 +810,9 @@ impl KmsDb {
             return Err(anyhow::anyhow!(
                 "activate_p256_session_key: already {} active keys for wallet {} (max {}); \
                  slow create raced with another key. Caller will clean up TEE material.",
-                active_count, wallet_id, max_active
+                active_count,
+                wallet_id,
+                max_active
             ));
         }
 
@@ -854,8 +854,10 @@ impl KmsDb {
              credential_hash, credential_expires_at, status, created_at, updated_at, revoked_at \
              FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2",
         )?;
-        let mut rows =
-            stmt.query_map(params![wallet_id, session_index], Self::map_p256_session_key_row)?;
+        let mut rows = stmt.query_map(
+            params![wallet_id, session_index],
+            Self::map_p256_session_key_row,
+        )?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -864,7 +866,11 @@ impl KmsDb {
 
     /// Delete a pending P256 session key placeholder after TA key generation fails.
     /// Only removes rows with status='pending'; does not affect active or revoked keys.
-    pub fn delete_p256_session_key_pending(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+    pub fn delete_p256_session_key_pending(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+    ) -> Result<bool> {
         let conn = self.lock();
         let n = conn.execute(
             "DELETE FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
@@ -922,7 +928,10 @@ impl KmsDb {
         )?;
         let excl: Option<i64> = exclude_session_index.map(|i| i as i64);
         let indices: Vec<u32> = stmt
-            .query_map(params![wallet_id, gc_cutoff_unix, excl, stuck_pending_cutoff], |row| row.get(0))?
+            .query_map(
+                params![wallet_id, gc_cutoff_unix, excl, stuck_pending_cutoff],
+                |row| row.get(0),
+            )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(indices)
     }
