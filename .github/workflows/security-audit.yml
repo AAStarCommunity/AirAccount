@@ -2,9 +2,9 @@ name: Security Audit
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, KMS ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, KMS ]
   schedule:
     # 每天UTC时间0点运行
     - cron: '0 0 * * *'
@@ -23,7 +23,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: false  # 不检查submodules以加快速度
+        submodules: true
     
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -51,25 +51,29 @@ jobs:
     - name: Run cargo audit
       run: |
         echo "## Running cargo audit..."
-        cargo audit 2>&1 | tee cargo-audit.txt
+        cargo audit 2>&1 | tee $GITHUB_WORKSPACE/cargo-audit.txt
+      working-directory: kms/host
       continue-on-error: true
-    
+
     - name: Run cargo deny
       run: |
         echo "## Running cargo deny..."
-        cargo deny check 2>&1 | tee cargo-deny.txt
+        cargo deny check 2>&1 | tee $GITHUB_WORKSPACE/cargo-deny.txt
+      working-directory: kms/host
       continue-on-error: true
-    
+
     - name: Check for unsafe code
       run: |
         echo "## Checking for unsafe code..."
-        cargo geiger --all-features 2>&1 | tee cargo-geiger.txt
+        cargo geiger --all-features 2>&1 | tee $GITHUB_WORKSPACE/cargo-geiger.txt
+      working-directory: kms/host
       continue-on-error: true
-    
+
     - name: Check outdated dependencies
       run: |
         echo "## Checking outdated dependencies..."
-        cargo outdated 2>&1 | tee cargo-outdated.txt
+        cargo outdated 2>&1 | tee $GITHUB_WORKSPACE/cargo-outdated.txt
+      working-directory: kms/host
       continue-on-error: true
     
     - name: Run custom security check
@@ -120,7 +124,7 @@ jobs:
     
     - name: Upload security report
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: security-report-${{ github.sha }}
         path: |
@@ -184,7 +188,7 @@ jobs:
         cargo tree > sbom.txt
     
     - name: Upload SBOM
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sbom-${{ github.sha }}
         path: |

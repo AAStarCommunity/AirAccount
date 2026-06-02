@@ -5,11 +5,16 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 const DEFAULT_DB_PATH: &str = "/root/shared/kms.db";
+
+/// How long a 'pending' P256 session key placeholder is considered in-flight before
+/// it is treated as stuck (host crash between allocate and activate). Used in both
+/// the allocate quota count and the GC expiry query — must stay in sync.
+const PENDING_TTL_SECS: i64 = 300; // 5 minutes
 
 const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -103,6 +108,7 @@ CREATE TABLE IF NOT EXISTS p256_session_keys (
     credential_hash         TEXT,
     credential_expires_at   INTEGER,
     status                  TEXT NOT NULL DEFAULT 'pending',
+    tee_deleted             INTEGER NOT NULL DEFAULT 0,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     revoked_at              TEXT,
@@ -118,6 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_tx_log_op ON tx_log(op);
 CREATE INDEX IF NOT EXISTS idx_agent_keys_human ON agent_keys(human_id);
 CREATE INDEX IF NOT EXISTS idx_agent_keys_address ON agent_keys(agent_address);
 CREATE INDEX IF NOT EXISTS idx_jwt_secret_meta_status ON jwt_secret_meta(status);
+CREATE INDEX IF NOT EXISTS idx_p256_session_gc ON p256_session_keys(wallet_id, status, credential_expires_at);
 "#;
 
 // ── TX stats ──
@@ -225,8 +232,45 @@ impl KmsDb {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite DB at {}", path))?;
+        // Prevent SQLITE_BUSY on schema init and migration: retry automatically for up to 5s
+        // before returning an error. DDL operations on a shared WAL-mode DB can be transiently
+        // locked by concurrent readers/writers.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .context("Failed to set SQLite busy timeout")?;
         conn.execute_batch(SCHEMA)
             .context("Failed to initialize DB schema")?;
+        // Migration: add tee_deleted column to DBs created before this column existed.
+        // Uses PRAGMA table_info to distinguish "already exists" (safe to skip) from real
+        // errors (disk full, corruption) that must propagate. TOCTOU is handled by re-verifying
+        // on ALTER failure: if concurrent open already added the column, we treat it as success.
+        {
+            let check_col_exists = |c: &Connection| -> Result<bool> {
+                let mut stmt = c
+                    .prepare("PRAGMA table_info(p256_session_keys)")
+                    .context("Failed to query p256_session_keys schema")?;
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<_>>()
+                    .context("Failed to read p256_session_keys schema")?;
+                Ok(names.iter().any(|n| n == "tee_deleted"))
+            };
+            if !check_col_exists(&conn)? {
+                match conn.execute_batch(
+                    "ALTER TABLE p256_session_keys \
+                     ADD COLUMN tee_deleted INTEGER NOT NULL DEFAULT 0;",
+                ) {
+                    Ok(()) => {}
+                    Err(alter_err) => {
+                        // Re-verify: concurrent process may have added the column between
+                        // our check and the ALTER. Only propagate if column still absent.
+                        if !check_col_exists(&conn).context("Re-check after ALTER TABLE failure")? {
+                            return Err(alter_err)
+                                .context("Failed to add tee_deleted column to p256_session_keys");
+                        }
+                    }
+                }
+            }
+        }
         println!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -654,39 +698,60 @@ impl KmsDb {
         })
     }
 
-    /// Atomically allocate the next session_index and insert a 'pending' placeholder.
-    /// The placeholder prevents concurrent requests from claiming the same index before
-    /// the TA key generation completes. Call activate_p256_session_key after TA success.
     pub fn allocate_p256_session_key_pending(
         &self,
         wallet_id: &str,
         human_id: &str,
+        now_unix: i64,
+        max_active: i64,
     ) -> Result<u32> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.lock();
-        // Single SQL operation: compute MAX+1 and INSERT as a single atomic statement.
-        // The SELECT subquery and INSERT share the same connection lock, preventing TOCTOU.
-        conn.execute(
+        let pending_cutoff = now_unix - PENDING_TTL_SECS;
+        let now_rfc = Utc::now().to_rfc3339();
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let current_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND (
+                 (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2))
+                 OR (status = 'pending' AND CAST(strftime('%s', created_at) AS INTEGER) >= ?3)
+               )",
+            params![wallet_id, now_unix, pending_cutoff],
+            |row| row.get(0),
+        )?;
+
+        if current_count >= max_active {
+            return Err(anyhow::anyhow!(
+                "Wallet already has {} active/recent-pending P256 session keys (max {}). \
+                 Revoke an existing key or wait for stuck pending to expire ({}s).",
+                current_count,
+                max_active,
+                PENDING_TTL_SECS
+            ));
+        }
+
+        tx.execute(
             "INSERT INTO p256_session_keys \
              (wallet_id, session_index, human_id, pub_key_x, pub_key_y, \
               credential_hash, credential_expires_at, status, created_at, updated_at) \
              SELECT ?1, COALESCE(MAX(session_index)+1, 0), ?2, '', '', NULL, NULL, 'pending', ?3, ?3 \
              FROM p256_session_keys WHERE wallet_id=?1",
-            params![wallet_id, human_id, now],
+            params![wallet_id, human_id, now_rfc],
         )
-        .context("allocate_p256_session_key_pending")?;
+        .context("allocate_p256_session_key_pending INSERT")?;
 
-        // Read back the allocated index (the MAX that was just inserted)
-        let idx: i64 = conn.query_row(
+        let idx: i64 = tx.query_row(
             "SELECT session_index FROM p256_session_keys \
              WHERE wallet_id=?1 AND status='pending' ORDER BY session_index DESC LIMIT 1",
             params![wallet_id],
             |row| row.get(0),
         )?;
+
+        tx.commit()?;
         Ok(idx as u32)
     }
 
-    /// Activate a pending P256 session key after successful TA key generation.
     pub fn activate_p256_session_key(
         &self,
         wallet_id: &str,
@@ -695,24 +760,47 @@ impl KmsDb {
         pub_key_y: &str,
         credential_hash: &str,
         credential_expires_at: i64,
+        max_active: i64,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE p256_session_keys SET pub_key_x=?3, pub_key_y=?4, \
-             credential_hash=?5, credential_expires_at=?6, status='active', updated_at=?7 \
-             WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
-            params![
+        let now_unix = Utc::now().timestamp();
+        let now_rfc = Utc::now().to_rfc3339();
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let active_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND status='active' \
+               AND (credential_expires_at IS NULL OR credential_expires_at > ?2)",
+            params![wallet_id, now_unix],
+            |row| row.get(0),
+        )?;
+        if active_count >= max_active {
+            return Err(anyhow::anyhow!(
+                "activate_p256_session_key: already {} active keys for wallet {} (max {}); \
+                 slow create raced with another key. Caller will clean up TEE material.",
+                active_count,
                 wallet_id,
-                session_index,
-                pub_key_x,
-                pub_key_y,
-                credential_hash,
-                credential_expires_at,
-                now
-            ],
-        )
-        .context("activate_p256_session_key")?;
+                max_active
+            ));
+        }
+
+        let n = tx
+            .execute(
+                "UPDATE p256_session_keys SET pub_key_x=?3, pub_key_y=?4, \
+                 credential_hash=?5, credential_expires_at=?6, status='active', updated_at=?7 \
+                 WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
+                params![
+                    wallet_id,
+                    session_index,
+                    pub_key_x,
+                    pub_key_y,
+                    credential_hash,
+                    credential_expires_at,
+                    now_rfc
+                ],
+            )
+            .context("activate_p256_session_key")?;
         if n == 0 {
             return Err(anyhow::anyhow!(
                 "activate_p256_session_key: no pending row found for ({}, {})",
@@ -720,6 +808,7 @@ impl KmsDb {
                 session_index
             ));
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -734,8 +823,10 @@ impl KmsDb {
              credential_hash, credential_expires_at, status, created_at, updated_at, revoked_at \
              FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2",
         )?;
-        let mut rows =
-            stmt.query_map(params![wallet_id, session_index], Self::map_p256_session_key_row)?;
+        let mut rows = stmt.query_map(
+            params![wallet_id, session_index],
+            Self::map_p256_session_key_row,
+        )?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -744,7 +835,11 @@ impl KmsDb {
 
     /// Delete a pending P256 session key placeholder after TA key generation fails.
     /// Only removes rows with status='pending'; does not affect active or revoked keys.
-    pub fn delete_p256_session_key_pending(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+    pub fn delete_p256_session_key_pending(
+        &self,
+        wallet_id: &str,
+        session_index: u32,
+    ) -> Result<bool> {
         let conn = self.lock();
         let n = conn.execute(
             "DELETE FROM p256_session_keys WHERE wallet_id=?1 AND session_index=?2 AND status='pending'",
@@ -762,6 +857,117 @@ impl KmsDb {
             params![wallet_id, session_index, now],
         )?;
         Ok(n > 0)
+    }
+
+    pub fn list_expired_p256_session_keys(
+        &self,
+        wallet_id: &str,
+        gc_cutoff_unix: i64,
+        exclude_session_index: Option<u32>,
+    ) -> Result<Vec<u32>> {
+        // stuck_pending_cutoff = gc_cutoff - PENDING_TTL_SECS.
+        // Caller sets gc_cutoff = now - 60s (clock-drift grace window), so effective
+        // stuck threshold is now - 360s (6 min). Pending rows older than this are GC-eligible.
+        // The extra 60s is intentional: a pending that just crossed 5 min gets one more GC cycle
+        // before actual deletion, giving in-flight TA calls a final chance to complete.
+        let stuck_pending_cutoff = gc_cutoff_unix - PENDING_TTL_SECS;
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT session_index FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND (?3 IS NULL OR session_index != ?3) \
+               AND (
+                 -- Expired active or pending (credential_expires_at set and past)
+                 (credential_expires_at IS NOT NULL AND credential_expires_at <= ?2 \
+                  AND status IN ('active', 'pending'))
+                 OR
+                 -- Stuck pending: created long ago, NULL expiry, host crashed after allocate
+                 (status = 'pending' \
+                  AND CAST(strftime('%s', created_at) AS INTEGER) < ?4)
+               )",
+        )?;
+        let excl: Option<i64> = exclude_session_index.map(|i| i as i64);
+        let indices: Vec<u32> = stmt
+            .query_map(
+                params![wallet_id, gc_cutoff_unix, excl, stuck_pending_cutoff],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(indices)
+    }
+
+    /// Count active/pending (non-expired) P256 session keys for a wallet.
+    /// Note: this method is NOT used for the max-2 enforcement (that is atomic inside
+    /// allocate_p256_session_key_pending). This is provided for diagnostics/stats only.
+    /// active rows should always have a non-null credential_expires_at after activation;
+    /// NULL expiry on an active row is a data anomaly but counted conservatively.
+    pub fn count_active_p256_session_keys(&self, wallet_id: &str, now_unix: i64) -> Result<i64> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND (status = 'pending' \
+                    OR (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2)))",
+            params![wallet_id, now_unix],
+            |row| row.get(0),
+        ).context("count_active_p256_session_keys")
+    }
+
+    /// Atomically claim a P256 session key for GC by setting status='revoked'.
+    /// Status guard ensures we never touch an already-revoked row.
+    /// Returns true if the row was claimed (rows_affected > 0), false if already revoked/gone.
+    /// Callers should proceed with TEE deletion only when this returns true.
+    pub fn mark_p256_session_key_gc(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE p256_session_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
+             WHERE wallet_id=?1 AND session_index=?2 AND status IN ('active', 'pending')",
+            params![wallet_id, session_index, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Mark a P256 session key's TEE entry as confirmed-deleted (tee_deleted=1).
+    /// Called after a successful tee.delete_p256_session_key(). Safe to call redundantly.
+    pub fn mark_p256_tee_deleted(&self, wallet_id: &str, session_index: u32) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE p256_session_keys SET tee_deleted=1 \
+             WHERE wallet_id=?1 AND session_index=?2",
+            params![wallet_id, session_index],
+        )?;
+        Ok(())
+    }
+
+    /// Return session_index values for revoked keys whose TEE deletion was not yet confirmed.
+    /// These have status='revoked' AND tee_deleted=0 — the TEE delete failed or was never attempted.
+    /// Called at the start of each GC pass to retry phantom TEE cleanup.
+    pub fn list_unconfirmed_tee_deletes(&self, wallet_id: &str) -> Result<Vec<u32>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT session_index FROM p256_session_keys \
+             WHERE wallet_id=?1 AND status='revoked' AND tee_deleted=0",
+        )?;
+        let indices: Vec<u32> = stmt
+            .query_map(params![wallet_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(indices)
+    }
+
+    /// Check whether a P256 session key exists with status='revoked'.
+    /// Used by revoke_p256_session_key to distinguish "already revoked" (idempotent)
+    /// from "not found" (caller error), when mark_p256_session_key_gc returns false.
+    pub fn p256_session_key_is_revoked(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM p256_session_keys \
+             WHERE wallet_id=?1 AND session_index=?2 AND status='revoked'",
+            params![wallet_id, session_index],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context("p256_session_key_is_revoked")
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {

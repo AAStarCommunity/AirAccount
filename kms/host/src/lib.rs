@@ -20,18 +20,21 @@
 //! KMS Host Library
 //! Shared modules for CLI and API server
 
+pub mod address_cache;
+pub mod agent_jwt;
 pub mod cli;
+pub mod db;
+pub mod rate_limit;
 #[cfg(feature = "tee")]
 pub mod ta_client;
 #[cfg(feature = "tee")]
 pub mod tests;
-pub mod address_cache;
-pub mod db;
-pub mod rate_limit;
 pub mod webauthn;
-pub mod agent_jwt;
 
 // Re-export commonly used items
+pub use address_cache::{
+    load_address_map, lookup_address, save_address_map, update_address_entry, AddressMap,
+    AddressMetadata,
+};
 #[cfg(feature = "tee")]
-pub use ta_client::{TaClient, TeeHandle, create_wallet, derive_address, sign_transaction};
-pub use address_cache::{AddressMetadata, AddressMap, load_address_map, save_address_map, update_address_entry, lookup_address};
+pub use ta_client::{create_wallet, derive_address, sign_transaction, TaClient, TeeHandle};
