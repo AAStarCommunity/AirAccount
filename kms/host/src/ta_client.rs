@@ -674,10 +674,16 @@ impl TeeHandle {
         &self,
         wallet_id: uuid::Uuid,
         agent_index: u32,
+        subject: &str,
+        ttl_secs: i64,
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<proto::CreateAgentKeyOutput> {
         let input = bincode::serialize(&proto::CreateAgentKeyInput {
             wallet_id,
             agent_index,
+            subject: subject.to_string(),
+            ttl_secs,
+            passkey_assertion,
         })
         .context("Failed to serialize CreateAgentKeyInput")?;
         let out = self.call(proto::Command::CreateAgentKey, input).await?;
@@ -712,17 +718,6 @@ impl TeeHandle {
         Ok(output.signature)
     }
 
-    pub async fn jwt_hmac_sign(&self, message: &[u8]) -> Result<proto::JwtHmacSignOutput> {
-        let input = bincode::serialize(&proto::JwtHmacSignInput {
-            message: message.to_vec(),
-        })
-        .context("Failed to serialize JwtHmacSignInput")?;
-        let out = self.call(proto::Command::JwtHmacSign, input).await?;
-        let output: proto::JwtHmacSignOutput =
-            bincode::deserialize(&out).context("Failed to deserialize JwtHmacSignOutput")?;
-        Ok(output)
-    }
-
     pub async fn jwt_hmac_verify(
         &self,
         kid: &str,
@@ -739,17 +734,6 @@ impl TeeHandle {
         let output: proto::JwtHmacVerifyOutput =
             bincode::deserialize(&out).context("Failed to deserialize JwtHmacVerifyOutput")?;
         Ok(output.valid)
-    }
-
-    pub async fn jwt_sign_payload(&self, payload_b64: &str) -> Result<proto::JwtSignPayloadOutput> {
-        let input = bincode::serialize(&proto::JwtSignPayloadInput {
-            payload_b64: payload_b64.to_string(),
-        })
-        .context("Failed to serialize JwtSignPayloadInput")?;
-        let out = self.call(proto::Command::JwtSignPayload, input).await?;
-        let output: proto::JwtSignPayloadOutput =
-            bincode::deserialize(&out).context("Failed to deserialize JwtSignPayloadOutput")?;
-        Ok(output)
     }
 
     pub async fn jwt_rotate_secret(&self, force: bool) -> Result<proto::JwtRotateSecretOutput> {
@@ -773,14 +757,46 @@ impl TeeHandle {
         Ok(output)
     }
 
+    pub async fn sign_grant_session(
+        &self,
+        input: proto::SignGrantSessionInput,
+    ) -> Result<proto::SignGrantSessionOutput> {
+        let serialized =
+            bincode::serialize(&input).context("Failed to serialize SignGrantSessionInput")?;
+        let out = self
+            .call(proto::Command::SignGrantSession, serialized)
+            .await?;
+        let output: proto::SignGrantSessionOutput =
+            bincode::deserialize(&out).context("Failed to deserialize SignGrantSessionOutput")?;
+        Ok(output)
+    }
+
+    pub async fn sign_p256_grant_session(
+        &self,
+        input: proto::SignP256GrantSessionInput,
+    ) -> Result<proto::SignP256GrantSessionOutput> {
+        let serialized =
+            bincode::serialize(&input).context("Failed to serialize SignP256GrantSessionInput")?;
+        let out = self
+            .call(proto::Command::SignP256GrantSession, serialized)
+            .await?;
+        let output: proto::SignP256GrantSessionOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize SignP256GrantSessionOutput")?;
+        Ok(output)
+    }
+
     pub async fn create_p256_session_key(
         &self,
         wallet_id: uuid::Uuid,
         session_index: u32,
+        subject: &str,
+        ttl_secs: i64,
     ) -> Result<proto::CreateP256SessionKeyOutput> {
         let input = bincode::serialize(&proto::CreateP256SessionKeyInput {
             wallet_id,
             session_index,
+            subject: subject.to_string(),
+            ttl_secs,
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
         let out = self

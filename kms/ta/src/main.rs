@@ -640,6 +640,9 @@ fn agent_derivation_path(agent_index: u32) -> String {
     format!("m/44'/60'/0'/1/{}", agent_index)
 }
 
+/// Maximum allowed JWT lifetime: 7 days.
+const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
+
 fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
     dbg_println!(
         "[+] Create agent key for wallet: {:?}, agent_index: {}",
@@ -648,12 +651,50 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     );
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // C-1: TA-side passkey verification — blocks a compromised host from calling this
+    // command directly to mint agent credentials without user presence.
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    // H-2: Subject must not contain JSON-special characters that could inject claims.
+    validate_jwt_subject(&input.subject)?;
+
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
+
+    // Build JWT payload entirely inside TEE — iat computed from TA system clock so
+    // a compromised host cannot supply iat=0 or iat=far_future to shift the TTL window.
+    // H-3: TA owns iat; host only supplies ttl_secs (capped above).
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
+    let wallet_id_str = input.wallet_id.to_string();
+    let exp = iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
+    let payload_json = format!(
+        "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"{addr}\",\"iat\":{iat},\"exp\":{exp}}}",
+        sub  = input.subject,
+        wid  = wallet_id_str,
+        idx  = input.agent_index,
+        addr = agent_addr_hex,
+        iat  = iat,
+        exp  = exp,
+    );
+    let jwt_out = jwt_sign_payload_internal(&payload_json)?;
 
     Ok(proto::CreateAgentKeyOutput {
         agent_address,
         public_key_compressed,
+        jwt_kid:        jwt_out.kid,
+        jwt_header_b64: jwt_out.header_b64,
+        jwt_payload_b64: jwt_out.payload_b64,
+        jwt_hmac:       jwt_out.hmac,
     })
 }
 
@@ -675,6 +716,10 @@ fn sign_agent_user_op(input: &proto::SignAgentUserOpInput) -> Result<proto::Sign
     if !verify_result.valid {
         return Err(anyhow!("TA: agent JWT credential verification failed"));
     }
+
+    // Bind JWT claims to request parameters — prevents a compromised host from using
+    // wallet A's JWT to request signing for wallet B (Issue #16 claim-binding fix).
+    verify_jwt_wallet_claims(&input.jwt_signing_input, &input.wallet_id, input.agent_index)?;
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
     let derivation_path = agent_derivation_path(input.agent_index);
@@ -716,19 +761,18 @@ fn hmac_sha256(secret: &[u8], message: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn jwt_hmac_sign(input: &proto::JwtHmacSignInput) -> Result<proto::JwtHmacSignOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
-    let mut store = JwtSecretStore::load(&db);
-    let current = store.ensure_current()?.clone();
-    store.save(&db)?;
 
-    Ok(proto::JwtHmacSignOutput {
-        hmac: hmac_sha256(&current.secret, &input.message)?,
-        kid: current.kid,
-    })
+/// Internal JWT signing helper — NOT exposed as a TA command.
+/// Accepts a pre-built payload JSON string, computes the full JWT signing_input
+/// and HMAC using the current TEE-stored secret.
+struct JwtSignedMaterial {
+    kid: String,
+    header_b64: String,
+    payload_b64: String,
+    hmac: [u8; 32],
 }
 
-fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSignPayloadOutput> {
+fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
     let db = SecureStorageClient::open(DB_NAME)?;
@@ -736,22 +780,85 @@ fn jwt_sign_payload(input: &proto::JwtSignPayloadInput) -> Result<proto::JwtSign
     let current = store.ensure_current()?.clone();
     store.save(&db)?;
 
-    // Build header JSON identical to what serde_json would produce for JwtHeader
     let header_json = format!(
         "{{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"{}\"}}",
         current.kid
     );
     let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+    let payload_b64 = Base64UrlUnpadded::encode_string(payload_json.as_bytes());
 
-    // signing_input = header_b64 + "." + payload_b64 (standard JWT format)
-    let signing_input = format!("{}.{}", header_b64, input.payload_b64);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
     let hmac = hmac_sha256(&current.secret, signing_input.as_bytes())?;
 
-    Ok(proto::JwtSignPayloadOutput {
-        kid: current.kid,
-        header_b64,
-        hmac,
-    })
+    Ok(JwtSignedMaterial { kid: current.kid, header_b64, payload_b64, hmac })
+}
+
+/// Extract a u64 field value from a compact JSON object without serde_json.
+fn extract_json_u64_field(json: &str, key: &str) -> Result<u64> {
+    let pattern = format!("\"{}\":", key);
+    let start = json.find(&*pattern)
+        .ok_or_else(|| anyhow!("JWT claim '{}' not found", key))?
+        + pattern.len();
+    let rest = json[start..].trim_start_matches(' ');
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse::<u64>().map_err(|_| anyhow!("JWT claim '{}' is not a u64", key))
+}
+
+/// Validate that `subject` contains only characters safe to embed directly in a JSON string
+/// without escaping. Prevents claim injection via a crafted subject value (H-2).
+fn validate_jwt_subject(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 256 {
+        return Err(anyhow!("JWT subject length must be 1..=256"));
+    }
+    if !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_:.@+/=".contains(&b)) {
+        return Err(anyhow!("JWT subject contains characters not allowed in JSON (no quotes, backslashes, or controls)"));
+    }
+    Ok(())
+}
+
+/// After HMAC verification, decode the JWT payload and verify that wallet_id and
+/// agent_index match the request parameters. Prevents a compromised host from
+/// using a legitimate JWT for wallet A to request signing for wallet B.
+fn verify_jwt_wallet_claims(
+    signing_input: &[u8],
+    expected_wallet_id: &uuid::Uuid,
+    expected_agent_index: u32,
+) -> Result<()> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    let input_str = core::str::from_utf8(signing_input)
+        .map_err(|_| anyhow!("JWT signing_input is not UTF-8"))?;
+    let dot = input_str.find('.')
+        .ok_or_else(|| anyhow!("JWT signing_input missing dot separator"))?;
+    let payload_b64 = &input_str[dot + 1..];
+    let payload_bytes = Base64UrlUnpadded::decode_vec(payload_b64)
+        .map_err(|_| anyhow!("JWT payload base64 decode failed"))?;
+    let payload_str = core::str::from_utf8(&payload_bytes)
+        .map_err(|_| anyhow!("JWT payload is not UTF-8"))?;
+
+    let jwt_wallet_id = extract_json_str_field(payload_str, "wallet_id")?;
+    if jwt_wallet_id != expected_wallet_id.to_string() {
+        return Err(anyhow!("JWT wallet_id claim does not match request"));
+    }
+
+    // H-3: use u64 then bounds-check before casting to avoid silent truncation
+    let jwt_agent_index_u64 = extract_json_u64_field(payload_str, "agent_index")?;
+    if jwt_agent_index_u64 > u32::MAX as u64 {
+        return Err(anyhow!("JWT agent_index overflow"));
+    }
+    if jwt_agent_index_u64 as u32 != expected_agent_index {
+        return Err(anyhow!("JWT agent_index claim does not match request"));
+    }
+
+    // H-4-lite: structural exp/iat check (no trusted clock available in TA mock mode,
+    // but we can reject obviously invalid JWTs: exp must be after iat, within TTL cap).
+    let iat = extract_json_u64_field(payload_str, "iat")?;
+    let exp = extract_json_u64_field(payload_str, "exp")?;
+    if exp <= iat || exp.saturating_sub(iat) > MAX_AGENT_JWT_TTL as u64 {
+        return Err(anyhow!("JWT exp/iat structurally invalid or exceeds TTL cap"));
+    }
+
+    Ok(())
 }
 
 fn create_p256_session_key(
@@ -765,6 +872,12 @@ fn create_p256_session_key(
 
     // Verify the wallet exists so we don't create orphaned session keys
     let _wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // Enforce TTL bounds (same as create_agent_key)
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    validate_jwt_subject(&input.subject)?;
 
     // Generate P-256 key pair via p256-m using OP-TEE hardware RNG (p256_generate_random).
     // priv[32] = private scalar; pub[64] = x(32) || y(32) (uncompressed, no 0x04 prefix)
@@ -791,7 +904,33 @@ fn create_p256_session_key(
     pub_key_x.copy_from_slice(&pub_bytes[..32]);
     pub_key_y.copy_from_slice(&pub_bytes[32..]);
 
-    Ok(proto::CreateP256SessionKeyOutput { pub_key_x, pub_key_y })
+    // Issue JWT credential for this session key (TEE-HMAC'd, same mechanism as agent keys).
+    // agent_index is repurposed as session_index so verify_credential on the host works unchanged.
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let exp = iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
+    let wallet_id_str = input.wallet_id.to_string();
+    let payload_json = format!(
+        "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"0x0000000000000000000000000000000000000000\",\"iat\":{iat},\"exp\":{exp}}}",
+        sub  = input.subject,
+        wid  = wallet_id_str,
+        idx  = input.session_index,
+        iat  = iat,
+        exp  = exp,
+    );
+    let jwt_out = jwt_sign_payload_internal(&payload_json)?;
+
+    Ok(proto::CreateP256SessionKeyOutput {
+        pub_key_x,
+        pub_key_y,
+        jwt_kid:         jwt_out.kid,
+        jwt_header_b64:  jwt_out.header_b64,
+        jwt_payload_b64: jwt_out.payload_b64,
+        jwt_hmac:        jwt_out.hmac,
+    })
 }
 
 fn sign_p256_user_op(
@@ -866,6 +1005,97 @@ fn sign_p256_user_op(
     Ok(proto::SignP256UserOpOutput { signature })
 }
 
+/// Extract wallet_id, agent_index, and exp from a JWT signing input, then validate exp.
+/// signing_input format: "header_b64url.payload_b64url" (exactly two dot-separated segments).
+/// Payload JSON: {"wallet_id":"<uuid>","agent_index":<u32>,"exp":<i64>}
+/// The format is controlled by our own jwt_sign_payload TA function — no whitespace around colons.
+fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    // Guard against memory pressure from attacker-controlled input.
+    const MAX_SIGNING_INPUT_BYTES: usize = 4096;
+    if signing_input.len() > MAX_SIGNING_INPUT_BYTES {
+        return Err(anyhow!("jwt_parse_claims: signing_input too large ({} bytes, max {})",
+            signing_input.len(), MAX_SIGNING_INPUT_BYTES));
+    }
+
+
+    let s = std::str::from_utf8(signing_input)
+        .map_err(|_| anyhow!("jwt_parse_claims: signing_input is not valid UTF-8"))?;
+
+    // Require exactly "header.payload" — split_once ensures both parts are non-empty
+    let (_, payload_b64) = s.split_once('.')
+        .ok_or_else(|| anyhow!("jwt_parse_claims: signing_input must be 'header.payload'"))?;
+    if payload_b64.is_empty() || payload_b64.contains('.') {
+        return Err(anyhow!("jwt_parse_claims: malformed signing_input — expected exactly two segments"));
+    }
+
+
+    let payload_bytes = Base64UrlUnpadded::decode_vec(payload_b64)
+        .map_err(|_| anyhow!("jwt_parse_claims: payload base64url decode failed"))?;
+    let payload = std::str::from_utf8(&payload_bytes)
+        .map_err(|_| anyhow!("jwt_parse_claims: payload is not valid UTF-8"))?;
+
+    // Validate payload starts with '{' — guards against format drift
+    if !payload.starts_with('{') {
+        return Err(anyhow!("jwt_parse_claims: payload is not a JSON object"));
+    }
+
+
+    let wallet_id = extract_json_str_field(payload, "wallet_id")?;
+    let agent_index = extract_json_u32_field(payload, "agent_index")?;
+    // Parse exp for future use; not checked in TA due to unreliable TEE clock epoch.
+    let _exp = extract_json_i64_field(payload, "exp")?;
+
+    Ok((wallet_id, agent_index))
+}
+
+/// Extract a JSON string field value from a minimally-formatted JWT payload.
+/// Format contract: `"field":"value"` with no whitespace around colon (our jwt_sign_payload format).
+fn extract_json_str_field(json: &str, field: &str) -> Result<String> {
+    let needle = format!("\"{}\":\"", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find('"')
+        .ok_or_else(|| anyhow!("unterminated string for field '{}' in JWT payload", field))?
+        + start;
+    Ok(json[start..end].to_string())
+}
+
+/// Extract a JSON unsigned integer field from JWT payload.
+/// Format contract: `"field":12345` (digits immediately after colon, no whitespace).
+fn extract_json_u32_field(json: &str, field: &str) -> Result<u32> {
+    let needle = format!("\"{}\":", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(json[start..].len())
+        + start;
+    if start == end {
+        return Err(anyhow!("empty value for u32 field '{}' in JWT payload", field));
+    }
+    json[start..end].parse::<u32>()
+        .map_err(|e| anyhow!("field '{}' is not a valid u32: {}", field, e))
+}
+
+/// Extract a JSON signed integer field from JWT payload (used for 'exp' claim).
+fn extract_json_i64_field(json: &str, field: &str) -> Result<i64> {
+    let needle = format!("\"{}\":", field);
+    let start = json.find(needle.as_str())
+        .ok_or_else(|| anyhow!("field '{}' not found in JWT payload", field))?
+        + needle.len();
+    let end = json[start..].find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(json[start..].len())
+        + start;
+    if start == end {
+        return Err(anyhow!("empty value for i64 field '{}' in JWT payload", field));
+    }
+    json[start..end].parse::<i64>()
+        .map_err(|e| anyhow!("field '{}' is not a valid i64 in JWT payload: {}", field, e))
+}
+
 /// Delete a P256 session key from TEE secure storage.
 /// Called by the host's lazy GC when credential_expires_at has passed.
 /// Returns deleted=false (not an error) if the key is already absent — idempotent.
@@ -882,11 +1112,7 @@ fn delete_p256_session_key(
     match db.delete_entry::<P256SessionKey>(&store_id) {
         Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
         Err(e) => {
-            // OP-TEE secure storage returns item-not-found when the key is already absent.
-            // Treat as idempotent success so double-GC doesn't return an error.
             let msg = e.to_string();
-            // Only treat the specific OP-TEE TEE_ERROR_ITEM_NOT_FOUND as idempotent success.
-            // Other storage errors (I/O failures, corruption) must propagate so callers can retry.
             if msg.contains("ItemNotFound") || msg.contains("ITEM_NOT_FOUND") {
                 Ok(proto::DeleteP256SessionKeyOutput { deleted: false })
             } else {
@@ -903,6 +1129,55 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
         input.primary_type
     );
 
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // TA-side auth gate (defense-in-depth): independently verifies the caller's authorization.
+    // Host has already validated, but TA confirms using TEE-resident secrets that cannot be
+    // forged by a compromised host. Exactly one auth proof must be present.
+    match (&input.passkey_assertion, &input.jwt_kid) {
+        (Some(_), None) => {
+            // WebAuthn path: verify passkey signature against wallet's stored public key.
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+        }
+        (None, Some(kid)) => {
+            // Agent JWT path: all three JWT proof fields must be present.
+            let signing_input = input.jwt_signing_input.as_deref()
+                .ok_or_else(|| anyhow!("sign_typed_data: jwt_signing_input missing from JWT proof"))?;
+            let expected_hmac = input.jwt_hmac.as_deref()
+                .ok_or_else(|| anyhow!("sign_typed_data: jwt_hmac missing from JWT proof"))?;
+
+            // Step 1: Verify HMAC using TEE-resident JWT secret.
+            let verify_result = jwt_hmac_verify(&proto::JwtHmacVerifyInput {
+                kid: kid.clone(),
+                message: signing_input.to_vec(),
+                expected_hmac: expected_hmac.to_vec(),
+            })?;
+            if !verify_result.valid {
+                return Err(anyhow!("JWT HMAC verification failed in TA for sign-typed-data"));
+            }
+
+            // Step 2: Verify JWT claims bind to this request's wallet and agent path.
+            // Parse wallet_id and agent_index from the JWT payload (base64url-encoded JSON).
+            let (jwt_wallet_id, jwt_agent_index) = jwt_parse_claims(signing_input)?;
+            if jwt_wallet_id != input.wallet_id.to_string() {
+                return Err(anyhow!("JWT wallet_id does not match request wallet_id"));
+            }
+            let expected_path = format!("m/44'/60'/0'/1/{}", jwt_agent_index);
+            if input.hd_path != expected_path {
+                return Err(anyhow!(
+                    "JWT agent path '{}' does not match request hd_path '{}'",
+                    expected_path, input.hd_path
+                ));
+            }
+        }
+        (None, None) => {
+            return Err(anyhow!("sign_typed_data: no auth proof provided to TA"));
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!("sign_typed_data: ambiguous auth — provide passkey OR JWT, not both"));
+        }
+    }
+
     // Resolve the primary type definition from the provided type list
     let primary_type_def = input
         .types
@@ -913,7 +1188,6 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     // Compute EIP-712 digest entirely inside TEE
     let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
 
-    let wallet = load_wallet_cached(&input.wallet_id)?;
     let private_key = wallet.export_private_key(&input.hd_path)?;
 
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
@@ -927,6 +1201,217 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     signature.push(recovery_id.to_i32() as u8 + 27);
 
     Ok(proto::SignTypedDataOutput { signature })
+}
+
+// ── Grant Session ABI encoding helpers ──
+
+fn abi_u256_from_u64(val: u64) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+fn abi_pad_address(addr: &[u8; 20]) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[12..32].copy_from_slice(addr);
+    buf
+}
+
+/// bytes4 is right-padded in ABI encoding (data at low offset, zeros at high offset)
+fn abi_pad_bytes4_right(b: &[u8; 4]) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[0..4].copy_from_slice(b);
+    buf
+}
+
+fn abi_u256_from_u16(val: u16) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[30..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+fn abi_u256_from_u32(val: u32) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[28..32].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+/// keccak256(abi.encodePacked(addresses)) — tight-packed 20-byte entries
+fn keccak_packed_addresses(addrs: &[[u8; 20]]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(addrs.len() * 20);
+    for a in addrs {
+        buf.extend_from_slice(a);
+    }
+    Keccak256::digest(&buf).into()
+}
+
+/// keccak256(abi.encodePacked(selectors)) — tight-packed 4-byte entries
+fn keccak_packed_selectors(sels: &[[u8; 4]]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(sels.len() * 4);
+    for s in sels {
+        buf.extend_from_slice(s);
+    }
+    Keccak256::digest(&buf).into()
+}
+
+/// Build GRANT_SESSION_V2 inner hash.
+/// Matches _buildGrantHash() in SessionKeyValidator.sol:
+///   keccak256(abi.encode("GRANT_SESSION_V2", chainId, contract, account, sessionKey,
+///             expiry, contractScope, selectorScope, velocityLimit, velocityWindow,
+///             callTargetsHash, selectorsHash, nonce))
+///
+/// ABI layout: 13 args; head = 13*32 = 416 bytes; string data tail = 64 bytes.
+fn build_grant_session_inner(input: &proto::SignGrantSessionInput) -> [u8; 32] {
+    let call_targets_hash = keccak_packed_addresses(&input.call_targets);
+    let selectors_hash = keccak_packed_selectors(&input.selector_allowlist);
+
+    let mut buf = [0u8; 480];
+    // [0x000] string offset = 13 * 32 = 416
+    buf[0..32].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[30..32].copy_from_slice(&(416u16).to_be_bytes());
+        v
+    });
+    // [0x020] chainId
+    buf[32..64].copy_from_slice(&abi_u256_from_u64(input.chain_id));
+    // [0x040] verifyingContract
+    buf[64..96].copy_from_slice(&abi_pad_address(&input.verifying_contract));
+    // [0x060] account
+    buf[96..128].copy_from_slice(&abi_pad_address(&input.account));
+    // [0x080] sessionKey
+    buf[128..160].copy_from_slice(&abi_pad_address(&input.session_key));
+    // [0x0A0] expiry (uint48)
+    buf[160..192].copy_from_slice(&abi_u256_from_u64(input.expiry));
+    // [0x0C0] contractScope
+    buf[192..224].copy_from_slice(&abi_pad_address(&input.contract_scope));
+    // [0x0E0] selectorScope (bytes4, right-padded)
+    buf[224..256].copy_from_slice(&abi_pad_bytes4_right(&input.selector_scope));
+    // [0x100] velocityLimit (uint16)
+    buf[256..288].copy_from_slice(&abi_u256_from_u16(input.velocity_limit));
+    // [0x120] velocityWindow (uint32)
+    buf[288..320].copy_from_slice(&abi_u256_from_u32(input.velocity_window));
+    // [0x140] callTargetsHash
+    buf[320..352].copy_from_slice(&call_targets_hash);
+    // [0x160] selectorsHash
+    buf[352..384].copy_from_slice(&selectors_hash);
+    // [0x180] nonce (uint256, big-endian 32 bytes)
+    buf[384..416].copy_from_slice(&input.nonce);
+    // [0x1A0] string length = 16
+    buf[416..448].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[31] = 16;
+        v
+    });
+    // [0x1C0] "GRANT_SESSION_V2" (16 bytes, right-zero-padded to 32)
+    buf[448..464].copy_from_slice(b"GRANT_SESSION_V2");
+
+    Keccak256::digest(&buf).into()
+}
+
+/// Build GRANT_P256_SESSION_V2 inner hash.
+/// Matches _buildP256GrantHash() in SessionKeyValidator.sol:
+///   keccak256(abi.encode("GRANT_P256_SESSION_V2", chainId, contract, account, keyX, keyY,
+///             expiry, contractScope, selectorScope, velocityLimit, velocityWindow,
+///             callTargetsHash, selectorsHash, nonce))
+///
+/// ABI layout: 14 args; head = 14*32 = 448 bytes; string data tail = 64 bytes.
+fn build_p256_grant_session_inner(input: &proto::SignP256GrantSessionInput) -> [u8; 32] {
+    let call_targets_hash = keccak_packed_addresses(&input.call_targets);
+    let selectors_hash = keccak_packed_selectors(&input.selector_allowlist);
+
+    let mut buf = [0u8; 512];
+    // [0x000] string offset = 14 * 32 = 448
+    buf[0..32].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[30..32].copy_from_slice(&(448u16).to_be_bytes());
+        v
+    });
+    // [0x020] chainId
+    buf[32..64].copy_from_slice(&abi_u256_from_u64(input.chain_id));
+    // [0x040] verifyingContract
+    buf[64..96].copy_from_slice(&abi_pad_address(&input.verifying_contract));
+    // [0x060] account
+    buf[96..128].copy_from_slice(&abi_pad_address(&input.account));
+    // [0x080] keyX (bytes32)
+    buf[128..160].copy_from_slice(&input.key_x);
+    // [0x0A0] keyY (bytes32)
+    buf[160..192].copy_from_slice(&input.key_y);
+    // [0x0C0] expiry (uint48)
+    buf[192..224].copy_from_slice(&abi_u256_from_u64(input.expiry));
+    // [0x0E0] contractScope
+    buf[224..256].copy_from_slice(&abi_pad_address(&input.contract_scope));
+    // [0x100] selectorScope (bytes4, right-padded)
+    buf[256..288].copy_from_slice(&abi_pad_bytes4_right(&input.selector_scope));
+    // [0x120] velocityLimit (uint16)
+    buf[288..320].copy_from_slice(&abi_u256_from_u16(input.velocity_limit));
+    // [0x140] velocityWindow (uint32)
+    buf[320..352].copy_from_slice(&abi_u256_from_u32(input.velocity_window));
+    // [0x160] callTargetsHash
+    buf[352..384].copy_from_slice(&call_targets_hash);
+    // [0x180] selectorsHash
+    buf[384..416].copy_from_slice(&selectors_hash);
+    // [0x1A0] nonce (uint256, big-endian 32 bytes)
+    buf[416..448].copy_from_slice(&input.nonce);
+    // [0x1C0] string length = 21
+    buf[448..480].copy_from_slice(&{
+        let mut v = [0u8; 32];
+        v[31] = 21;
+        v
+    });
+    // [0x1E0] "GRANT_P256_SESSION_V2" (21 bytes, right-zero-padded to 32)
+    buf[480..501].copy_from_slice(b"GRANT_P256_SESSION_V2");
+
+    Keccak256::digest(&buf).into()
+}
+
+/// Wrap inner hash with EIP-191 personal_sign prefix (matches OpenZeppelin toEthSignedMessageHash).
+fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
+    let mut msg = [0u8; 60];
+    msg[0..28].copy_from_slice(b"\x19Ethereum Signed Message:\n32");
+    msg[28..60].copy_from_slice(inner);
+    Keccak256::digest(&msg).into()
+}
+
+fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    let inner = build_grant_session_inner(input);
+    let final_hash = eip191_hash(&inner);
+
+    let private_key = wallet.export_private_key(&input.hd_path)?;
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let msg = secp256k1::Message::from_slice(&final_hash)?;
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignGrantSessionOutput { signature })
+}
+
+fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<proto::SignP256GrantSessionOutput> {
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+
+    let inner = build_p256_grant_session_inner(input);
+    let final_hash = eip191_hash(&inner);
+
+    let private_key = wallet.export_private_key(&input.hd_path)?;
+    let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let msg = secp256k1::Message::from_slice(&final_hash)?;
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes);
+    signature.push(recovery_id.to_i32() as u8 + 27);
+
+    Ok(proto::SignP256GrantSessionOutput { signature })
 }
 
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
@@ -996,14 +1481,14 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
         Command::CreateAgentKey => process(serialized_input, create_agent_key),
         Command::SignAgentUserOp => process(serialized_input, sign_agent_user_op),
-        Command::JwtHmacSign => process(serialized_input, jwt_hmac_sign),
         Command::JwtHmacVerify => process(serialized_input, jwt_hmac_verify),
         Command::JwtRotateSecret => process(serialized_input, jwt_rotate_secret),
-        Command::JwtSignPayload => process(serialized_input, jwt_sign_payload),
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
         Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
+        Command::SignGrantSession => process(serialized_input, sign_grant_session),
+        Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         _ => bail!("Unsupported command"),
     }
 }

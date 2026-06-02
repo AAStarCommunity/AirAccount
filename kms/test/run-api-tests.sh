@@ -212,6 +212,59 @@ timed_curl "POST /Sign (transaction)" \
     -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"Passkey\":$PASSKEY_JSON}"
 echo ""
 
+# ── Phase 5b: Grant Session Signing ──
+echo "${YELLOW}[Phase 5b] Grant Session Signing${NC}"
+
+# Derive the owner address for use as 'account' in the grant hash
+OWNER_ADDR=$(echo "$LAST_BODY" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+addr = d.get('Address', d.get('address', ''))
+# Normalise: ensure 0x prefix
+if addr and not addr.startswith('0x'): addr = '0x' + addr
+print(addr)
+" 2>/dev/null || echo "")
+
+if [ -z "$OWNER_ADDR" ]; then
+    OWNER_ADDR="0x0000000000000000000000000000000000000001"
+fi
+
+SESSION_KEY="0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"
+DUMMY_CONTRACT="0x0000000000000000000000000000000000000000"
+EXPIRY=$(python3 -c "import time; print(int(time.time()) + 86400)")
+KEY_X="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+KEY_Y="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+# sign-grant-session positive test requires WebAuthn ceremony (browser) — SKIP in headless CI
+# To test manually: call POST /BeginAuthentication first, complete ceremony, then:
+#   POST /kms/sign-grant-session with webAuthnAssertion:{ChallengeId, Credential}
+API_NAMES+=("POST /kms/sign-grant-session (WebAuthn)"); API_TIMES+=("0"); API_STATUS+=("SKIP")
+API_NAMES+=("POST /kms/sign-p256-grant-session (WebAuthn)"); API_TIMES+=("0"); API_STATUS+=("SKIP")
+
+# Negative: sign-grant-session without auth (should fail)
+timed_curl "POST /kms/sign-grant-session (no auth)" \
+    -X POST "$BASE/kms/sign-grant-session" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"chainId\":1,\"verifyingContract\":\"$DUMMY_CONTRACT\",\"account\":\"$OWNER_ADDR\",\"sessionKey\":\"$SESSION_KEY\",\"expiry\":$EXPIRY,\"contractScope\":\"$DUMMY_CONTRACT\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":0,\"velocityWindow\":0,\"nonce\":0}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — no auth correctly rejected)"
+fi
+
+# Negative: sign-p256-grant-session without auth (should fail)
+timed_curl "POST /kms/sign-p256-grant-session (no auth)" \
+    -X POST "$BASE/kms/sign-p256-grant-session" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID\",\"chainId\":1,\"verifyingContract\":\"$DUMMY_CONTRACT\",\"account\":\"$OWNER_ADDR\",\"keyX\":\"$KEY_X\",\"keyY\":\"$KEY_Y\",\"expiry\":$EXPIRY,\"contractScope\":\"$DUMMY_CONTRACT\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":0,\"velocityWindow\":0,\"nonce\":0}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — no auth correctly rejected)"
+fi
+
 # ── Phase 5c: P256 Session Key (v0.18.1) ──
 # P256 key creation requires WebAuthn ceremony (challenge-based, browser flow).
 # Provide P256_SESSION_CRED env var (JWT from a prior create-p256-session-key call)
@@ -262,6 +315,52 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     TOTAL_FAIL=$((TOTAL_FAIL - 1))
     TOTAL_PASS=$((TOTAL_PASS + 1))
     echo "  (Expected failure — CA pre-verify correctly rejected invalid passkey)"
+fi
+
+SIGN_TYPED_DATA_BODY="{\"keyId\":\"$KEY_ID\",\"primaryType\":\"Transfer\",\"domain\":{\"name\":\"Test\",\"version\":\"1\",\"chainId\":1},\"types\":[{\"name\":\"Transfer\",\"fields\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint256\"}]}],\"message\":[{\"name\":\"to\",\"value\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\"},{\"name\":\"amount\",\"value\":\"1000000000000000000\"}]}"
+
+# SignTypedData without any auth (must be rejected — auth gate fix v0.18.2)
+timed_curl "POST /SignTypedData (no auth)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — auth gate correctly rejected unauthenticated sign-typed-data)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted unauthenticated request — auth gate broken!${NC}"
+fi
+
+# SignTypedData with malformed Authorization header (not "Bearer " prefix)
+timed_curl "POST /SignTypedData (malformed auth header)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -H "Authorization: Token invalid.jwt.here" \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — malformed Authorization header correctly rejected)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted malformed Authorization header!${NC}"
+fi
+
+# SignTypedData with syntactically valid Bearer but invalid HMAC (must be rejected)
+timed_curl "POST /SignTypedData (invalid Bearer JWT)" \
+    -X POST "$BASE/kms/SignTypedData" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsImtpZCI6ImZha2Uta2lkIn0.eyJ3YWxsZXRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJhZ2VudF9pbmRleCI6MCwiZXhwIjo5OTk5OTk5OTk5fQ.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    -d "$SIGN_TYPED_DATA_BODY"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — invalid HMAC correctly rejected)"
+else
+    echo "  ${RED}SECURITY: sign-typed-data accepted JWT with invalid HMAC!${NC}"
 fi
 
 # Non-existent key

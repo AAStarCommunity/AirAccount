@@ -698,21 +698,6 @@ impl KmsDb {
         })
     }
 
-    /// Atomically allocate the next session_index and insert a 'pending' placeholder.
-    /// The placeholder prevents concurrent requests from claiming the same index before
-    /// the TA key generation completes. Call activate_p256_session_key after TA success.
-    /// Atomically check the active/pending key count and allocate a new pending slot.
-    /// Both operations are performed under a single Mutex acquisition to prevent TOCTOU.
-    ///
-    /// Counted rows (against max_active):
-    ///   - status='active' with credential_expires_at > now_unix (non-expired)
-    ///   - status='active' with credential_expires_at IS NULL (anomaly; counted conservatively)
-    ///   - status='pending' created within the last `pending_ttl_secs` seconds
-    ///     (stuck pending rows older than pending_ttl_secs are excluded from the quota;
-    ///      they will be cleaned up by the next GC cycle)
-    ///
-    /// Uses rusqlite Transaction (BEGIN IMMEDIATE) for RAII rollback on any error path.
-    /// Returns Err if active/recent-pending count >= max_active before inserting.
     pub fn allocate_p256_session_key_pending(
         &self,
         wallet_id: &str,
@@ -720,15 +705,9 @@ impl KmsDb {
         now_unix: i64,
         max_active: i64,
     ) -> Result<u32> {
-        // Pending rows older than PENDING_TTL_SECS are considered stuck (host crash after
-        // allocate) and excluded from the count so they don't permanently block new creates.
         let pending_cutoff = now_unix - PENDING_TTL_SECS;
-
         let now_rfc = Utc::now().to_rfc3339();
-        let mut conn = self.lock(); // mut required by transaction_with_behavior(&mut self)
-
-        // BEGIN IMMEDIATE: acquire write lock immediately, block other writers.
-        // rusqlite Transaction is a RAII guard — Drop calls ROLLBACK if not committed.
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let current_count: i64 = tx.query_row(
@@ -743,7 +722,6 @@ impl KmsDb {
         )?;
 
         if current_count >= max_active {
-            // tx dropped here → automatic ROLLBACK via rusqlite Transaction::Drop
             return Err(anyhow::anyhow!(
                 "Wallet already has {} active/recent-pending P256 session keys (max {}). \
                  Revoke an existing key or wait for stuck pending to expire ({}s).",
@@ -774,11 +752,6 @@ impl KmsDb {
         Ok(idx as u32)
     }
 
-    /// Activate a pending P256 session key after successful TA key generation.
-    ///
-    /// Uses BEGIN IMMEDIATE to atomically recheck the active-key count before promoting
-    /// the pending row to 'active'. This prevents a slow/stuck pending row from pushing
-    /// the count above max_active after another create was allowed in during the stuck window.
     pub fn activate_p256_session_key(
         &self,
         wallet_id: &str,
@@ -794,10 +767,6 @@ impl KmsDb {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // Count only 'active' rows (not 'pending'). This is intentional: allocate_p256_session_key_pending
-        // already counted pending rows against the quota to prevent concurrent over-allocation.
-        // By activate time, the pending slot is self — including it would make the recheck reject valid
-        // creates when the wallet is at capacity with pending-but-in-flight keys.
         let active_count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM p256_session_keys \
              WHERE wallet_id=?1 \
@@ -890,15 +859,6 @@ impl KmsDb {
         Ok(n > 0)
     }
 
-    /// Return session_index values for P256 session keys eligible for GC.
-    ///
-    /// Two categories:
-    /// 1. Expired active/pending: credential_expires_at IS NOT NULL AND <= gc_cutoff
-    ///    (gc_cutoff = now - 60s grace window for clock drift)
-    /// 2. Stuck pending: status='pending' AND created_at older than pending_ttl_secs
-    ///    (these have NULL credential_expires_at and would never be GC'd otherwise)
-    ///
-    /// `exclude_session_index`: skip this index (used during sign to avoid GC-ing the key in use).
     pub fn list_expired_p256_session_keys(
         &self,
         wallet_id: &str,

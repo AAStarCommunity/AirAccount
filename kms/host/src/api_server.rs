@@ -485,6 +485,11 @@ pub struct SignTypedDataRequest {
     pub types: Vec<JsonEip712TypeDef>,
     /// Field values for the primary type
     pub message: Vec<JsonEip712FieldValue>,
+    /// WebAuthn ceremony assertion (challenge-based, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+    /// Deprecated: legacy raw passkey assertion. NOT accepted by sign-typed-data (no replay protection).
+    /// Field kept for JSON parse compatibility; the server rejects requests that rely on it.
     #[serde(rename = "passkeyAssertion", default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
 }
@@ -498,6 +503,118 @@ pub struct SignTypedDataResponse {
     #[serde(rename = "keyId")]
     pub key_id: String,
     /// Hex-encoded 65-byte ECDSA signature: R(32) || S(32) || V(1), V=27/28
+    pub signature: String,
+}
+
+// ── Grant Session Signing ──
+
+/// Parse bytes4 hex string ("0x..." or bare 8 hex chars) into [u8; 4].
+fn parse_bytes4_hex(s: &str) -> Result<[u8; 4]> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| anyhow!("Invalid bytes4 hex '{}': {}", s, e))?;
+    if bytes.len() != 4 {
+        return Err(anyhow!(
+            "bytes4 must be exactly 4 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignGrantSessionRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    /// SessionKeyValidator contract address ("0x..." 20 bytes)
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    /// Smart Account address ("0x..." 20 bytes)
+    pub account: String,
+    /// secp256k1 session key address ("0x..." 20 bytes)
+    #[serde(rename = "sessionKey")]
+    pub session_key: String,
+    /// Session expiry as Unix timestamp (uint48)
+    pub expiry: u64,
+    /// Allowed contract address or zero for any
+    #[serde(rename = "contractScope")]
+    pub contract_scope: String,
+    /// Allowed 4-byte selector or zero for any
+    #[serde(rename = "selectorScope")]
+    pub selector_scope: String,
+    #[serde(rename = "velocityLimit")]
+    pub velocity_limit: u16,
+    #[serde(rename = "velocityWindow")]
+    pub velocity_window: u32,
+    /// Allowed call target addresses (empty = any)
+    #[serde(rename = "callTargets", default)]
+    pub call_targets: Vec<String>,
+    /// Allowed 4-byte function selectors (empty = any)
+    #[serde(rename = "selectorAllowlist", default)]
+    pub selector_allowlist: Vec<String>,
+    /// grantNonces[account][sessionKey] read from chain (decimal u64)
+    pub nonce: u64,
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignGrantSessionResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    /// Hex-encoded 65-byte ECDSA signature: R(32) || S(32) || V(1), V=27/28
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256GrantSessionRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    pub account: String,
+    /// P256 session key X coordinate (hex, 32 bytes)
+    #[serde(rename = "keyX")]
+    pub key_x: String,
+    /// P256 session key Y coordinate (hex, 32 bytes)
+    #[serde(rename = "keyY")]
+    pub key_y: String,
+    pub expiry: u64,
+    #[serde(rename = "contractScope")]
+    pub contract_scope: String,
+    #[serde(rename = "selectorScope")]
+    pub selector_scope: String,
+    #[serde(rename = "velocityLimit")]
+    pub velocity_limit: u16,
+    #[serde(rename = "velocityWindow")]
+    pub velocity_window: u32,
+    #[serde(rename = "callTargets", default)]
+    pub call_targets: Vec<String>,
+    #[serde(rename = "selectorAllowlist", default)]
+    pub selector_allowlist: Vec<String>,
+    /// grantNonces_p256[account][keyHash] read from chain (decimal u64)
+    pub nonce: u64,
+    #[serde(rename = "passkeyAssertion", default)]
+    pub passkey_assertion: Option<PasskeyAssertion>,
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignP256GrantSessionResponse {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
     pub signature: String,
 }
 
@@ -1191,6 +1308,15 @@ impl KmsApiServer {
                 .consume_challenge(&wa.challenge_id)?
                 .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
 
+            // Reject operation-specific challenges (e.g. "grant-session") to prevent
+            // cross-purpose replay. This resolver is for generic authentication only.
+            if challenge_row.purpose != "authentication" {
+                return Err(anyhow!(
+                    "Challenge purpose '{}' cannot be used for this operation",
+                    challenge_row.purpose
+                ));
+            }
+
             // challenge must be bound to this key
             if let Some(ref bound_key) = challenge_row.key_id {
                 if bound_key != key_id {
@@ -1235,6 +1361,59 @@ impl KmsApiServer {
         } else {
             Ok(None)
         }
+    }
+
+    /// WebAuthn assertion resolver with operation-specific purpose check.
+    /// Ensures the challenge was created specifically for the given purpose
+    /// (e.g., "grant-session"), preventing cross-operation challenge replay.
+    async fn resolve_grant_passkey_assertion(
+        &self,
+        key_id: &str,
+        wa: &WebAuthnAssertion,
+        required_purpose: &str,
+    ) -> Result<proto::PasskeyAssertion> {
+        let challenge_row = self
+            .db
+            .consume_challenge(&wa.challenge_id)?
+            .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
+
+        if challenge_row.purpose != required_purpose {
+            return Err(anyhow!(
+                "Challenge purpose '{}' is not valid for this operation (expected '{}')",
+                challenge_row.purpose,
+                required_purpose
+            ));
+        }
+
+        if let Some(ref bound_key) = challenge_row.key_id {
+            if bound_key != key_id {
+                return Err(anyhow!("Challenge bound to different key"));
+            }
+        }
+
+        let w = self
+            .db
+            .get_wallet(key_id)?
+            .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+        let pubkey_hex = w
+            .passkey_pubkey
+            .ok_or_else(|| anyhow!("Wallet has no passkey public key"))?;
+        let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
+
+        let verified = webauthn::verify_authentication_response(
+            &wa.credential,
+            &challenge_row.challenge,
+            &self.expected_origins,
+            &challenge_row.rp_id,
+            &pk_bytes,
+            w.sign_count,
+        )?;
+
+        let _ = self
+            .db
+            .update_wallet_sign_count(key_id, verified.new_counter);
+        Ok(verified.proto_assertion)
     }
 
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
@@ -1723,6 +1902,49 @@ impl KmsApiServer {
         Ok(resp)
     }
 
+    /// Start a purpose-bound WebAuthn challenge for grant-session signing.
+    /// The stored challenge has purpose="grant-session", which sign_grant_session
+    /// and sign_p256_grant_session verify before accepting the assertion.
+    pub async fn begin_grant_session_auth(
+        &self,
+        key_id: &str,
+        origin_header: Option<&str>,
+    ) -> Result<webauthn::AuthenticationOptionsResponse> {
+        let w = self
+            .db
+            .get_wallet(key_id)?
+            .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
+
+        let allow_credentials = if let Some(ref cid) = w.credential_id {
+            vec![webauthn::CredentialDescriptor {
+                id: cid.clone(),
+                type_: "public-key".to_string(),
+                transports: Some(vec!["internal".to_string(), "hybrid".to_string()]),
+            }]
+        } else {
+            vec![]
+        };
+
+        let rp_id = self.resolve_rp_id(origin_header);
+        let (challenge_id, challenge_bytes, resp) =
+            webauthn::generate_authentication_options(&rp_id, allow_credentials);
+
+        self.db.store_challenge(
+            &challenge_id,
+            &challenge_bytes,
+            Some(key_id),
+            "grant-session",
+            &rp_id,
+            300,
+        )?;
+
+        println!(
+            "📝 WebAuthn BeginGrantSessionAuth: challenge_id={}, key_id={}",
+            challenge_id, key_id
+        );
+        Ok(resp)
+    }
+
     // ========================================
     // Agent Key methods
     // ========================================
@@ -1759,22 +1981,24 @@ impl KmsApiServer {
         // Avoids the race between count() and insert() that could yield duplicate indices.
         let agent_index = self.db.next_agent_index_for_wallet(&req.human_key_id)?;
 
-        // Derive agent key in TEE (secp256k1, BIP44 m/44'/60'/0'/1/<index>)
-        let tee_result = self.tee.create_agent_key(wallet_id, agent_index).await?;
+        // Derive agent key in TEE; TA constructs JWT payload internally (no oracle exposure).
+        // TA computes iat from its own clock — host no longer supplies iat.
+        let tee_result = self
+            .tee
+            .create_agent_key(
+                wallet_id,
+                agent_index,
+                &req.human_key_id,
+                3 * 24 * 3600,
+                assertion,
+            )
+            .await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
         let pubkey_hex = hex::encode(&tee_result.public_key_compressed);
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
 
-        // Issue JWT credential (3-day TTL), EIP-191 wrapping done inside TEE
-        let (jwt, expires_at) = agent_jwt::issue_credential(
-            &self.tee,
-            &req.human_key_id,
-            wallet_id,
-            agent_index,
-            &agent_address,
-            3 * 24 * 3600,
-        )
-        .await?;
+        // Assemble JWT from TEE-produced material (no host-side signing)
+        let (jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         // Store in DB — only credential_hash, never the full JWT
         let now = Utc::now().to_rfc3339();
@@ -1891,12 +2115,92 @@ impl KmsApiServer {
 
     pub async fn sign_typed_data(
         &self,
+        bearer: Option<String>,
         req: SignTypedDataRequest,
     ) -> Result<SignTypedDataResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let wallet_id_str = wallet_id.to_string();
 
-        // Passkey verification (optional — wallet may or may not have one bound)
-        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
+        // Auth gate: require one of two paths.
+        // Path A — Bearer JWT (agent key): user previously authorized via WebAuthn; checked against
+        //           DB active-status, credential_hash, and per-credential rate limit. JWT path is
+        //           locked to the agent's own derivation path — it cannot escalate to the owner root key.
+        // Path B — WebAuthn ceremony assertion: live, challenge-bound proof of ownership; replay-resistant.
+        // Legacy raw passkeyAssertion is NOT accepted for sign-typed-data (no challenge binding → replay risk).
+        // No auth at all → reject.
+        let passkey_assertion = match (&bearer, &req.webauthn_assertion) {
+            (Some(jwt), _) => {
+                // Path A: agent key JWT
+                let payload = agent_jwt::verify_credential(&self.tee, jwt)
+                    .await
+                    .map_err(|e| anyhow!("Invalid agent credential for sign-typed-data: {}", e))?;
+                if payload.wallet_id != wallet_id_str {
+                    return Err(anyhow!("Agent credential wallet does not match keyId"));
+                }
+
+                // Enforce: JWT can only sign on its own agent derivation path, not the owner root key.
+                let expected_path = format!("m/44'/60'/0'/1/{}", payload.agent_index);
+                if req.hd_path != expected_path {
+                    return Err(anyhow!(
+                        "Agent credential may only sign typed-data on path '{}' (requested '{}'). \
+                         Use WebAuthn to sign on other paths.",
+                        expected_path,
+                        req.hd_path
+                    ));
+                }
+
+                // DB checks: active status + credential_hash match (same pattern as sign_agent)
+                let agent_key = self
+                    .db
+                    .get_agent_key(&wallet_id_str, payload.agent_index)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Agent key not found: {}:{}",
+                            wallet_id_str,
+                            payload.agent_index
+                        )
+                    })?;
+                if agent_key.status != "active" {
+                    return Err(anyhow!("Agent key is revoked"));
+                }
+                let current_hash = agent_jwt::credential_hash(jwt);
+                if agent_key.credential_hash.as_deref() != Some(current_hash.as_str()) {
+                    return Err(anyhow!("Agent credential has been superseded or revoked"));
+                }
+
+                // Per-credential rate limit (shared key with sign_agent — same credential budget)
+                let cred_rl_key = format!("{}/{}", wallet_id_str, payload.agent_index);
+                self.agent_rate_limiter
+                    .check(&cred_rl_key)
+                    .map_err(|limit| {
+                        anyhow!(
+                            "Per-credential rate limit exceeded ({}/min). Retry after 60s.",
+                            limit
+                        )
+                    })?;
+
+                None // no passkey forwarded to TA; JWT auth is host-enforced
+            }
+            (None, Some(_)) => {
+                // Path B: WebAuthn ceremony (preferred, replay-protected, no hdPath restriction)
+                let assertion = self
+                    .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref())
+                    .await?;
+                if assertion.is_none() {
+                    return Err(anyhow!(
+                        "WebAuthn assertion verification failed for sign-typed-data"
+                    ));
+                }
+                assertion
+            }
+            (None, None) => {
+                return Err(anyhow!(
+                    "sign-typed-data requires authentication: \
+                     provide Authorization: Bearer <agent-jwt> OR webAuthnAssertion. \
+                     Legacy passkeyAssertion is not accepted for this endpoint."
+                ));
+            }
+        };
 
         // Convert domain verifyingContract from hex string to [u8; 20]
         let verifying_contract = match &req.domain.verifying_contract {
@@ -1966,6 +2270,15 @@ impl KmsApiServer {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Extract JWT proof for TA-side verification on JWT path (defense-in-depth).
+        let (jwt_kid, jwt_signing_input, jwt_hmac) = if let Some(ref jwt) = bearer {
+            let (kid, si, hmac) = agent_jwt::extract_signing_proof(jwt)
+                .map_err(|e| anyhow!("Failed to extract JWT proof: {}", e))?;
+            (Some(kid), Some(si), Some(hmac))
+        } else {
+            (None, None, None)
+        };
+
         let ta_input = proto::SignTypedDataInput {
             wallet_id,
             hd_path: req.hd_path.clone(),
@@ -1974,6 +2287,9 @@ impl KmsApiServer {
             types,
             message,
             passkey_assertion,
+            jwt_kid,
+            jwt_signing_input,
+            jwt_hmac,
         };
 
         let output = self.tee.sign_typed_data(ta_input).await?;
@@ -1983,6 +2299,147 @@ impl KmsApiServer {
             req.key_id, req.primary_type
         );
         Ok(SignTypedDataResponse {
+            key_id: req.key_id,
+            signature: format!("0x{}", hex::encode(&output.signature)),
+        })
+    }
+
+    pub async fn sign_grant_session(
+        &self,
+        req: SignGrantSessionRequest,
+    ) -> Result<SignGrantSessionResponse> {
+        let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let key_id_str = wallet_id.to_string();
+
+        // Grant signing requires purpose-bound WebAuthn challenge to prevent
+        // cross-operation replay. Challenge must have been created by begin-grant-session-auth.
+        let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
+            anyhow!("sign-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
+        })?;
+        let passkey_assertion = Some(
+            self.resolve_grant_passkey_assertion(&key_id_str, wa, "grant-session")
+                .await?,
+        );
+
+        // expiry is uint48 in the contract — reject out-of-range values to keep hash match
+        const UINT48_MAX: u64 = (1u64 << 48) - 1;
+        if req.expiry > UINT48_MAX {
+            return Err(anyhow!(
+                "expiry {} exceeds uint48 max ({})",
+                req.expiry,
+                UINT48_MAX
+            ));
+        }
+
+        let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
+        let account = Self::parse_address_hex(&req.account)?;
+        let session_key = Self::parse_address_hex(&req.session_key)?;
+        let contract_scope = Self::parse_address_hex(&req.contract_scope)?;
+        let selector_scope = parse_bytes4_hex(&req.selector_scope)?;
+
+        let mut call_targets = Vec::with_capacity(req.call_targets.len());
+        for s in &req.call_targets {
+            call_targets.push(Self::parse_address_hex(s)?);
+        }
+        let mut selector_allowlist = Vec::with_capacity(req.selector_allowlist.len());
+        for s in &req.selector_allowlist {
+            selector_allowlist.push(parse_bytes4_hex(s)?);
+        }
+
+        let mut nonce = [0u8; 32];
+        nonce[24..32].copy_from_slice(&req.nonce.to_be_bytes());
+
+        let ta_input = proto::SignGrantSessionInput {
+            wallet_id,
+            hd_path: req.hd_path,
+            chain_id: req.chain_id,
+            verifying_contract,
+            account,
+            session_key,
+            expiry: req.expiry,
+            contract_scope,
+            selector_scope,
+            velocity_limit: req.velocity_limit,
+            velocity_window: req.velocity_window,
+            call_targets,
+            selector_allowlist,
+            nonce,
+            passkey_assertion,
+        };
+
+        let output = self.tee.sign_grant_session(ta_input).await?;
+        println!("✅ SignGrantSession: keyId={}", req.key_id);
+        Ok(SignGrantSessionResponse {
+            key_id: req.key_id,
+            signature: format!("0x{}", hex::encode(&output.signature)),
+        })
+    }
+
+    pub async fn sign_p256_grant_session(
+        &self,
+        req: SignP256GrantSessionRequest,
+    ) -> Result<SignP256GrantSessionResponse> {
+        let wallet_id = Self::validate_key_id(&req.key_id)?;
+        let key_id_str = wallet_id.to_string();
+
+        let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
+            anyhow!("sign-p256-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
+        })?;
+        let passkey_assertion = Some(
+            self.resolve_grant_passkey_assertion(&key_id_str, wa, "grant-session")
+                .await?,
+        );
+
+        const UINT48_MAX: u64 = (1u64 << 48) - 1;
+        if req.expiry > UINT48_MAX {
+            return Err(anyhow!(
+                "expiry {} exceeds uint48 max ({})",
+                req.expiry,
+                UINT48_MAX
+            ));
+        }
+
+        let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
+        let account = Self::parse_address_hex(&req.account)?;
+        let key_x = Self::validate_hash_hex(&req.key_x)?;
+        let key_y = Self::validate_hash_hex(&req.key_y)?;
+        let contract_scope = Self::parse_address_hex(&req.contract_scope)?;
+        let selector_scope = parse_bytes4_hex(&req.selector_scope)?;
+
+        let mut call_targets = Vec::with_capacity(req.call_targets.len());
+        for s in &req.call_targets {
+            call_targets.push(Self::parse_address_hex(s)?);
+        }
+        let mut selector_allowlist = Vec::with_capacity(req.selector_allowlist.len());
+        for s in &req.selector_allowlist {
+            selector_allowlist.push(parse_bytes4_hex(s)?);
+        }
+
+        let mut nonce = [0u8; 32];
+        nonce[24..32].copy_from_slice(&req.nonce.to_be_bytes());
+
+        let ta_input = proto::SignP256GrantSessionInput {
+            wallet_id,
+            hd_path: req.hd_path,
+            chain_id: req.chain_id,
+            verifying_contract,
+            account,
+            key_x,
+            key_y,
+            expiry: req.expiry,
+            contract_scope,
+            selector_scope,
+            velocity_limit: req.velocity_limit,
+            velocity_window: req.velocity_window,
+            call_targets,
+            selector_allowlist,
+            nonce,
+            passkey_assertion,
+        };
+
+        let output = self.tee.sign_p256_grant_session(ta_input).await?;
+        println!("✅ SignP256GrantSession: keyId={}", req.key_id);
+        Ok(SignP256GrantSessionResponse {
             key_id: req.key_id,
             signature: format!("0x{}", hex::encode(&output.signature)),
         })
@@ -2030,16 +2487,19 @@ impl KmsApiServer {
             return Err(anyhow!("Agent key is revoked"));
         }
 
-        // Issue new JWT (old JWT is implicitly superseded via credential_hash update)
-        let (new_jwt, expires_at) = agent_jwt::issue_credential(
-            &self.tee,
-            &wallet_id_str,
-            wallet_uuid,
-            agent_index,
-            &agent_key.agent_address,
-            3 * 24 * 3600,
-        )
-        .await?;
+        // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation).
+        // TA computes iat from its own clock — host no longer supplies iat.
+        let tee_result = self
+            .tee
+            .create_agent_key(
+                wallet_uuid,
+                agent_index,
+                &wallet_id_str,
+                3 * 24 * 3600,
+                assertion,
+            )
+            .await?;
+        let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
         self.db
@@ -2211,176 +2671,6 @@ impl KmsApiServer {
                 }
             }
         }
-    }
-
-    pub async fn create_p256_session_key(
-        &self,
-        req: CreateP256SessionKeyRequest,
-    ) -> Result<CreateP256SessionKeyResponse> {
-        let wallet_id = Self::validate_key_id(&req.human_key_id)?;
-
-        // Verify human wallet exists
-        let _wallet = self
-            .db
-            .get_wallet(&req.human_key_id)?
-            .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
-
-        // P256 session key creation requires WebAuthn ceremony (replay-protected)
-        if req.webauthn_assertion.is_none() {
-            return Err(anyhow!(
-                "create-p256-session-key requires WebAuthn ceremony. \
-                 Legacy passkey assertions are not accepted."
-            ));
-        }
-        let assertion = self
-            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
-            .await?;
-        if assertion.is_none() {
-            return Err(anyhow!(
-                "Passkey assertion required to create P256 session key"
-            ));
-        }
-
-        // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
-        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None)
-            .await;
-
-        // Atomically check active/pending count and allocate next session_index.
-        // Both happen under a single Mutex+BEGIN IMMEDIATE to prevent concurrent over-allocation.
-        // Max 2 = one active key + one during rotation overlap; pending slots always count.
-        let session_index = self.db.allocate_p256_session_key_pending(
-            &req.human_key_id,
-            &req.human_key_id,
-            Utc::now().timestamp(),
-            2,
-        )?;
-
-        // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
-        let tee_result = match self
-            .tee
-            .create_p256_session_key(wallet_id, session_index)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // TA create failed. Key material may or may not exist in TEE (TA may have
-                // written it before the error). Attempt TEE cleanup (idempotent):
-                // - TEE delete succeeds / not-found → safe to delete DB pending row (clean state)
-                // - TEE delete fails → keep DB pending row so GC can retry TEE delete
-                match self
-                    .tee
-                    .delete_p256_session_key(wallet_id, session_index)
-                    .await
-                {
-                    Ok(_) => {
-                        let _ = self
-                            .db
-                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
-                    }
-                    Err(tee_del_err) => {
-                        eprintln!(
-                            "⚠️  CreateP256SessionKey: TEE create+delete both failed for {}:{}: \
-                             create={} delete={} (DB pending row kept for GC retry)",
-                            req.human_key_id, session_index, e, tee_del_err
-                        );
-                    }
-                }
-                return Err(e);
-            }
-        };
-        let pub_key_x = hex::encode(&tee_result.pub_key_x);
-        let pub_key_y = hex::encode(&tee_result.pub_key_y);
-
-        // Issue JWT credential for this P256 session key (reuse agent JWT infrastructure)
-        let key_id = format!("{}:{}", req.human_key_id, session_index);
-        let (jwt, expires_at) = match agent_jwt::issue_credential(
-            &self.tee,
-            &req.human_key_id,
-            wallet_id,
-            session_index,
-            &key_id,
-            3 * 24 * 3600,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // JWT issuance failed after TEE key was created. Attempt TEE cleanup:
-                // - If TEE delete succeeds: also delete the DB pending row (clean state).
-                // - If TEE delete fails: leave the DB pending row so GC can retry TEE delete
-                //   after PENDING_TTL_SECS (stuck-pending path). Never silently lose track
-                //   of key material by deleting DB while TEE delete is unknown.
-                match self
-                    .tee
-                    .delete_p256_session_key(wallet_id, session_index)
-                    .await
-                {
-                    Ok(_) => {
-                        let _ = self
-                            .db
-                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
-                    }
-                    Err(tee_err) => {
-                        eprintln!(
-                            "⚠️  CreateP256SessionKey cleanup: TEE delete failed for {}:{}: {} \
-                             (DB pending row kept for GC retry)",
-                            req.human_key_id, session_index, tee_err
-                        );
-                    }
-                }
-                return Err(e);
-            }
-        };
-
-        let cred_hash = agent_jwt::credential_hash(&jwt);
-        // Activate the pending row: sets pub_key_x/y, credential_hash, status='active'
-        if let Err(e) = self.db.activate_p256_session_key(
-            &req.human_key_id,
-            session_index,
-            &pub_key_x,
-            &pub_key_y,
-            &cred_hash,
-            expires_at,
-            2, // max_active: enforced atomically in activate to guard against slow-create races
-        ) {
-            // DB activation failed after TEE key and JWT were created. Same TEE-cleanup
-            // strategy: keep DB pending row if TEE delete fails so GC can retry.
-            match self
-                .tee
-                .delete_p256_session_key(wallet_id, session_index)
-                .await
-            {
-                Ok(_) => {
-                    let _ = self
-                        .db
-                        .delete_p256_session_key_pending(&req.human_key_id, session_index);
-                }
-                Err(tee_err) => {
-                    eprintln!(
-                        "⚠️  CreateP256SessionKey cleanup: TEE delete failed for {}:{}: {} \
-                         (DB pending row kept for GC retry)",
-                        req.human_key_id, session_index, tee_err
-                    );
-                }
-            }
-            return Err(e);
-        }
-
-        println!(
-            "✅ CreateP256SessionKey: wallet={} idx={} x={}...",
-            req.human_key_id,
-            session_index,
-            &pub_key_x[..8]
-        );
-
-        Ok(CreateP256SessionKeyResponse {
-            key_id,
-            pub_key_x,
-            pub_key_y,
-            algorithm: "p256".to_string(),
-            agent_credential: jwt,
-            expires_at,
-        })
     }
 
     pub async fn sign_p256_user_op(
@@ -2572,13 +2862,137 @@ impl KmsApiServer {
             revoked_at,
         })
     }
+
+    pub async fn create_p256_session_key(
+        &self,
+        req: CreateP256SessionKeyRequest,
+    ) -> Result<CreateP256SessionKeyResponse> {
+        let wallet_id = Self::validate_key_id(&req.human_key_id)?;
+
+        // Verify human wallet exists
+        let _wallet = self
+            .db
+            .get_wallet(&req.human_key_id)?
+            .ok_or_else(|| anyhow!("Human wallet not found: {}", req.human_key_id))?;
+
+        // P256 session key creation requires WebAuthn ceremony (replay-protected)
+        if req.webauthn_assertion.is_none() {
+            return Err(anyhow!(
+                "create-p256-session-key requires WebAuthn ceremony. \
+                 Legacy passkey assertions are not accepted."
+            ));
+        }
+        let assertion = self
+            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
+            .await?;
+        if assertion.is_none() {
+            return Err(anyhow!(
+                "Passkey assertion required to create P256 session key"
+            ));
+        }
+
+        // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
+        self.gc_expired_p256_session_keys(&req.human_key_id, wallet_id, None)
+            .await;
+
+        // Atomically check active/pending count and allocate next session_index.
+        let session_index = self.db.allocate_p256_session_key_pending(
+            &req.human_key_id,
+            &req.human_key_id,
+            Utc::now().timestamp(),
+            2,
+        )?;
+
+        // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
+        let tee_result = match self
+            .tee
+            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                match self
+                    .tee
+                    .delete_p256_session_key(wallet_id, session_index)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = self
+                            .db
+                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
+                    }
+                    Err(tee_del_err) => {
+                        eprintln!(
+                            "⚠️  CreateP256SessionKey: TEE create+delete both failed for {}:{}: \
+                             create={} delete={} (DB pending row kept for GC retry)",
+                            req.human_key_id, session_index, e, tee_del_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
+        };
+        let pub_key_x = hex::encode(&tee_result.pub_key_x);
+        let pub_key_y = hex::encode(&tee_result.pub_key_y);
+
+        // Assemble JWT credential from TEE-generated material (HMAC signed inside TEE)
+        let key_id = format!("{}:{}", req.human_key_id, session_index);
+        let (jwt, expires_at) = agent_jwt::assemble_p256_session_jwt(&tee_result)?;
+
+        let cred_hash = agent_jwt::credential_hash(&jwt);
+        if let Err(e) = self.db.activate_p256_session_key(
+            &req.human_key_id,
+            session_index,
+            &pub_key_x,
+            &pub_key_y,
+            &cred_hash,
+            expires_at,
+            2,
+        ) {
+            match self
+                .tee
+                .delete_p256_session_key(wallet_id, session_index)
+                .await
+            {
+                Ok(_) => {
+                    let _ = self
+                        .db
+                        .delete_p256_session_key_pending(&req.human_key_id, session_index);
+                }
+                Err(tee_err) => {
+                    eprintln!(
+                        "⚠️  CreateP256SessionKey cleanup: TEE delete failed for {}:{}: {} \
+                         (DB pending row kept for GC retry)",
+                        req.human_key_id, session_index, tee_err
+                    );
+                }
+            }
+            return Err(e);
+        }
+
+        println!(
+            "✅ CreateP256SessionKey: wallet={} idx={} x={}...",
+            req.human_key_id,
+            session_index,
+            &pub_key_x[..8]
+        );
+
+        Ok(CreateP256SessionKeyResponse {
+            key_id,
+            pub_key_x,
+            pub_key_y,
+            algorithm: "p256".to_string(),
+            agent_credential: jwt,
+            expires_at,
+        })
+    }
 }
 
 // ========================================
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.17.0";
+const KMS_VERSION: &str = "0.19.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -3123,6 +3537,23 @@ async fn handle_begin_authentication(
     }
 }
 
+async fn handle_begin_grant_session_auth(
+    key_id: String,
+    server: Arc<KmsApiServer>,
+    origin_header: Option<String>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server
+        .begin_grant_session_auth(&key_id, origin_header.as_deref())
+        .await
+    {
+        Ok(response) => Ok(warp::reply::json(&response)),
+        Err(e) => {
+            eprintln!("BeginGrantSessionAuth error: {}", e);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
 async fn handle_key_status(
     key_id: String,
     server: Arc<KmsApiServer>,
@@ -3233,11 +3664,25 @@ async fn handle_revoke_agent_credential(
 }
 
 async fn handle_sign_typed_data(
+    auth_header: Option<String>,
     body: SignTypedDataRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    // If Authorization header is present it must be "Bearer <token>"; any other format is rejected
+    // immediately — silent fallback to body-auth would allow header-stripping downgrade attacks.
+    let bearer = match auth_header {
+        Some(h) => {
+            let token = h.strip_prefix("Bearer ").ok_or_else(|| {
+                warp::reject::custom(ApiError(
+                    "Authorization header must use 'Bearer <token>' format".to_string(),
+                ))
+            })?;
+            Some(token.to_string())
+        }
+        None => None,
+    };
     let t0 = std::time::Instant::now();
-    match server.sign_typed_data(body).await {
+    match server.sign_typed_data(bearer, body).await {
         Ok(response) => {
             let elapsed = t0.elapsed().as_millis();
             println!("✅ SignTypedData OK {}ms", elapsed);
@@ -3246,6 +3691,44 @@ async fn handle_sign_typed_data(
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             eprintln!("SignTypedData error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_grant_session(
+    body: SignGrantSessionRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.sign_grant_session(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignGrantSession OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignGrantSession error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_p256_grant_session(
+    body: SignP256GrantSessionRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server.sign_p256_grant_session(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ SignP256GrantSession OK {}ms", elapsed);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            eprintln!("SignP256GrantSession error: {} {}ms", e, elapsed);
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -3697,6 +4180,29 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::header::optional::<String>("origin"))
         .and_then(handle_begin_authentication);
 
+    // Grant session auth (GET /kms/begin-grant-session-auth?keyId=...)
+    let server_bgsa = server.clone();
+    let begin_grant_session_auth = warp::path("kms")
+        .and(warp::path("begin-grant-session-auth"))
+        .and(warp::get())
+        .and(api_key_filter.clone())
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and(warp::any().map(move || server_bgsa.clone()))
+        .and(warp::header::optional::<String>("origin"))
+        .and_then(
+            |params: std::collections::HashMap<String, String>,
+             server: Arc<KmsApiServer>,
+             origin: Option<String>| async move {
+                let key_id = params.get("keyId").cloned().unwrap_or_default();
+                if key_id.is_empty() {
+                    return Err(warp::reject::custom(ApiError(
+                        "keyId query parameter required".to_string(),
+                    )));
+                }
+                handle_begin_grant_session_auth(key_id, server, origin).await
+            },
+        );
+
     // Agent Key endpoints (POST /kms/create-agent-key, /kms/sign-agent, etc.)
     let server_cak = server.clone();
     let create_agent_key = warp::path("kms")
@@ -3746,9 +4252,30 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server_std.clone()))
         .and_then(handle_sign_typed_data);
+
+    let server_sgs = server.clone();
+    let sign_grant_session = warp::path("kms")
+        .and(warp::path("sign-grant-session"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sgs.clone()))
+        .and_then(handle_sign_grant_session);
+
+    let server_sp256gs = server.clone();
+    let sign_p256_grant_session = warp::path("kms")
+        .and(warp::path("sign-p256-grant-session"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sp256gs.clone()))
+        .and_then(handle_sign_p256_grant_session);
 
     // P256 Session Key endpoints
     let server_cp256 = server.clone();
@@ -3820,32 +4347,44 @@ pub async fn start_kms_server() -> Result<()> {
         }
     });
 
-    let routes = index
+    // Box route groups to break warp's recursive type nesting (>~20 .or() chains overflow).
+    let group1 = index
         .or(test_ui)
         .or(health)
         .or(version)
         .or(key_status)
         .or(queue_status)
         .or(change_passkey)
-        .or(create_key)
+        .boxed();
+    let group2 = create_key
         .or(describe_key)
         .or(list_keys)
         .or(derive_address)
         .or(sign)
         .or(sign_hash)
         .or(get_public_key)
-        .or(delete_key)
+        .boxed();
+    let group3 = delete_key
         .or(begin_registration)
         .or(complete_registration)
         .or(begin_authentication)
         .or(create_agent_key)
         .or(sign_agent)
         .or(refresh_agent_credential)
-        .or(revoke_agent_credential)
+        .boxed();
+    let group4 = revoke_agent_credential
         .or(sign_typed_data)
+        .or(begin_grant_session_auth)
+        .or(sign_grant_session)
+        .or(sign_p256_grant_session)
         .or(create_p256_session_key)
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
+        .boxed();
+    let routes = group1
+        .or(group2)
+        .or(group3)
+        .or(group4)
         .recover(handle_rejection);
 
     println!(
@@ -3875,6 +4414,10 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /kms/refresh-agent-credential - Refresh agent JWT (Bearer + WebAuthn)");
     println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
     println!("   POST /kms/SignTypedData             - EIP-712 typed data signing");
+    println!("   POST /kms/sign-grant-session        - Sign GRANT_SESSION_V2 (ECDSA session key)");
+    println!(
+        "   POST /kms/sign-p256-grant-session   - Sign GRANT_P256_SESSION_V2 (P256 session key)"
+    );
     println!("   POST /kms/create-p256-session-key  - Create P256 session key (WebAuthn)");
     println!("   POST /kms/sign-p256-user-op        - P256 sign userOpHash (Bearer JWT)");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
