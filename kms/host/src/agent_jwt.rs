@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(feature = "tee")]
 use chrono::Utc;
 use proto;
 use serde::{Deserialize, Serialize};
@@ -100,7 +101,10 @@ pub fn extract_signing_proof(jwt: &str) -> anyhow::Result<(String, Vec<u8>, Vec<
         .decode(parts[2])
         .map_err(|e| anyhow::anyhow!("JWT signature base64url decode: {}", e))?;
     if hmac_bytes.len() != 32 {
-        return Err(anyhow::anyhow!("JWT HMAC must be 32 bytes, got {}", hmac_bytes.len()));
+        return Err(anyhow::anyhow!(
+            "JWT HMAC must be 32 bytes, got {}",
+            hmac_bytes.len()
+        ));
     }
     Ok((header.kid, signing_input, hmac_bytes))
 }

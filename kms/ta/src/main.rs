@@ -1009,16 +1009,6 @@ fn sign_p256_user_op(
 /// signing_input format: "header_b64url.payload_b64url" (exactly two dot-separated segments).
 /// Payload JSON: {"wallet_id":"<uuid>","agent_index":<u32>,"exp":<i64>}
 /// The format is controlled by our own jwt_sign_payload TA function — no whitespace around colons.
-///
-/// Security note: exp is parsed and returned but NOT checked here. TEE_GetSystemTime's epoch is
-/// implementation-defined and unreliable for Unix timestamp comparison on all TEE platforms.
-/// The host-side exp check (performed before reaching TA) is the primary expiry enforcement.
-/// See Issue #15 for a future trusted-time solution.
-///
-/// Security note (JWT Oracle): JwtHmacSign is exposed to the host by design (JWT issuance flow).
-/// A fully compromised host can mint arbitrary JWTs that pass this TA-side HMAC check. The HMAC
-/// gate guards against partial host compromise (bugs, bypass), not total host takeover.
-/// See Issue #16 for passkey-bound JWT issuance as a future hardening.
 fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
@@ -1104,6 +1094,32 @@ fn extract_json_i64_field(json: &str, field: &str) -> Result<i64> {
     }
     json[start..end].parse::<i64>()
         .map_err(|e| anyhow!("field '{}' is not a valid i64 in JWT payload: {}", field, e))
+}
+
+/// Delete a P256 session key from TEE secure storage.
+/// Called by the host's lazy GC when credential_expires_at has passed.
+/// Returns deleted=false (not an error) if the key is already absent — idempotent.
+fn delete_p256_session_key(
+    input: &proto::DeleteP256SessionKeyInput,
+) -> Result<proto::DeleteP256SessionKeyOutput> {
+    dbg_println!(
+        "[+] Delete P256 session key for wallet: {:?}, index: {}",
+        input.wallet_id,
+        input.session_index
+    );
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
+    match db.delete_entry::<P256SessionKey>(&store_id) {
+        Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("ItemNotFound") || msg.contains("ITEM_NOT_FOUND") {
+                Ok(proto::DeleteP256SessionKeyOutput { deleted: false })
+            } else {
+                Err(anyhow!("delete_p256_session_key: secure storage error: {}", msg))
+            }
+        }
+    }
 }
 
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
@@ -1470,6 +1486,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
+        Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
         Command::SignGrantSession => process(serialized_input, sign_grant_session),
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         _ => bail!("Unsupported command"),

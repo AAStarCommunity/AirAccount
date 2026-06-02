@@ -40,9 +40,13 @@ fn db_path() -> String {
 fn parse_agent_key_id(key_id: &str) -> Result<(String, u32)> {
     let parts: Vec<&str> = key_id.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(anyhow::anyhow!("Invalid agent keyId format (expected wallet_id:index): {}", key_id));
+        return Err(anyhow::anyhow!(
+            "Invalid agent keyId format (expected wallet_id:index): {}",
+            key_id
+        ));
     }
-    let agent_index: u32 = parts[1].parse()
+    let agent_index: u32 = parts[1]
+        .parse()
         .map_err(|_| anyhow::anyhow!("Invalid agent_index: {}", parts[1]))?;
     Ok((parts[0].to_string(), agent_index))
 }
@@ -62,7 +66,9 @@ async fn main() -> Result<()> {
             println!();
             println!("Usage:");
             println!("  kms-admin rotate-jwt-secret [--force]");
-            println!("    Rotate kms_secret (TEE). --force: immediately invalidates all active JWTs.");
+            println!(
+                "    Rotate kms_secret (TEE). --force: immediately invalidates all active JWTs."
+            );
             println!();
             println!("  kms-admin jwt-secret-status");
             println!("    List JWT key versions, status, age, retire_at.");
@@ -107,7 +113,11 @@ async fn cmd_rotate_jwt_secret(args: &[String]) -> Result<()> {
         if let Some(ref old) = result.retired_kid {
             db.upsert_jwt_secret_meta(&kms::db::JwtSecretMetaRow {
                 kid: old.clone(),
-                status: if force { "retired".to_string() } else { "verify-only".to_string() },
+                status: if force {
+                    "retired".to_string()
+                } else {
+                    "verify-only".to_string()
+                },
                 created_at: now,
                 retired_at: None,
                 expires_at: if force { None } else { Some(retire_ts) },
@@ -143,11 +153,15 @@ fn cmd_jwt_secret_status() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<8} {:<14} {:<28} {}", "KID", "STATUS", "CREATED_AT", "EXPIRES_AT");
+    println!(
+        "{:<8} {:<14} {:<28} {}",
+        "KID", "STATUS", "CREATED_AT", "EXPIRES_AT"
+    );
     println!("{}", "-".repeat(75));
 
     for row in &metas {
-        let expires = row.expires_at
+        let expires = row
+            .expires_at
             .map(|t| t.to_string())
             .unwrap_or_else(|| "—".to_string());
         let status_icon = match row.status.as_str() {
@@ -156,13 +170,17 @@ fn cmd_jwt_secret_status() -> Result<()> {
             "retired" => "retired   ",
             s => s,
         };
-        println!("{:<8} {:<14} {:<28} {}", row.kid, status_icon, row.created_at, expires);
+        println!(
+            "{:<8} {:<14} {:<28} {}",
+            row.kid, status_icon, row.created_at, expires
+        );
     }
     Ok(())
 }
 
 fn cmd_list_agent_keys(args: &[String]) -> Result<()> {
-    let human_account = args.windows(2)
+    let human_account = args
+        .windows(2)
         .find(|w| w[0] == "--account")
         .map(|w| w[1].as_str());
 
@@ -178,26 +196,32 @@ fn cmd_list_agent_keys(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<40} {:<6} {:<42} {:<8} {}",
-        "WALLET_ID", "IDX", "AGENT_ADDRESS", "STATUS", "CREATED_AT");
+    println!(
+        "{:<40} {:<6} {:<42} {:<8} {}",
+        "WALLET_ID", "IDX", "AGENT_ADDRESS", "STATUS", "CREATED_AT"
+    );
     println!("{}", "-".repeat(140));
     for k in &keys {
         let key_id = format!("{}:{}", k.wallet_id, k.agent_index);
-        println!("{:<40} {:<6} {:<42} {:<8} {}",
-            key_id, k.agent_index, k.agent_address, k.status, k.created_at);
+        println!(
+            "{:<40} {:<6} {:<42} {:<8} {}",
+            key_id, k.agent_index, k.agent_address, k.status, k.created_at
+        );
     }
     println!("\n{} key(s) total.", keys.len());
     Ok(())
 }
 
 fn cmd_revoke_agent_key(args: &[String]) -> Result<()> {
-    let key_id = args.get(2)
-        .ok_or_else(|| anyhow::anyhow!("Usage: kms-admin revoke-agent-key <wallet_id>:<agent_index>"))?;
+    let key_id = args.get(2).ok_or_else(|| {
+        anyhow::anyhow!("Usage: kms-admin revoke-agent-key <wallet_id>:<agent_index>")
+    })?;
 
     let (wallet_id, agent_index) = parse_agent_key_id(key_id)?;
 
     let db = KmsDb::open(&db_path())?;
-    let key = db.get_agent_key(&wallet_id, agent_index)?
+    let key = db
+        .get_agent_key(&wallet_id, agent_index)?
         .ok_or_else(|| anyhow::anyhow!("Agent key not found: {}", key_id))?;
 
     if key.status == "revoked" {
