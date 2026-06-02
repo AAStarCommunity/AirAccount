@@ -39,6 +39,18 @@ pub fn assemble_jwt(tee_out: &proto::CreateAgentKeyOutput) -> Result<(String, i6
     Ok((jwt, payload.exp))
 }
 
+/// Assemble a JWT string from the material returned by `create_p256_session_key` TA call.
+/// Reuses the same JWT format and verification path as agent keys.
+pub fn assemble_p256_session_jwt(tee_out: &proto::CreateP256SessionKeyOutput) -> Result<(String, i64)> {
+    let signature_b64 = URL_SAFE_NO_PAD.encode(tee_out.jwt_hmac);
+    let jwt = format!(
+        "{}.{}.{}",
+        tee_out.jwt_header_b64, tee_out.jwt_payload_b64, signature_b64
+    );
+    let payload: JwtPayload = decode_json(&tee_out.jwt_payload_b64)?;
+    Ok((jwt, payload.exp))
+}
+
 #[cfg(feature = "tee")]
 pub async fn verify_credential(tee: &TeeHandle, jwt: &str) -> Result<JwtPayload> {
     let parts: Vec<&str> = jwt.split('.').collect();

@@ -793,18 +793,6 @@ fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     Ok(JwtSignedMaterial { kid: current.kid, header_b64, payload_b64, hmac })
 }
 
-/// Extract a string field value from a compact JSON object without serde_json.
-/// Matches the first occurrence of `"key":"<value>"`.
-fn extract_json_str_field(json: &str, key: &str) -> Result<String> {
-    let pattern = format!("\"{}\":\"", key);
-    let start = json.find(&*pattern)
-        .ok_or_else(|| anyhow!("JWT claim '{}' not found", key))?
-        + pattern.len();
-    let end = start + json[start..].find('"')
-        .ok_or_else(|| anyhow!("JWT claim '{}' not terminated", key))?;
-    Ok(json[start..end].to_string())
-}
-
 /// Extract a u64 field value from a compact JSON object without serde_json.
 fn extract_json_u64_field(json: &str, key: &str) -> Result<u64> {
     let pattern = format!("\"{}\":", key);
@@ -885,6 +873,12 @@ fn create_p256_session_key(
     // Verify the wallet exists so we don't create orphaned session keys
     let _wallet = load_wallet_cached(&input.wallet_id)?;
 
+    // Enforce TTL bounds (same as create_agent_key)
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    validate_jwt_subject(&input.subject)?;
+
     // Generate P-256 key pair via p256-m using OP-TEE hardware RNG (p256_generate_random).
     // priv[32] = private scalar; pub[64] = x(32) || y(32) (uncompressed, no 0x04 prefix)
     let mut priv_bytes = [0u8; 32];
@@ -910,7 +904,33 @@ fn create_p256_session_key(
     pub_key_x.copy_from_slice(&pub_bytes[..32]);
     pub_key_y.copy_from_slice(&pub_bytes[32..]);
 
-    Ok(proto::CreateP256SessionKeyOutput { pub_key_x, pub_key_y })
+    // Issue JWT credential for this session key (TEE-HMAC'd, same mechanism as agent keys).
+    // agent_index is repurposed as session_index so verify_credential on the host works unchanged.
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let exp = iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
+    let wallet_id_str = input.wallet_id.to_string();
+    let payload_json = format!(
+        "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"0x0000000000000000000000000000000000000000\",\"iat\":{iat},\"exp\":{exp}}}",
+        sub  = input.subject,
+        wid  = wallet_id_str,
+        idx  = input.session_index,
+        iat  = iat,
+        exp  = exp,
+    );
+    let jwt_out = jwt_sign_payload_internal(&payload_json)?;
+
+    Ok(proto::CreateP256SessionKeyOutput {
+        pub_key_x,
+        pub_key_y,
+        jwt_kid:         jwt_out.kid,
+        jwt_header_b64:  jwt_out.header_b64,
+        jwt_payload_b64: jwt_out.payload_b64,
+        jwt_hmac:        jwt_out.hmac,
+    })
 }
 
 fn sign_p256_user_op(

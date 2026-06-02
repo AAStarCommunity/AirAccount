@@ -468,8 +468,6 @@ pub struct SignTypedDataRequest {
     /// Field kept for JSON parse compatibility; the server rejects requests that rely on it.
     #[serde(rename = "passkeyAssertion", default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
-    #[serde(rename = "webAuthnAssertion", default)]
-    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 fn default_hd_path() -> String { "m/44'/60'/0'/0/0".to_string() }
@@ -2185,7 +2183,7 @@ impl KmsApiServer {
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
             .tee
-            .create_p256_session_key(wallet_id, session_index)
+            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600)
             .await
         {
             Ok(r) => r,
@@ -2199,17 +2197,9 @@ impl KmsApiServer {
         let pub_key_x = hex::encode(&tee_result.pub_key_x);
         let pub_key_y = hex::encode(&tee_result.pub_key_y);
 
-        // Issue JWT credential for this P256 session key (reuse agent JWT infrastructure)
+        // Assemble JWT credential from TEE-generated material (HMAC signed inside TEE)
         let key_id = format!("{}:{}", req.human_key_id, session_index);
-        let (jwt, expires_at) = agent_jwt::issue_credential(
-            &self.tee,
-            &req.human_key_id,
-            wallet_id,
-            session_index,
-            &key_id,
-            3 * 24 * 3600,
-        )
-        .await?;
+        let (jwt, expires_at) = agent_jwt::assemble_p256_session_jwt(&tee_result)?;
 
         let cred_hash = agent_jwt::credential_hash(&jwt);
         // Activate the pending row: sets pub_key_x/y, credential_hash, status='active'
@@ -3385,7 +3375,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::query::<std::collections::HashMap<String, String>>())
         .and(warp::any().map(move || server_bgsa.clone()))
         .and(warp::header::optional::<String>("origin"))
-        .and_then(|_, params: std::collections::HashMap<String, String>, server: Arc<KmsApiServer>, origin: Option<String>| async move {
+        .and_then(|params: std::collections::HashMap<String, String>, server: Arc<KmsApiServer>, origin: Option<String>| async move {
             let key_id = params.get("keyId").cloned().unwrap_or_default();
             if key_id.is_empty() {
                 return Err(warp::reject::custom(ApiError("keyId query parameter required".to_string())));
@@ -3533,28 +3523,32 @@ pub async fn start_kms_server() -> Result<()> {
         }
     });
 
-    let routes = index
+    // Box route groups to break warp's recursive type nesting (>~20 .or() chains overflow).
+    let group1 = index
         .or(test_ui)
         .or(health)
         .or(version)
         .or(key_status)
         .or(queue_status)
         .or(change_passkey)
-        .or(create_key)
+        .boxed();
+    let group2 = create_key
         .or(describe_key)
         .or(list_keys)
         .or(derive_address)
         .or(sign)
         .or(sign_hash)
         .or(get_public_key)
-        .or(delete_key)
+        .boxed();
+    let group3 = delete_key
         .or(begin_registration)
         .or(complete_registration)
         .or(begin_authentication)
         .or(create_agent_key)
         .or(sign_agent)
         .or(refresh_agent_credential)
-        .or(revoke_agent_credential)
+        .boxed();
+    let group4 = revoke_agent_credential
         .or(sign_typed_data)
         .or(begin_grant_session_auth)
         .or(sign_grant_session)
@@ -3562,6 +3556,11 @@ pub async fn start_kms_server() -> Result<()> {
         .or(create_p256_session_key)
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
+        .boxed();
+    let routes = group1
+        .or(group2)
+        .or(group3)
+        .or(group4)
         .recover(handle_rejection);
 
     println!("🚀 KMS API Server v{} starting on http://0.0.0.0:3000", KMS_VERSION);

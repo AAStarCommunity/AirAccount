@@ -785,10 +785,14 @@ impl TeeHandle {
         &self,
         wallet_id: uuid::Uuid,
         session_index: u32,
+        subject: &str,
+        ttl_secs: i64,
     ) -> Result<proto::CreateP256SessionKeyOutput> {
         let input = bincode::serialize(&proto::CreateP256SessionKeyInput {
             wallet_id,
             session_index,
+            subject: subject.to_string(),
+            ttl_secs,
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
         let out = self.call(proto::Command::CreateP256SessionKey, input).await?;
