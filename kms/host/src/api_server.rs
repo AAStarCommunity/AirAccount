@@ -513,7 +513,10 @@ fn parse_bytes4_hex(s: &str) -> Result<[u8; 4]> {
     let bytes = hex::decode(s.trim_start_matches("0x"))
         .map_err(|e| anyhow!("Invalid bytes4 hex '{}': {}", s, e))?;
     if bytes.len() != 4 {
-        return Err(anyhow!("bytes4 must be exactly 4 bytes, got {}", bytes.len()));
+        return Err(anyhow!(
+            "bytes4 must be exactly 4 bytes, got {}",
+            bytes.len()
+        ));
     }
     let mut arr = [0u8; 4];
     arr.copy_from_slice(&bytes);
@@ -1308,7 +1311,10 @@ impl KmsApiServer {
             // Reject operation-specific challenges (e.g. "grant-session") to prevent
             // cross-purpose replay. This resolver is for generic authentication only.
             if challenge_row.purpose != "authentication" {
-                return Err(anyhow!("Challenge purpose '{}' cannot be used for this operation", challenge_row.purpose));
+                return Err(anyhow!(
+                    "Challenge purpose '{}' cannot be used for this operation",
+                    challenge_row.purpose
+                ));
             }
 
             // challenge must be bound to this key
@@ -1366,13 +1372,16 @@ impl KmsApiServer {
         wa: &WebAuthnAssertion,
         required_purpose: &str,
     ) -> Result<proto::PasskeyAssertion> {
-        let challenge_row = self.db.consume_challenge(&wa.challenge_id)?
+        let challenge_row = self
+            .db
+            .consume_challenge(&wa.challenge_id)?
             .ok_or_else(|| anyhow!("Challenge not found or expired: {}", wa.challenge_id))?;
 
         if challenge_row.purpose != required_purpose {
             return Err(anyhow!(
                 "Challenge purpose '{}' is not valid for this operation (expected '{}')",
-                challenge_row.purpose, required_purpose
+                challenge_row.purpose,
+                required_purpose
             ));
         }
 
@@ -1382,9 +1391,12 @@ impl KmsApiServer {
             }
         }
 
-        let w = self.db.get_wallet(key_id)?
+        let w = self
+            .db
+            .get_wallet(key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
-        let pubkey_hex = w.passkey_pubkey
+        let pubkey_hex = w
+            .passkey_pubkey
             .ok_or_else(|| anyhow!("Wallet has no passkey public key"))?;
         let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
@@ -1398,7 +1410,9 @@ impl KmsApiServer {
             w.sign_count,
         )?;
 
-        let _ = self.db.update_wallet_sign_count(key_id, verified.new_counter);
+        let _ = self
+            .db
+            .update_wallet_sign_count(key_id, verified.new_counter);
         Ok(verified.proto_assertion)
     }
 
@@ -1896,7 +1910,9 @@ impl KmsApiServer {
         key_id: &str,
         origin_header: Option<&str>,
     ) -> Result<webauthn::AuthenticationOptionsResponse> {
-        let w = self.db.get_wallet(key_id)?
+        let w = self
+            .db
+            .get_wallet(key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", key_id))?;
 
         let allow_credentials = if let Some(ref cid) = w.credential_id {
@@ -1910,13 +1926,22 @@ impl KmsApiServer {
         };
 
         let rp_id = self.resolve_rp_id(origin_header);
-        let (challenge_id, challenge_bytes, resp) = webauthn::generate_authentication_options(
-            &rp_id, allow_credentials,
+        let (challenge_id, challenge_bytes, resp) =
+            webauthn::generate_authentication_options(&rp_id, allow_credentials);
+
+        self.db.store_challenge(
+            &challenge_id,
+            &challenge_bytes,
+            Some(key_id),
+            "grant-session",
+            &rp_id,
+            300,
+        )?;
+
+        println!(
+            "📝 WebAuthn BeginGrantSessionAuth: challenge_id={}, key_id={}",
+            challenge_id, key_id
         );
-
-        self.db.store_challenge(&challenge_id, &challenge_bytes, Some(key_id), "grant-session", &rp_id, 300)?;
-
-        println!("📝 WebAuthn BeginGrantSessionAuth: challenge_id={}, key_id={}", challenge_id, key_id);
         Ok(resp)
     }
 
@@ -1958,7 +1983,16 @@ impl KmsApiServer {
 
         // Derive agent key in TEE; TA constructs JWT payload internally (no oracle exposure).
         // TA computes iat from its own clock — host no longer supplies iat.
-        let tee_result = self.tee.create_agent_key(wallet_id, agent_index, &req.human_key_id, 3 * 24 * 3600, assertion).await?;
+        let tee_result = self
+            .tee
+            .create_agent_key(
+                wallet_id,
+                agent_index,
+                &req.human_key_id,
+                3 * 24 * 3600,
+                assertion,
+            )
+            .await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
         let pubkey_hex = hex::encode(&tee_result.public_key_compressed);
         let derivation_path = format!("m/44'/60'/0'/1/{}", agent_index);
@@ -2079,7 +2113,11 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_typed_data(&self, bearer: Option<String>, req: SignTypedDataRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_typed_data(
+        &self,
+        bearer: Option<String>,
+        req: SignTypedDataRequest,
+    ) -> Result<SignTypedDataResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let wallet_id_str = wallet_id.to_string();
 
@@ -2093,7 +2131,8 @@ impl KmsApiServer {
         let passkey_assertion = match (&bearer, &req.webauthn_assertion) {
             (Some(jwt), _) => {
                 // Path A: agent key JWT
-                let payload = agent_jwt::verify_credential(&self.tee, jwt).await
+                let payload = agent_jwt::verify_credential(&self.tee, jwt)
+                    .await
                     .map_err(|e| anyhow!("Invalid agent credential for sign-typed-data: {}", e))?;
                 if payload.wallet_id != wallet_id_str {
                     return Err(anyhow!("Agent credential wallet does not match keyId"));
@@ -2105,13 +2144,22 @@ impl KmsApiServer {
                     return Err(anyhow!(
                         "Agent credential may only sign typed-data on path '{}' (requested '{}'). \
                          Use WebAuthn to sign on other paths.",
-                        expected_path, req.hd_path
+                        expected_path,
+                        req.hd_path
                     ));
                 }
 
                 // DB checks: active status + credential_hash match (same pattern as sign_agent)
-                let agent_key = self.db.get_agent_key(&wallet_id_str, payload.agent_index)?
-                    .ok_or_else(|| anyhow!("Agent key not found: {}:{}", wallet_id_str, payload.agent_index))?;
+                let agent_key = self
+                    .db
+                    .get_agent_key(&wallet_id_str, payload.agent_index)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Agent key not found: {}:{}",
+                            wallet_id_str,
+                            payload.agent_index
+                        )
+                    })?;
                 if agent_key.status != "active" {
                     return Err(anyhow!("Agent key is revoked"));
                 }
@@ -2122,9 +2170,14 @@ impl KmsApiServer {
 
                 // Per-credential rate limit (shared key with sign_agent — same credential budget)
                 let cred_rl_key = format!("{}/{}", wallet_id_str, payload.agent_index);
-                self.agent_rate_limiter.check(&cred_rl_key).map_err(|limit| {
-                    anyhow!("Per-credential rate limit exceeded ({}/min). Retry after 60s.", limit)
-                })?;
+                self.agent_rate_limiter
+                    .check(&cred_rl_key)
+                    .map_err(|limit| {
+                        anyhow!(
+                            "Per-credential rate limit exceeded ({}/min). Retry after 60s.",
+                            limit
+                        )
+                    })?;
 
                 None // no passkey forwarded to TA; JWT auth is host-enforced
             }
@@ -2134,7 +2187,9 @@ impl KmsApiServer {
                     .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref())
                     .await?;
                 if assertion.is_none() {
-                    return Err(anyhow!("WebAuthn assertion verification failed for sign-typed-data"));
+                    return Err(anyhow!(
+                        "WebAuthn assertion verification failed for sign-typed-data"
+                    ));
                 }
                 assertion
             }
@@ -2261,14 +2316,19 @@ impl KmsApiServer {
         let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
             anyhow!("sign-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
         })?;
-        let passkey_assertion = Some(self.resolve_grant_passkey_assertion(
-            &key_id_str, wa, "grant-session",
-        ).await?);
+        let passkey_assertion = Some(
+            self.resolve_grant_passkey_assertion(&key_id_str, wa, "grant-session")
+                .await?,
+        );
 
         // expiry is uint48 in the contract — reject out-of-range values to keep hash match
         const UINT48_MAX: u64 = (1u64 << 48) - 1;
         if req.expiry > UINT48_MAX {
-            return Err(anyhow!("expiry {} exceeds uint48 max ({})", req.expiry, UINT48_MAX));
+            return Err(anyhow!(
+                "expiry {} exceeds uint48 max ({})",
+                req.expiry,
+                UINT48_MAX
+            ));
         }
 
         let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
@@ -2315,20 +2375,28 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_p256_grant_session(&self, req: SignP256GrantSessionRequest) -> Result<SignP256GrantSessionResponse> {
+    pub async fn sign_p256_grant_session(
+        &self,
+        req: SignP256GrantSessionRequest,
+    ) -> Result<SignP256GrantSessionResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
 
         let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
             anyhow!("sign-p256-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
         })?;
-        let passkey_assertion = Some(self.resolve_grant_passkey_assertion(
-            &key_id_str, wa, "grant-session",
-        ).await?);
+        let passkey_assertion = Some(
+            self.resolve_grant_passkey_assertion(&key_id_str, wa, "grant-session")
+                .await?,
+        );
 
         const UINT48_MAX: u64 = (1u64 << 48) - 1;
         if req.expiry > UINT48_MAX {
-            return Err(anyhow!("expiry {} exceeds uint48 max ({})", req.expiry, UINT48_MAX));
+            return Err(anyhow!(
+                "expiry {} exceeds uint48 max ({})",
+                req.expiry,
+                UINT48_MAX
+            ));
         }
 
         let verifying_contract = Self::parse_address_hex(&req.verifying_contract)?;
@@ -2421,7 +2489,16 @@ impl KmsApiServer {
 
         // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation).
         // TA computes iat from its own clock — host no longer supplies iat.
-        let tee_result = self.tee.create_agent_key(wallet_uuid, agent_index, &wallet_id_str, 3 * 24 * 3600, assertion).await?;
+        let tee_result = self
+            .tee
+            .create_agent_key(
+                wallet_uuid,
+                agent_index,
+                &wallet_id_str,
+                3 * 24 * 3600,
+                assertion,
+            )
+            .await?;
         let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
 
         let cred_hash = agent_jwt::credential_hash(&new_jwt);
@@ -2809,7 +2886,9 @@ impl KmsApiServer {
             .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
             .await?;
         if assertion.is_none() {
-            return Err(anyhow!("Passkey assertion required to create P256 session key"));
+            return Err(anyhow!(
+                "Passkey assertion required to create P256 session key"
+            ));
         }
 
         // Lazy GC: clean up expired P256 session keys for this wallet before creating a new one.
@@ -2832,9 +2911,15 @@ impl KmsApiServer {
         {
             Ok(r) => r,
             Err(e) => {
-                match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+                match self
+                    .tee
+                    .delete_p256_session_key(wallet_id, session_index)
+                    .await
+                {
                     Ok(_) => {
-                        let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                        let _ = self
+                            .db
+                            .delete_p256_session_key_pending(&req.human_key_id, session_index);
                     }
                     Err(tee_del_err) => {
                         eprintln!(
@@ -2864,9 +2949,15 @@ impl KmsApiServer {
             expires_at,
             2,
         ) {
-            match self.tee.delete_p256_session_key(wallet_id, session_index).await {
+            match self
+                .tee
+                .delete_p256_session_key(wallet_id, session_index)
+                .await
+            {
                 Ok(_) => {
-                    let _ = self.db.delete_p256_session_key_pending(&req.human_key_id, session_index);
+                    let _ = self
+                        .db
+                        .delete_p256_session_key_pending(&req.human_key_id, session_index);
                 }
                 Err(tee_err) => {
                     eprintln!(
@@ -2895,7 +2986,6 @@ impl KmsApiServer {
             expires_at,
         })
     }
-
 }
 
 // ========================================
@@ -3452,7 +3542,10 @@ async fn handle_begin_grant_session_auth(
     server: Arc<KmsApiServer>,
     origin_header: Option<String>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    match server.begin_grant_session_auth(&key_id, origin_header.as_deref()).await {
+    match server
+        .begin_grant_session_auth(&key_id, origin_header.as_deref())
+        .await
+    {
         Ok(response) => Ok(warp::reply::json(&response)),
         Err(e) => {
             eprintln!("BeginGrantSessionAuth error: {}", e);
@@ -3687,9 +3780,7 @@ async fn handle_sign_p256_user_op(
     let jwt = auth_header
         .strip_prefix("Bearer ")
         .ok_or_else(|| {
-            warp::reject::custom(ApiError(
-                "Authorization must be 'Bearer <jwt>'".to_string(),
-            ))
+            warp::reject::custom(ApiError("Authorization must be 'Bearer <jwt>'".to_string()))
         })?
         .to_string();
     let t0 = std::time::Instant::now();
@@ -4098,13 +4189,19 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::query::<std::collections::HashMap<String, String>>())
         .and(warp::any().map(move || server_bgsa.clone()))
         .and(warp::header::optional::<String>("origin"))
-        .and_then(|params: std::collections::HashMap<String, String>, server: Arc<KmsApiServer>, origin: Option<String>| async move {
-            let key_id = params.get("keyId").cloned().unwrap_or_default();
-            if key_id.is_empty() {
-                return Err(warp::reject::custom(ApiError("keyId query parameter required".to_string())));
-            }
-            handle_begin_grant_session_auth(key_id, server, origin).await
-        });
+        .and_then(
+            |params: std::collections::HashMap<String, String>,
+             server: Arc<KmsApiServer>,
+             origin: Option<String>| async move {
+                let key_id = params.get("keyId").cloned().unwrap_or_default();
+                if key_id.is_empty() {
+                    return Err(warp::reject::custom(ApiError(
+                        "keyId query parameter required".to_string(),
+                    )));
+                }
+                handle_begin_grant_session_auth(key_id, server, origin).await
+            },
+        );
 
     // Agent Key endpoints (POST /kms/create-agent-key, /kms/sign-agent, etc.)
     let server_cak = server.clone();
@@ -4318,7 +4415,9 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /kms/revoke-agent-credential  - Revoke agent key (WebAuthn)");
     println!("   POST /kms/SignTypedData             - EIP-712 typed data signing");
     println!("   POST /kms/sign-grant-session        - Sign GRANT_SESSION_V2 (ECDSA session key)");
-    println!("   POST /kms/sign-p256-grant-session   - Sign GRANT_P256_SESSION_V2 (P256 session key)");
+    println!(
+        "   POST /kms/sign-p256-grant-session   - Sign GRANT_P256_SESSION_V2 (P256 session key)"
+    );
     println!("   POST /kms/create-p256-session-key  - Create P256 session key (WebAuthn)");
     println!("   POST /kms/sign-p256-user-op        - P256 sign userOpHash (Bearer JWT)");
     println!("🔐 TA Mode: ✅ Real TA (OP-TEE Secure World required)");
