@@ -25,16 +25,43 @@ PASS=0
 FAIL=0
 SKIP=0
 
-# 测试用 P-256 Passkey 公钥（来自 kms/test/test-fixtures/user1.json）
-# CreateKey 要求提供 65 字节非压缩 P-256 公钥（0x04||x||y）
+# ── Passkey fixture（来自 kms/test/test-fixtures/user1.json）─────────────
+# CreateKey 要求 65 字节非压缩 P-256 公钥；DeriveAddress/Sign 要求 passkey 断言。
+# 依赖：pip3 install cryptography（用于 p256_helper.py）
 FIXTURE="$REPO_ROOT/kms/test/test-fixtures/user1.json"
-if [ -f "$FIXTURE" ]; then
+P256_HELPER="$REPO_ROOT/kms/test/p256_helper.py"
+TEST_PUBKEY=""
+TEST_PEM=""
+PASSKEY_AVAILABLE=false
+
+if [ -f "$FIXTURE" ] && [ -f "$P256_HELPER" ]; then
     TEST_PUBKEY=$(python3 -c "import json; print(json.load(open('$FIXTURE'))['public_key_hex'])" 2>/dev/null || echo "")
+    TEST_PEM=$(python3 -c "import json; print(json.load(open('$FIXTURE'))['private_key_pem'])" 2>/dev/null || echo "")
+    # 验证 p256_helper 可用
+    if python3 -c "from cryptography.hazmat.primitives.asymmetric import ec" 2>/dev/null; then
+        PASSKEY_AVAILABLE=true
+    fi
 fi
-if [ -z "${TEST_PUBKEY:-}" ]; then
-    # 回退：使用内嵌的已知测试公钥
+if [ -z "$TEST_PUBKEY" ]; then
     TEST_PUBKEY="0x04c2eb736467f904d93574842296e8f08c4f9d3d1b7a6ab651d2f3dae12497839f6cd34dcd5b1f2d5eaad9283f9b3368690c47dc72639b4b4ee581edab5704498d"
 fi
+
+# 生成 passkey 断言（用测试私钥签一个随机 challenge）
+make_assertion() {
+    python3 "$P256_HELPER" assertion "$TEST_PEM"
+}
+
+# 将 assertion JSON → Passkey 请求字段
+make_passkey_json() {
+    local assertion="$1"
+    local auth_data cdh sig_r sig_s sig
+    auth_data=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['authenticator_data'])")
+    cdh=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_data_hash'])")
+    sig_r=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_r'])")
+    sig_s=$(echo "$assertion" | python3 -c "import sys,json; print(json.load(sys.stdin)['signature_s'])")
+    sig="${sig_r}${sig_s}"
+    echo "{\"AuthenticatorData\":\"$auth_data\",\"ClientDataHash\":\"$cdh\",\"Signature\":\"$sig\"}"
+}
 
 # ── 测试工具 ──────────────────────────────────────────────────────────────
 assert_http() {
@@ -135,9 +162,31 @@ test_p1_key_lifecycle() {
     done
     $key_ready || { log_error "  FAIL: KeyStatus timeout after 30s"; ((FAIL++)) || true; }
 
-    # DeriveAddress, Sign, SignHash — 需要 Passkey 断言，由 run-api-tests.sh 覆盖
-    skip_test "DeriveAddress (needs Passkey assertion — run kms/test/run-api-tests.sh for full test)"
-    skip_test "Sign / SignHash (needs Passkey assertion — run kms/test/run-api-tests.sh for full test)"
+    # DeriveAddress / Sign / SignHash — 需要 passkey 断言
+    if $PASSKEY_AVAILABLE; then
+        local passkey_json
+        passkey_json=$(make_passkey_json "$(make_assertion)")
+        assert_http "DeriveAddress (m/44'/60'/0'/0/0)" "200" "$BASE_URL/DeriveAddress" \
+            -X POST -H "Content-Type: application/json" \
+            -H "x-amz-target: TrentService.DeriveAddress" \
+            -d "{\"KeyId\":\"$key_id\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Passkey\":$passkey_json}"
+
+        passkey_json=$(make_passkey_json "$(make_assertion)")
+        assert_http "SignHash (32-byte)" "200" "$BASE_URL/SignHash" \
+            -X POST -H "Content-Type: application/json" \
+            -H "x-amz-target: TrentService.SignHash" \
+            -d "{\"KeyId\":\"$key_id\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"Passkey\":$passkey_json}"
+
+        passkey_json=$(make_passkey_json "$(make_assertion)")
+        assert_http "Sign (message)" "200" "$BASE_URL/Sign" \
+            -X POST -H "Content-Type: application/json" \
+            -H "x-amz-target: TrentService.Sign" \
+            -d "{\"KeyId\":\"$key_id\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f\",\"Passkey\":$passkey_json}"
+    else
+        skip_test "DeriveAddress (pip3 install cryptography 以启用 passkey 测试)"
+        skip_test "SignHash (pip3 install cryptography 以启用 passkey 测试)"
+        skip_test "Sign message (pip3 install cryptography 以启用 passkey 测试)"
+    fi
 
     log_info "  [KeyId=$key_id 测试完成，保留用于后续阶段]"
     # 导出 key_id 给后续测试
