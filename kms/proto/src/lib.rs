@@ -99,11 +99,20 @@ mod tests {
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
-        assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
+        assert!(matches!(
+            Command::from(18u32),
+            Command::CreateP256SessionKey
+        ));
         assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
-        assert!(matches!(Command::from(20u32), Command::DeleteP256SessionKey));
+        assert!(matches!(
+            Command::from(20u32),
+            Command::DeleteP256SessionKey
+        ));
         assert!(matches!(Command::from(21u32), Command::SignGrantSession));
-        assert!(matches!(Command::from(22u32), Command::SignP256GrantSession));
+        assert!(matches!(
+            Command::from(22u32),
+            Command::SignP256GrantSession
+        ));
     }
 
     #[test]
@@ -115,7 +124,9 @@ mod tests {
     #[test]
     fn command_roundtrip() {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
-        let valid_ids: &[u32] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,17,18,19,20,21,22];
+        let valid_ids: &[u32] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22,
+        ];
         for &i in valid_ids {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
@@ -571,7 +582,12 @@ mod tests {
         let input_jwt = SignTypedDataInput {
             wallet_id: test_uuid(),
             hd_path: "m/44'/60'/0'/1/0".into(),
-            domain: Eip712Domain { name: None, version: None, chain_id: Some(1), verifying_contract: None },
+            domain: Eip712Domain {
+                name: None,
+                version: None,
+                chain_id: Some(1),
+                verifying_contract: None,
+            },
             primary_type: "Transfer".into(),
             types: vec![],
             message: vec![],

@@ -42,7 +42,9 @@ pub fn assemble_jwt(tee_out: &proto::CreateAgentKeyOutput) -> Result<(String, i6
 
 /// Assemble a JWT string from the material returned by `create_p256_session_key` TA call.
 /// Reuses the same JWT format and verification path as agent keys.
-pub fn assemble_p256_session_jwt(tee_out: &proto::CreateP256SessionKeyOutput) -> Result<(String, i64)> {
+pub fn assemble_p256_session_jwt(
+    tee_out: &proto::CreateP256SessionKeyOutput,
+) -> Result<(String, i64)> {
     let signature_b64 = URL_SAFE_NO_PAD.encode(tee_out.jwt_hmac);
     let jwt = format!(
         "{}.{}.{}",
