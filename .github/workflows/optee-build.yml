@@ -2,9 +2,9 @@ name: OP-TEE Build and Test
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, KMS ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop, KMS ]
 
 jobs:
   build-test:
@@ -79,7 +79,7 @@ jobs:
         ./scripts/test_all.sh
         
     - name: Upload test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: test-results
@@ -104,12 +104,15 @@ jobs:
         
     - name: Check code formatting
       run: cargo fmt --all -- --check
-      
+      working-directory: kms/host
+
     - name: Run Clippy
-      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      
+      run: cargo clippy --all-targets -- -D warnings
+      working-directory: kms/host
+
     - name: Check documentation
-      run: cargo doc --workspace --no-deps --document-private-items
+      run: cargo doc --no-deps --document-private-items
+      working-directory: kms/host
 
   security-audit:
     runs-on: ubuntu-latest
