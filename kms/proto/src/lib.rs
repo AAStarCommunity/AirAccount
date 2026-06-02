@@ -659,10 +659,16 @@ mod tests {
         bincode_roundtrip(&CreateP256SessionKeyInput {
             wallet_id: test_uuid(),
             session_index: 0,
+            subject: "test-wallet-id".to_string(),
+            ttl_secs: 259200,
         });
         bincode_roundtrip(&CreateP256SessionKeyOutput {
             pub_key_x: [0xaa; 32],
             pub_key_y: [0xbb; 32],
+            jwt_kid: "v1".to_string(),
+            jwt_header_b64: "eyJhbGciOiJIUzI1NiJ9".to_string(),
+            jwt_payload_b64: "eyJzdWIiOiJ0ZXN0In0".to_string(),
+            jwt_hmac: [0xcc; 32],
         });
     }
 
