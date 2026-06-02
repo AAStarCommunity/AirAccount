@@ -11,6 +11,11 @@ use uuid::Uuid;
 
 const DEFAULT_DB_PATH: &str = "/root/shared/kms.db";
 
+/// How long a 'pending' P256 session key placeholder is considered in-flight before
+/// it is treated as stuck (host crash between allocate and activate). Used in both
+/// the allocate quota count and the GC expiry query — must stay in sync.
+const PENDING_TTL_SECS: i64 = 300; // 5 minutes
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -717,9 +722,8 @@ impl KmsDb {
         now_unix: i64,
         max_active: i64,
     ) -> Result<u32> {
-        // Pending rows older than this are considered stuck (host crash after allocate)
-        // and excluded from the count so they don't permanently block new creates.
-        const PENDING_TTL_SECS: i64 = 300; // 5 minutes
+        // Pending rows older than PENDING_TTL_SECS are considered stuck (host crash after
+        // allocate) and excluded from the count so they don't permanently block new creates.
         let pending_cutoff = now_unix - PENDING_TTL_SECS;
 
         let now_rfc = Utc::now().to_rfc3339();
@@ -792,8 +796,10 @@ impl KmsDb {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // Count currently non-expired active rows (self is still 'pending', so not counted).
-        // If adding this key would exceed the cap, reject so caller can clean up TEE material.
+        // Count only 'active' rows (not 'pending'). This is intentional: allocate_p256_session_key_pending
+        // already counted pending rows against the quota to prevent concurrent over-allocation.
+        // By activate time, the pending slot is self — including it would make the recheck reject valid
+        // creates when the wallet is at capacity with pending-but-in-flight keys.
         let active_count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM p256_session_keys \
              WHERE wallet_id=?1 \
@@ -893,8 +899,7 @@ impl KmsDb {
         gc_cutoff_unix: i64,
         exclude_session_index: Option<u32>,
     ) -> Result<Vec<u32>> {
-        const PENDING_TTL_SECS: i64 = 300;
-        // stuck_pending_cutoff = gc_cutoff - 300s.
+        // stuck_pending_cutoff = gc_cutoff - PENDING_TTL_SECS.
         // Caller sets gc_cutoff = now - 60s (clock-drift grace window), so effective
         // stuck threshold is now - 360s (6 min). Pending rows older than this are GC-eligible.
         // The extra 60s is intentional: a pending that just crossed 5 min gets one more GC cycle
