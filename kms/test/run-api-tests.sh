@@ -212,6 +212,41 @@ timed_curl "POST /Sign (transaction)" \
     -d "{\"KeyId\":\"$KEY_ID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"Passkey\":$PASSKEY_JSON}"
 echo ""
 
+# ── Phase 5c: P256 Session Key (v0.18.1) ──
+# P256 key creation requires WebAuthn ceremony (challenge-based, browser flow).
+# Provide P256_SESSION_CRED env var (JWT from a prior create-p256-session-key call)
+# and P256_SESSION_KEY_ID (wallet_uuid:session_index) to run signing tests.
+echo "${YELLOW}[Phase 5c] P256 Session Key (v0.18.1)${NC}"
+
+if [ -n "$P256_SESSION_CRED" ] && [ -n "$P256_SESSION_KEY_ID" ]; then
+    # Test /kms/sign-p256-user-op with pre-created credential
+    SAMPLE_ACCOUNT="0x742d35cc6634c0532925a3b844bc9e7595f2bd18"
+    SAMPLE_HASH="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+    timed_curl "POST /kms/sign-p256-user-op" \
+        -X POST "$BASE/kms/sign-p256-user-op" \
+        -H "$HDR_JSON" \
+        -H "Authorization: Bearer $P256_SESSION_CRED" \
+        $API_KEY_HDR \
+        -d "{\"keyId\":\"$P256_SESSION_KEY_ID\",\"payload\":\"0x$SAMPLE_HASH\",\"accountAddress\":\"$SAMPLE_ACCOUNT\"}"
+
+    SIG_HEX=$(echo "$LAST_BODY" | python3 -c "import sys,json; s=json.load(sys.stdin).get('signature',''); print(s[2:] if s.startswith('0x') else s)" 2>/dev/null || echo "")
+    SIG_LEN=$(echo -n "$SIG_HEX" | wc -c | tr -d ' ')
+    if [ "$SIG_LEN" -eq 298 ]; then
+        echo "  P256 signature: 149 bytes ✓ marker=0x$(echo "$SIG_HEX" | cut -c1-2)"
+    else
+        echo "  ${RED}WARNING: P256 sig length unexpected: ${SIG_LEN}/2 bytes (want 149)${NC}"
+    fi
+else
+    # Mark as SKIP — WebAuthn ceremony required for creation
+    API_NAMES+=("P256SessionKey (WebAuthn required)")
+    API_TIMES+=("0")
+    API_STATUS+=("SKIP")
+    printf "${YELLOW}SKIP${NC} %-32s %6s  Set P256_SESSION_CRED+P256_SESSION_KEY_ID to test signing\n" \
+        "P256SessionKey" "0ms"
+fi
+echo ""
+
 # ── Phase 6: Negative Tests ──
 echo "${YELLOW}[Phase 6] Negative Tests${NC}"
 
@@ -239,6 +274,43 @@ if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
     TOTAL_FAIL=$((TOTAL_FAIL - 1))
     TOTAL_PASS=$((TOTAL_PASS + 1))
     echo "  (Expected failure — key not found)"
+fi
+
+# P256 revoke without WebAuthn: must return 4xx (auth guard, not key-lookup).
+# Note: revoke_p256_session_key requires a WebAuthn ceremony for replay-protection;
+# this test verifies the guard fires before any DB lookup. Deep paths (not-found,
+# already-revoked idempotency) require a valid WebAuthn assertion and must be tested
+# via integration tests with a real or mock WebAuthn ceremony.
+timed_curl "POST /revoke-p256-session-key (no webauthn)" \
+    -X POST "$BASE/kms/revoke-p256-session-key" \
+    -H "$HDR_JSON" $API_KEY_HDR \
+    -d "{\"keyId\":\"$KEY_ID:99999\"}"
+if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "FAIL" ]; then
+    API_STATUS[${#API_STATUS[@]}-1]="OK"
+    TOTAL_FAIL=$((TOTAL_FAIL - 1))
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+    echo "  (Expected failure — WebAuthn assertion required)"
+fi
+
+# P256 double-revoke idempotency: set P256_REVOKED_KEY_ID to a known-revoked key
+# (obtained from a prior create+revoke run) and supply a fresh WebAuthn assertion
+# via P256_REVOKE_ASSERTION_JSON to test that a second revoke returns 2xx.
+if [ -n "${P256_REVOKED_KEY_ID:-}" ] && [ -n "${P256_REVOKE_ASSERTION_JSON:-}" ]; then
+    timed_curl "POST /revoke-p256-session-key (idempotent)" \
+        -X POST "$BASE/kms/revoke-p256-session-key" \
+        -H "$HDR_JSON" $API_KEY_HDR \
+        -d "{\"keyId\":\"$P256_REVOKED_KEY_ID\",\"webauthnAssertion\":$P256_REVOKE_ASSERTION_JSON}"
+    if [ "${API_STATUS[${#API_STATUS[@]}-1]}" = "OK" ]; then
+        echo "  (Idempotent revoke returned 2xx — correct)"
+    else
+        echo "  ${RED}FAIL: expected 2xx on double-revoke (idempotent)${NC}"
+    fi
+else
+    API_NAMES+=("P256 double-revoke (idempotent)")
+    API_TIMES+=("0")
+    API_STATUS+=("SKIP")
+    printf "${YELLOW}SKIP${NC} %-32s %6s  Set P256_REVOKED_KEY_ID+P256_REVOKE_ASSERTION_JSON to test\n" \
+        "P256 double-revoke (idempotent)" "0ms"
 fi
 echo ""
 

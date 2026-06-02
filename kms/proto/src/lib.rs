@@ -40,6 +40,10 @@ pub enum Command {
     JwtHmacVerify = 14,
     JwtRotateSecret = 15,
     JwtSignPayload = 16,
+    SignTypedData = 17,
+    CreateP256SessionKey = 18,
+    SignP256UserOp = 19,
+    DeleteP256SessionKey = 20,
     #[default]
     Unknown,
 }
@@ -47,7 +51,7 @@ pub enum Command {
 // If Uuid::parse_str() returns an InvalidLength error, there may be an extra
 // newline in your uuid.txt file. You can remove it by running
 // `truncate -s 36 uuid.txt`.
-pub const UUID: &str = &include_str!("../../uuid.txt");
+pub const UUID: &str = include_str!("../../uuid.txt");
 
 #[cfg(test)]
 mod tests {
@@ -83,6 +87,10 @@ mod tests {
         assert_eq!(u32::from(Command::JwtHmacVerify), 14);
         assert_eq!(u32::from(Command::JwtRotateSecret), 15);
         assert_eq!(u32::from(Command::JwtSignPayload), 16);
+        assert_eq!(u32::from(Command::SignTypedData), 17);
+        assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
+        assert_eq!(u32::from(Command::SignP256UserOp), 19);
+        assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
     }
 
     #[test]
@@ -90,6 +98,16 @@ mod tests {
         assert!(matches!(Command::from(0u32), Command::CreateWallet));
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
+        assert!(matches!(Command::from(17u32), Command::SignTypedData));
+        assert!(matches!(
+            Command::from(18u32),
+            Command::CreateP256SessionKey
+        ));
+        assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
+        assert!(matches!(
+            Command::from(20u32),
+            Command::DeleteP256SessionKey
+        ));
     }
 
     #[test]
@@ -100,7 +118,7 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        for i in 0..=16u32 {
+        for i in 0..=20u32 {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
         }
@@ -360,7 +378,7 @@ mod tests {
             account_address: [0xab; 20],
         });
         bincode_roundtrip(&SignAgentUserOpOutput {
-            signature: vec![0u8; 106],  // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
+            signature: vec![0u8; 106], // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
         });
     }
 
@@ -490,5 +508,124 @@ mod tests {
             hash: [0xff; 32],
             passkey_assertion: Some(assertion),
         });
+    }
+
+    // ── EIP-712 SignTypedData ──
+
+    #[test]
+    fn sign_typed_data_roundtrip() {
+        let input = SignTypedDataInput {
+            wallet_id: test_uuid(),
+            hd_path: "m/44'/60'/0'/0/0".into(),
+            domain: Eip712Domain {
+                name: Some("MyDApp".into()),
+                version: Some("1".into()),
+                chain_id: Some(1),
+                verifying_contract: Some([0xde; 20]),
+            },
+            primary_type: "Transfer".into(),
+            types: vec![Eip712TypeDef {
+                name: "Transfer".into(),
+                fields: vec![
+                    Eip712TypeField {
+                        name: "to".into(),
+                        field_type: "address".into(),
+                    },
+                    Eip712TypeField {
+                        name: "amount".into(),
+                        field_type: "uint256".into(),
+                    },
+                    Eip712TypeField {
+                        name: "memo".into(),
+                        field_type: "string".into(),
+                    },
+                ],
+            }],
+            message: vec![
+                Eip712FieldValue {
+                    name: "to".into(),
+                    value: Eip712Value::Address([0xab; 20]),
+                },
+                Eip712FieldValue {
+                    name: "amount".into(),
+                    value: Eip712Value::Uint(vec![0x00, 0x0f, 0x42, 0x40]), // 1000000
+                },
+                Eip712FieldValue {
+                    name: "memo".into(),
+                    value: Eip712Value::Str("hello".into()),
+                },
+            ],
+            passkey_assertion: None,
+        };
+        bincode_roundtrip(&input);
+        bincode_roundtrip(&SignTypedDataOutput {
+            signature: vec![0u8; 65],
+        });
+    }
+
+    #[test]
+    fn eip712_domain_minimal_roundtrip() {
+        bincode_roundtrip(&Eip712Domain {
+            name: None,
+            version: None,
+            chain_id: Some(137),
+            verifying_contract: None,
+        });
+    }
+
+    #[test]
+    fn eip712_value_variants_roundtrip() {
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "flag".into(),
+            value: Eip712Value::Bool(true),
+        });
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "data".into(),
+            value: Eip712Value::Bytes(vec![0xca, 0xfe, 0xba, 0xbe]),
+        });
+        bincode_roundtrip(&Eip712FieldValue {
+            name: "hash".into(),
+            value: Eip712Value::Bytes32([0x11; 32]),
+        });
+    }
+
+    // ── P256 Session Key ──
+
+    #[test]
+    fn create_p256_session_key_roundtrip() {
+        bincode_roundtrip(&CreateP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 0,
+        });
+        bincode_roundtrip(&CreateP256SessionKeyOutput {
+            pub_key_x: [0xaa; 32],
+            pub_key_y: [0xbb; 32],
+        });
+    }
+
+    #[test]
+    fn sign_p256_user_op_roundtrip() {
+        bincode_roundtrip(&SignP256UserOpInput {
+            wallet_id: test_uuid(),
+            session_index: 2,
+            user_op_hash: [0xcc; 32],
+            jwt_kid: "v1234".to_string(),
+            jwt_signing_input: b"header.payload".to_vec(),
+            jwt_hmac: vec![0xaa; 32],
+            account_address: [0xab; 20],
+        });
+        bincode_roundtrip(&SignP256UserOpOutput {
+            signature: vec![0u8; 149],
+        });
+    }
+
+    #[test]
+    fn delete_p256_session_key_roundtrip() {
+        bincode_roundtrip(&DeleteP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 1,
+        });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: true });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: false });
     }
 }
