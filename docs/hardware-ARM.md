@@ -1,5 +1,9 @@
 # ARM TEE 开发板推荐 - 替代 QEMU 模拟环境
 
+> ⚠️ **已弃用（Deprecated）** — 最后更新：2026-06-02
+> STM32MP157F-DK2（ARMv7-A 32-bit）已不再是 AirAccount KMS 的推荐硬件方案。
+> 当前生产推荐：[`hardware-imx95-fetmx9596c.md`](hardware-imx95-fetmx9596c.md)（NXP i.MX 95，aarch64，代码零修改）。
+
 基于 Apache Teaclave TrustZone SDK 和 OP-TEE 官方支持的开发板推荐指南。
 
 ---
