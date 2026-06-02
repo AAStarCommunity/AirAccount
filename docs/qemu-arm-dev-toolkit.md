@@ -15,13 +15,13 @@ macOS Host (x86_64 或 Apple Silicon)
               ├── Normal World: Linux (aarch64, cortex-a57)
               │     └── kms-api-server (CA, aarch64-linux-gnu)
               └── Secure World: OP-TEE 4.5.0
-                    └── AirAccount TA (aarch64-unknown-optee)
+                    └── AirAccount TA (aarch64-unknown-linux-gnu)
 ```
 
 **关键点**：
 - Host macOS 是 x86_64（或 arm64 Apple Silicon），容器内仍是 x86_64 linux
 - QEMU 模拟 `aarch64 cortex-a57`，和 i.MX 95 (Cortex-A55) **相同指令集**
-- 编译目标：`aarch64-unknown-optee`（TA）、`aarch64-unknown-linux-gnu`（CA）
+- 编译目标：TA 和 CA 均为 `aarch64-unknown-linux-gnu`（见 `kms/Makefile` `TARGET_TA`）
 - 历史文档中的"Intel"指的是 Docker 容器是 x86_64 宿主，**QEMU 本身一直是 ARM**
 
 ---
@@ -50,29 +50,42 @@ macOS Host (x86_64 或 Apple Silicon)
 
 ### Step 1：构建 TA（Trusted Application）
 
+推荐直接使用 `make`（包含构建、strip、签名全流程）：
+
 ```bash
 docker exec -it teaclave_dev_env bash -l
+cd /root/teaclave_sdk_src/projects/web3/kms
+make ta
 
-# 构建 TA
-cd /root/teaclave_sdk_src/projects/web3/kms/ta
+# 产物路径（TARGET_TA = aarch64-unknown-linux-gnu）
+# target/aarch64-unknown-linux-gnu/release/4319f351-0b24-4097-b659-80ee4f824cdd.ta
+
+# 部署到 QEMU 共享目录
+cp target/aarch64-unknown-linux-gnu/release/4319f351-*.ta /opt/teaclave/shared/ta/
+```
+
+如需手动逐步操作（调试用）：
+
+```bash
+# 构建 TA（TARGET_TA = aarch64-unknown-linux-gnu，见 kms/Makefile）
+cd kms/ta
 CC=aarch64-linux-gnu-gcc \
-  xargo build --target aarch64-unknown-optee --release
+  xargo build --target aarch64-unknown-linux-gnu --release
 
 # 签名 TA
 UUID=4319f351-0b24-4097-b659-80ee4f824cdd
 aarch64-linux-gnu-objcopy --strip-unneeded \
-  target/aarch64-unknown-optee/release/ta \
-  target/aarch64-unknown-optee/release/stripped_ta
+  target/aarch64-unknown-linux-gnu/release/ta \
+  target/aarch64-unknown-linux-gnu/release/stripped_ta
 
 python3 $TA_DEV_KIT_DIR/scripts/sign_encrypt.py sign-enc \
   --uuid $UUID \
   --ta-version 1 \
-  --in  target/aarch64-unknown-optee/release/stripped_ta \
-  --out target/aarch64-unknown-optee/release/${UUID}.ta \
+  --in  target/aarch64-unknown-linux-gnu/release/stripped_ta \
+  --out target/aarch64-unknown-linux-gnu/release/${UUID}.ta \
   --key $TA_DEV_KIT_DIR/keys/default_ta.pem
 
-# 部署到 QEMU 共享目录
-cp target/aarch64-unknown-optee/release/${UUID}.ta /opt/teaclave/shared/ta/
+cp target/aarch64-unknown-linux-gnu/release/${UUID}.ta /opt/teaclave/shared/ta/
 ```
 
 ### Step 2：构建 CA（KMS API Server）

@@ -32,7 +32,7 @@
 | **寿命保证** | NXP 15年（2040年前） | N/A |
 | **安全子系统** | EdgeLock Secure Enclave（独立 M33） | 软件模拟 |
 
-**关键点：** aarch64 与 QEMU 完全相同，编译目标 `aarch64-unknown-optee` / `aarch64-unknown-linux-gnu` 无需变更。
+**关键点：** aarch64 与 QEMU 完全相同，编译目标 `aarch64-unknown-linux-gnu`（TA 和 CA 均相同，见 `kms/Makefile`）无需变更。
 
 ---
 
@@ -122,7 +122,7 @@ Linux + CA (kms-api-server)
 
 | 组件 | QEMU 目标 | i.MX 95 目标 | 需要变更？ |
 |------|----------|-------------|---------|
-| TA 编译 | `aarch64-unknown-optee` | `aarch64-unknown-optee` | ❌ 否 |
+| TA 编译 | `aarch64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu` | ❌ 否 |
 | CA 编译 | `aarch64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu` | ❌ 否 |
 | OP-TEE API | TEE Client API 2.0 | TEE Client API 2.0 | ❌ 否 |
 | TA 签名 | `sign_encrypt.py` + RSA-4096 | 同上 + AHAB outer wrapper | 生产需加 AHAB |
@@ -336,12 +336,16 @@ cat /sys/kernel/debug/optee/call_count
 
 ```
 1. 在 x86_64 构建机上交叉编译（保持现有 Docker 环境）
+   # 推荐：直接用 make（构建 + strip + 签名一体）
+   cd kms && make ta && make host
+
+   # 或分步（TARGET_TA = aarch64-unknown-linux-gnu，见 Makefile）
    # TA（无变化）
    cd kms/ta
    CC=aarch64-linux-gnu-gcc xargo build \
-     --target aarch64-unknown-optee --release
+     --target aarch64-unknown-linux-gnu --release
 
-   # CA（无变化）  
+   # CA（无变化）
    cd kms/host
    cargo build --target aarch64-unknown-linux-gnu --release \
      --bin kms-api-server

@@ -1,6 +1,10 @@
 # Migration to i.MX 95 — Secure Storage Comparison
 
-> Created: 2026-03-03 15:07
+> Created: 2026-03-03 15:07 | Updated: 2026-06-02
+
+> **⚠️ 起点说明**：本文档部分章节（如 target triple 变更、p256-m 32bit 适配）描述的是从 STM32MP157F-DK2（ARMv7-A 32-bit）出发的迁移路径，已过时。
+> **当前实际起点**：AirAccount KMS 开发环境已是 **aarch64 QEMU**（`aarch64-unknown-linux-gnu`），与 i.MX 95 指令集完全相同，**无需任何 target triple 变更或 32-bit 适配工作**。
+> 本文档保留存储架构对比（DK2 REE-FS vs i.MX 95 RPMB）部分，该内容仍然有效。完整迁移方案见 [`hardware-imx95-fetmx9596c.md`](hardware-imx95-fetmx9596c.md)。
 
 ## Storage Architecture: DK2 vs i.MX 95
 
