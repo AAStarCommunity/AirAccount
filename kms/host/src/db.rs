@@ -698,6 +698,20 @@ impl KmsDb {
         })
     }
 
+    /// Atomically allocate a pending P256 session key slot.
+    ///
+    /// Uses `BEGIN IMMEDIATE` to prevent TOCTOU: between the active-key count check and
+    /// the INSERT, no other writer can interleave (SQLite exclusive write lock held for
+    /// the whole transaction). Without this, two concurrent creates for the same wallet
+    /// could both read count=1, both pass the max=2 guard, and both insert — exceeding quota.
+    ///
+    /// Quota counting includes:
+    /// - `active` rows whose credential has not yet expired
+    /// - `pending` rows created within the last `PENDING_TTL_SECS` (stuck-pending guard)
+    ///
+    /// A stuck-pending row (host crashed after allocate but before activate/cleanup) is
+    /// counted for `PENDING_TTL_SECS` seconds so concurrent creates don't overshoot quota;
+    /// after that it's eligible for GC via `list_expired_p256_session_keys`.
     pub fn allocate_p256_session_key_pending(
         &self,
         wallet_id: &str,
@@ -752,6 +766,15 @@ impl KmsDb {
         Ok(idx as u32)
     }
 
+    /// Atomically activate a pending P256 session key slot.
+    ///
+    /// Uses `BEGIN IMMEDIATE` for the same TOCTOU reason as `allocate_p256_session_key_pending`:
+    /// a slow create could race with another create that completes first. By rechecking the
+    /// active-key count inside the same exclusive transaction that does the UPDATE, we ensure
+    /// the max-2 invariant is never violated even under concurrent requests.
+    ///
+    /// The active-count recheck uses the same quota definition as allocate (active + non-expired).
+    /// If the recheck fails, the caller must delete the TEE key material it just created.
     pub fn activate_p256_session_key(
         &self,
         wallet_id: &str,
@@ -848,17 +871,10 @@ impl KmsDb {
         Ok(n > 0)
     }
 
-    pub fn revoke_p256_session_key(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE p256_session_keys SET status='revoked', revoked_at=?3, updated_at=?3 \
-             WHERE wallet_id=?1 AND session_index=?2 AND status='active'",
-            params![wallet_id, session_index, now],
-        )?;
-        Ok(n > 0)
-    }
-
+    /// List P256 session key indices eligible for GC.
+    /// Returns active/pending rows past their expiry and stuck-pending rows (created before
+    /// gc_cutoff - PENDING_TTL_SECS) that were never activated (e.g., host crash after allocate).
+    /// `exclude_session_index` lets the signing path skip the key currently being used.
     pub fn list_expired_p256_session_keys(
         &self,
         wallet_id: &str,
@@ -894,23 +910,6 @@ impl KmsDb {
             )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(indices)
-    }
-
-    /// Count active/pending (non-expired) P256 session keys for a wallet.
-    /// Note: this method is NOT used for the max-2 enforcement (that is atomic inside
-    /// allocate_p256_session_key_pending). This is provided for diagnostics/stats only.
-    /// active rows should always have a non-null credential_expires_at after activation;
-    /// NULL expiry on an active row is a data anomaly but counted conservatively.
-    pub fn count_active_p256_session_keys(&self, wallet_id: &str, now_unix: i64) -> Result<i64> {
-        let conn = self.lock();
-        conn.query_row(
-            "SELECT COUNT(*) FROM p256_session_keys \
-             WHERE wallet_id=?1 \
-               AND (status = 'pending' \
-                    OR (status = 'active' AND (credential_expires_at IS NULL OR credential_expires_at > ?2)))",
-            params![wallet_id, now_unix],
-            |row| row.get(0),
-        ).context("count_active_p256_session_keys")
     }
 
     /// Atomically claim a P256 session key for GC by setting status='revoked'.
@@ -956,8 +955,7 @@ impl KmsDb {
     }
 
     /// Check whether a P256 session key exists with status='revoked'.
-    /// Used by revoke_p256_session_key to distinguish "already revoked" (idempotent)
-    /// from "not found" (caller error), when mark_p256_session_key_gc returns false.
+    /// Used as a post-check after TEE signing to detect concurrent revocation (TOCTOU guard).
     pub fn p256_session_key_is_revoked(&self, wallet_id: &str, session_index: u32) -> Result<bool> {
         let conn = self.lock();
         conn.query_row(
@@ -968,6 +966,27 @@ impl KmsDb {
         )
         .map(|n| n > 0)
         .context("p256_session_key_is_revoked")
+    }
+
+    /// Physically delete P256 session key rows that are fully cleaned up:
+    /// status='revoked', tee_deleted=1, and revoked_at older than `older_than_unix`.
+    /// Called by GC Pass 2 to prevent unbounded row accumulation.
+    /// Returns the number of rows deleted.
+    pub fn delete_confirmed_revoked_p256_session_keys(
+        &self,
+        wallet_id: &str,
+        older_than_unix: i64,
+    ) -> Result<usize> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM p256_session_keys \
+             WHERE wallet_id=?1 \
+               AND status='revoked' \
+               AND tee_deleted=1 \
+               AND CAST(strftime('%s', revoked_at) AS INTEGER) < ?2",
+            params![wallet_id, older_than_unix],
+        )?;
+        Ok(n)
     }
 
     pub fn retire_expired_jwt_secrets(&self, now_unix: i64) -> Result<usize> {

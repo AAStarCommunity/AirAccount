@@ -1,7 +1,13 @@
-//! Per-API-key sliding window rate limiter.
+//! Per-API-key sliding window rate limiter (process-in-memory).
 //!
-//! Tracks request timestamps per key. Rejects with 429 when window limit exceeded.
+//! Tracks request timestamps per key in a `HashMap<String, Vec<Instant>>`.
+//! Rejects with 429 when the sliding-window limit is exceeded.
 //! Default: 100 requests/minute (configurable via KMS_RATE_LIMIT env var).
+//!
+//! **Limitations** (by design for this deployment):
+//! - State is process-local: counters reset on restart and are not shared across instances.
+//!   A deliberate restart or multi-instance deployment can bypass the per-credential limit.
+//! - For stronger guarantees, move state to TEE secure storage or a shared DB table.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,8 +43,14 @@ impl RateLimiter {
         let now = Instant::now();
         let cutoff = now - Duration::from_secs(WINDOW_SECS);
 
+        // Clean stale timestamps from every bucket and evict empty entries in one pass.
+        // Prevents unbounded map growth when many distinct agent_index values are used.
+        windows.retain(|_, v| {
+            v.retain(|t| *t > cutoff);
+            !v.is_empty()
+        });
+
         let timestamps = windows.entry(key.to_string()).or_insert_with(Vec::new);
-        timestamps.retain(|t| *t > cutoff);
 
         if timestamps.len() >= self.limit {
             Err(self.limit)
