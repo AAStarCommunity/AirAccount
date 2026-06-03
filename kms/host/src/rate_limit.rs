@@ -38,7 +38,8 @@ impl RateLimiter {
             inner: Arc::new(Mutex::new(Inner {
                 windows: HashMap::new(),
                 last_full_gc: Instant::now(),
-                last_cap_log: Instant::now(),
+                // Initialize far enough in the past so the first cap-reject warning is visible immediately.
+                last_cap_log: Instant::now() - Duration::from_secs(WINDOW_SECS),
             })),
             limit,
         }
@@ -75,7 +76,10 @@ impl RateLimiter {
         // once per WINDOW_SECS/2 to bound worst-case O(N) work under a flood of unique keys.
         // The cap-reject log is emitted at most once per WINDOW_SECS to suppress log flooding.
         if !inner.windows.contains_key(key) && inner.windows.len() >= MAX_TRACKED_KEYS {
-            if now.duration_since(inner.last_full_gc) >= Duration::from_secs(WINDOW_SECS / 2) {
+            // WINDOW_SECS/2 uses integer division; clamp to ≥1 to stay safe if WINDOW_SECS is ever reduced.
+            if now.duration_since(inner.last_full_gc)
+                >= Duration::from_secs((WINDOW_SECS / 2).max(1))
+            {
                 inner.windows.retain(|_, v| {
                     v.retain(|t| *t > cutoff);
                     !v.is_empty()
