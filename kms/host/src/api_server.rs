@@ -2765,12 +2765,13 @@ impl KmsApiServer {
             .await?;
 
         // Post-check: guard against concurrent revocation between the DB active-check above
-        // and the TEE sign. The TEE worker serializes sign/delete per session index, so a
-        // queued delete cannot interleave with this sign call. However, DB revocation
-        // (status → 'revoked') can happen any time before the TEE delete is dispatched.
+        // and the TEE sign. The TEE client uses a single global worker loop, so all TEE
+        // commands are globally serialized — a queued delete cannot physically interleave
+        // with this sign command. However, DB revocation (status → 'revoked') is a plain
+        // SQL UPDATE that can commit any time before the TEE delete is dispatched.
         // If the key was revoked during the TEE call window, discard the produced signature.
-        // Guarantee: a caller that observes a successful response always received the
-        // signature before revocation was committed to the DB.
+        // Guarantee: a caller that observes a successful response received the signature
+        // before revocation was committed to the DB.
         if self
             .db
             .p256_session_key_is_revoked(&wallet_id_str, session_index)?

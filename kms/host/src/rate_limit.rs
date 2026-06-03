@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const WINDOW_SECS: u64 = 60;
+/// Hard cap on distinct tracked keys. Prevents memory DoS from flooding with unique key strings.
+/// Requests from unseen keys are rejected with the same 429 code when the map is full.
+const MAX_TRACKED_KEYS: usize = 10_000;
 
 struct Inner {
     windows: HashMap<String, Vec<Instant>>,
@@ -61,6 +64,11 @@ impl RateLimiter {
                 !v.is_empty()
             });
             inner.last_full_gc = now;
+        }
+
+        // Hard cap: reject unseen keys when map is at capacity to prevent memory DoS.
+        if !inner.windows.contains_key(key) && inner.windows.len() >= MAX_TRACKED_KEYS {
+            return Err(self.limit);
         }
 
         // Per-call: only evict stale timestamps for the current key.
