@@ -16,7 +16,10 @@ fn main() -> Result<()> {
     }
 
     let wallet_id = Uuid::parse_str(&args[1])?;
-    let derivation_path = args.get(2).map(|s| s.as_str()).unwrap_or("m/44'/60'/0'/0/0");
+    let derivation_path = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or("m/44'/60'/0'/0/0");
 
     println!("🔑 Exporting private key...");
     println!("   Wallet ID: {}", wallet_id);
