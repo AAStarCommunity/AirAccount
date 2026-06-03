@@ -983,7 +983,8 @@ impl KmsDb {
              WHERE wallet_id=?1 \
                AND status='revoked' \
                AND tee_deleted=1 \
-               AND CAST(strftime('%s', revoked_at) AS INTEGER) < ?2",
+               AND (revoked_at IS NULL \
+                    OR CAST(strftime('%s', revoked_at) AS INTEGER) < ?2)",
             params![wallet_id, older_than_unix],
         )?;
         Ok(n)

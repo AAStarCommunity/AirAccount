@@ -15,16 +15,25 @@ use std::time::{Duration, Instant};
 
 const WINDOW_SECS: u64 = 60;
 
+struct Inner {
+    windows: HashMap<String, Vec<Instant>>,
+    /// Last time a full-map sweep was performed to evict empty buckets.
+    last_full_gc: Instant,
+}
+
 #[derive(Clone)]
 pub struct RateLimiter {
-    windows: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    inner: Arc<Mutex<Inner>>,
     limit: usize,
 }
 
 impl RateLimiter {
     pub fn new(limit: usize) -> Self {
         Self {
-            windows: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(Inner {
+                windows: HashMap::new(),
+                last_full_gc: Instant::now(),
+            })),
             limit,
         }
     }
@@ -39,18 +48,27 @@ impl RateLimiter {
 
     /// Check if request is allowed. Returns Ok(remaining) or Err(limit).
     pub fn check(&self, key: &str) -> Result<usize, usize> {
-        let mut windows = self.windows.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let now = Instant::now();
         let cutoff = now - Duration::from_secs(WINDOW_SECS);
 
-        // Clean stale timestamps from every bucket and evict empty entries in one pass.
-        // Prevents unbounded map growth when many distinct agent_index values are used.
-        windows.retain(|_, v| {
-            v.retain(|t| *t > cutoff);
-            !v.is_empty()
-        });
+        // Full sweep: evict stale timestamps and empty buckets from all keys.
+        // Amortized once per WINDOW_SECS to keep per-call cost O(1) for the common
+        // case while still preventing unbounded map growth for high-cardinality keys.
+        if now.duration_since(inner.last_full_gc) >= Duration::from_secs(WINDOW_SECS) {
+            inner.windows.retain(|_, v| {
+                v.retain(|t| *t > cutoff);
+                !v.is_empty()
+            });
+            inner.last_full_gc = now;
+        }
 
-        let timestamps = windows.entry(key.to_string()).or_insert_with(Vec::new);
+        // Per-call: only evict stale timestamps for the current key.
+        let timestamps = inner
+            .windows
+            .entry(key.to_string())
+            .or_insert_with(Vec::new);
+        timestamps.retain(|t| *t > cutoff);
 
         if timestamps.len() >= self.limit {
             Err(self.limit)
