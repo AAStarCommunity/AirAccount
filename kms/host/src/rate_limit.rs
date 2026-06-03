@@ -66,9 +66,22 @@ impl RateLimiter {
             inner.last_full_gc = now;
         }
 
-        // Hard cap: reject unseen keys when map is at capacity to prevent memory DoS.
+        // Hard cap: prevent memory DoS from unique-key flooding.
+        // If map is at capacity and the key is unseen, force a sweep first so stale entries
+        // don't falsely block a legitimate key. Only reject after the sweep still shows full.
         if !inner.windows.contains_key(key) && inner.windows.len() >= MAX_TRACKED_KEYS {
-            return Err(self.limit);
+            inner.windows.retain(|_, v| {
+                v.retain(|t| *t > cutoff);
+                !v.is_empty()
+            });
+            inner.last_full_gc = now;
+            if inner.windows.len() >= MAX_TRACKED_KEYS {
+                eprintln!(
+                    "⚠️  rate-limiter: key cap ({}) reached, rejecting unseen key",
+                    MAX_TRACKED_KEYS
+                );
+                return Err(self.limit);
+            }
         }
 
         // Per-call: only evict stale timestamps for the current key.
