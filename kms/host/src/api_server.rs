@@ -2671,6 +2671,24 @@ impl KmsApiServer {
                 }
             }
         }
+
+        // Pass 2: Physically delete rows that are fully cleaned up (revoked + tee_deleted=1)
+        // and were revoked more than 24 hours ago. Prevents unbounded DB row accumulation.
+        let phys_cutoff = Utc::now().timestamp() - 86400;
+        match self
+            .db
+            .delete_confirmed_revoked_p256_session_keys(wallet_id_str, phys_cutoff)
+        {
+            Ok(0) => {}
+            Ok(n) => println!(
+                "🗑️  P256 GC Pass 2: physically deleted {} rows for {}",
+                n, wallet_id_str
+            ),
+            Err(e) => eprintln!(
+                "⚠️  P256 GC Pass 2: physical delete failed for {}: {}",
+                wallet_id_str, e
+            ),
+        }
     }
 
     pub async fn sign_p256_user_op(
@@ -2745,6 +2763,17 @@ impl KmsApiServer {
                 account_address,
             )
             .await?;
+
+        // Post-check: guard against concurrent revocation between DB active-check and TEE sign.
+        // If revoked during the TEE call window, discard the signature and return an error.
+        if self
+            .db
+            .p256_session_key_is_revoked(&wallet_id_str, session_index)?
+        {
+            return Err(anyhow!(
+                "P256 session key was revoked concurrently during signing"
+            ));
+        }
 
         if sig_bytes.len() != 149 {
             return Err(anyhow!(
