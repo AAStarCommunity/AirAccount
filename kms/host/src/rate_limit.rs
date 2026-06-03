@@ -22,6 +22,8 @@ struct Inner {
     windows: HashMap<String, Vec<Instant>>,
     /// Last time a full-map sweep was performed to evict empty buckets.
     last_full_gc: Instant,
+    /// Last time the key-cap warning was logged (to suppress log flooding).
+    last_cap_log: Instant,
 }
 
 #[derive(Clone)]
@@ -36,6 +38,7 @@ impl RateLimiter {
             inner: Arc::new(Mutex::new(Inner {
                 windows: HashMap::new(),
                 last_full_gc: Instant::now(),
+                last_cap_log: Instant::now(),
             })),
             limit,
         }
@@ -67,19 +70,26 @@ impl RateLimiter {
         }
 
         // Hard cap: prevent memory DoS from unique-key flooding.
-        // If map is at capacity and the key is unseen, force a sweep first so stale entries
-        // don't falsely block a legitimate key. Only reject after the sweep still shows full.
+        // If the map is at capacity for an unseen key, attempt one forced sweep so stale
+        // entries don't falsely block a legitimate new key. The sweep is time-gated: at most
+        // once per WINDOW_SECS/2 to bound worst-case O(N) work under a flood of unique keys.
+        // The cap-reject log is emitted at most once per WINDOW_SECS to suppress log flooding.
         if !inner.windows.contains_key(key) && inner.windows.len() >= MAX_TRACKED_KEYS {
-            inner.windows.retain(|_, v| {
-                v.retain(|t| *t > cutoff);
-                !v.is_empty()
-            });
-            inner.last_full_gc = now;
+            if now.duration_since(inner.last_full_gc) >= Duration::from_secs(WINDOW_SECS / 2) {
+                inner.windows.retain(|_, v| {
+                    v.retain(|t| *t > cutoff);
+                    !v.is_empty()
+                });
+                inner.last_full_gc = now;
+            }
             if inner.windows.len() >= MAX_TRACKED_KEYS {
-                eprintln!(
-                    "⚠️  rate-limiter: key cap ({}) reached, rejecting unseen key",
-                    MAX_TRACKED_KEYS
-                );
+                if now.duration_since(inner.last_cap_log) >= Duration::from_secs(WINDOW_SECS) {
+                    eprintln!(
+                        "⚠️  rate-limiter: key cap ({}) reached, rejecting unseen key",
+                        MAX_TRACKED_KEYS
+                    );
+                    inner.last_cap_log = now;
+                }
                 return Err(self.limit);
             }
         }
