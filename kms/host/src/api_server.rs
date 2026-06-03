@@ -911,10 +911,14 @@ impl KmsApiServer {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
-        let agent_rate_limiter = RateLimiter::new(agent_rl_limit);
+        let agent_rl_max_keys = std::env::var("KMS_RATE_LIMIT_MAX_KEYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        let agent_rate_limiter = RateLimiter::new(agent_rl_limit, agent_rl_max_keys);
         println!(
-            "⏱️  Agent rate limiter: {}/min per credential",
-            agent_rl_limit
+            "⏱️  Agent rate limiter: {}/min per credential (max {} tracked keys)",
+            agent_rl_limit, agent_rl_max_keys
         );
         Self {
             db,

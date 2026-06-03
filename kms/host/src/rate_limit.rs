@@ -14,9 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const WINDOW_SECS: u64 = 60;
-/// Hard cap on distinct tracked keys. Prevents memory DoS from flooding with unique key strings.
-/// Requests from unseen keys are rejected with the same 429 code when the map is full.
-const MAX_TRACKED_KEYS: usize = 10_000;
+/// Default hard cap on distinct tracked keys. Override with KMS_RATE_LIMIT_MAX_KEYS env var.
+const DEFAULT_MAX_TRACKED_KEYS: usize = 10_000;
 
 struct Inner {
     windows: HashMap<String, Vec<Instant>>,
@@ -30,10 +29,11 @@ struct Inner {
 pub struct RateLimiter {
     inner: Arc<Mutex<Inner>>,
     limit: usize,
+    max_keys: usize,
 }
 
 impl RateLimiter {
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, max_keys: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 windows: HashMap::new(),
@@ -42,6 +42,7 @@ impl RateLimiter {
                 last_cap_log: Instant::now() - Duration::from_secs(WINDOW_SECS),
             })),
             limit,
+            max_keys,
         }
     }
 
@@ -50,7 +51,11 @@ impl RateLimiter {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);
-        Self::new(limit)
+        let max_keys = std::env::var("KMS_RATE_LIMIT_MAX_KEYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_TRACKED_KEYS);
+        Self::new(limit, max_keys)
     }
 
     /// Check if request is allowed. Returns Ok(remaining) or Err(limit).
@@ -75,7 +80,7 @@ impl RateLimiter {
         // entries don't falsely block a legitimate new key. The sweep is time-gated: at most
         // once per WINDOW_SECS/2 to bound worst-case O(N) work under a flood of unique keys.
         // The cap-reject log is emitted at most once per WINDOW_SECS to suppress log flooding.
-        if !inner.windows.contains_key(key) && inner.windows.len() >= MAX_TRACKED_KEYS {
+        if !inner.windows.contains_key(key) && inner.windows.len() >= self.max_keys {
             // WINDOW_SECS/2 uses integer division; clamp to ≥1 to stay safe if WINDOW_SECS is ever reduced.
             if now.duration_since(inner.last_full_gc)
                 >= Duration::from_secs((WINDOW_SECS / 2).max(1))
@@ -86,11 +91,11 @@ impl RateLimiter {
                 });
                 inner.last_full_gc = now;
             }
-            if inner.windows.len() >= MAX_TRACKED_KEYS {
+            if inner.windows.len() >= self.max_keys {
                 if now.duration_since(inner.last_cap_log) >= Duration::from_secs(WINDOW_SECS) {
                     eprintln!(
                         "⚠️  rate-limiter: key cap ({}) reached, rejecting unseen key",
-                        MAX_TRACKED_KEYS
+                        self.max_keys
                     );
                     inner.last_cap_log = now;
                 }
@@ -124,7 +129,7 @@ mod tests {
 
     #[test]
     fn allows_under_limit() {
-        let rl = RateLimiter::new(3);
+        let rl = RateLimiter::new(3, 100);
         assert!(rl.check("key1").is_ok());
         assert!(rl.check("key1").is_ok());
         assert!(rl.check("key1").is_ok());
@@ -132,7 +137,7 @@ mod tests {
 
     #[test]
     fn rejects_over_limit() {
-        let rl = RateLimiter::new(2);
+        let rl = RateLimiter::new(2, 100);
         assert!(rl.check("key1").is_ok());
         assert!(rl.check("key1").is_ok());
         assert!(rl.check("key1").is_err());
@@ -140,7 +145,7 @@ mod tests {
 
     #[test]
     fn separate_keys_independent() {
-        let rl = RateLimiter::new(1);
+        let rl = RateLimiter::new(1, 100);
         assert!(rl.check("key1").is_ok());
         assert!(rl.check("key2").is_ok());
         assert!(rl.check("key1").is_err());
