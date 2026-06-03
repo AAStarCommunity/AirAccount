@@ -911,10 +911,14 @@ impl KmsApiServer {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
-        let agent_rate_limiter = RateLimiter::new(agent_rl_limit);
+        let agent_rl_max_keys = std::env::var("KMS_RATE_LIMIT_MAX_KEYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        let agent_rate_limiter = RateLimiter::new(agent_rl_limit, agent_rl_max_keys);
         println!(
-            "⏱️  Agent rate limiter: {}/min per credential",
-            agent_rl_limit
+            "⏱️  Agent rate limiter: {}/min per credential (max {} tracked keys)",
+            agent_rl_limit, agent_rl_max_keys
         );
         Self {
             db,
@@ -2671,6 +2675,24 @@ impl KmsApiServer {
                 }
             }
         }
+
+        // Pass 2: Physically delete rows that are fully cleaned up (revoked + tee_deleted=1)
+        // and were revoked more than 24 hours ago. Prevents unbounded DB row accumulation.
+        let phys_cutoff = Utc::now().timestamp() - 86400;
+        match self
+            .db
+            .delete_confirmed_revoked_p256_session_keys(wallet_id_str, phys_cutoff)
+        {
+            Ok(0) => {}
+            Ok(n) => println!(
+                "🗑️  P256 GC Pass 2: physically deleted {} rows for {}",
+                n, wallet_id_str
+            ),
+            Err(e) => eprintln!(
+                "⚠️  P256 GC Pass 2: physical delete failed for {}: {}",
+                wallet_id_str, e
+            ),
+        }
     }
 
     pub async fn sign_p256_user_op(
@@ -2745,6 +2767,24 @@ impl KmsApiServer {
                 account_address,
             )
             .await?;
+
+        // Post-check: guard against concurrent revocation between the DB active-check above
+        // and the TEE sign. The TEE client uses a single global worker loop, so all TEE
+        // commands are globally serialized — a queued delete cannot physically interleave
+        // with this sign call. However, DB revocation (status → 'revoked') is a plain
+        // SQL UPDATE that can commit any time before the TEE delete is dispatched.
+        // Discard the produced signature if the key was revoked during the TEE call window.
+        // Guarantee: at the time of this post-check query the key was not yet revoked.
+        // Note: revocation could still commit between this SELECT and the HTTP response,
+        // so this is a best-effort defense, not a strict serialization barrier.
+        if self
+            .db
+            .p256_session_key_is_revoked(&wallet_id_str, session_index)?
+        {
+            return Err(anyhow!(
+                "P256 session key was revoked concurrently during signing"
+            ));
+        }
 
         if sig_bytes.len() != 149 {
             return Err(anyhow!(
