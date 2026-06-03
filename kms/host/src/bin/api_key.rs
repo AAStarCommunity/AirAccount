@@ -51,7 +51,7 @@ fn main() -> Result<()> {
                 for (key, label, created) in &keys {
                     // mask middle of key: kms_xxxx...xxxx
                     let masked = if key.len() > 12 {
-                        format!("{}...{}", &key[..8], &key[key.len()-4..])
+                        format!("{}...{}", &key[..8], &key[key.len() - 4..])
                     } else {
                         key.clone()
                     };

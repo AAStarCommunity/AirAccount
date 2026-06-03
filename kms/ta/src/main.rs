@@ -793,18 +793,6 @@ fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     Ok(JwtSignedMaterial { kid: current.kid, header_b64, payload_b64, hmac })
 }
 
-/// Extract a string field value from a compact JSON object without serde_json.
-/// Matches the first occurrence of `"key":"<value>"`.
-fn extract_json_str_field(json: &str, key: &str) -> Result<String> {
-    let pattern = format!("\"{}\":\"", key);
-    let start = json.find(&*pattern)
-        .ok_or_else(|| anyhow!("JWT claim '{}' not found", key))?
-        + pattern.len();
-    let end = start + json[start..].find('"')
-        .ok_or_else(|| anyhow!("JWT claim '{}' not terminated", key))?;
-    Ok(json[start..end].to_string())
-}
-
 /// Extract a u64 field value from a compact JSON object without serde_json.
 fn extract_json_u64_field(json: &str, key: &str) -> Result<u64> {
     let pattern = format!("\"{}\":", key);
@@ -885,6 +873,12 @@ fn create_p256_session_key(
     // Verify the wallet exists so we don't create orphaned session keys
     let _wallet = load_wallet_cached(&input.wallet_id)?;
 
+    // Enforce TTL bounds (same as create_agent_key)
+    if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
+        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+    }
+    validate_jwt_subject(&input.subject)?;
+
     // Generate P-256 key pair via p256-m using OP-TEE hardware RNG (p256_generate_random).
     // priv[32] = private scalar; pub[64] = x(32) || y(32) (uncompressed, no 0x04 prefix)
     let mut priv_bytes = [0u8; 32];
@@ -910,7 +904,33 @@ fn create_p256_session_key(
     pub_key_x.copy_from_slice(&pub_bytes[..32]);
     pub_key_y.copy_from_slice(&pub_bytes[32..]);
 
-    Ok(proto::CreateP256SessionKeyOutput { pub_key_x, pub_key_y })
+    // Issue JWT credential for this session key (TEE-HMAC'd, same mechanism as agent keys).
+    // agent_index is repurposed as session_index so verify_credential on the host works unchanged.
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let exp = iat.checked_add(input.ttl_secs)
+        .ok_or_else(|| anyhow!("JWT exp overflow"))?;
+    let wallet_id_str = input.wallet_id.to_string();
+    let payload_json = format!(
+        "{{\"sub\":\"{sub}\",\"wallet_id\":\"{wid}\",\"agent_index\":{idx},\"agent_address\":\"0x0000000000000000000000000000000000000000\",\"iat\":{iat},\"exp\":{exp}}}",
+        sub  = input.subject,
+        wid  = wallet_id_str,
+        idx  = input.session_index,
+        iat  = iat,
+        exp  = exp,
+    );
+    let jwt_out = jwt_sign_payload_internal(&payload_json)?;
+
+    Ok(proto::CreateP256SessionKeyOutput {
+        pub_key_x,
+        pub_key_y,
+        jwt_kid:         jwt_out.kid,
+        jwt_header_b64:  jwt_out.header_b64,
+        jwt_payload_b64: jwt_out.payload_b64,
+        jwt_hmac:        jwt_out.hmac,
+    })
 }
 
 fn sign_p256_user_op(
@@ -989,16 +1009,6 @@ fn sign_p256_user_op(
 /// signing_input format: "header_b64url.payload_b64url" (exactly two dot-separated segments).
 /// Payload JSON: {"wallet_id":"<uuid>","agent_index":<u32>,"exp":<i64>}
 /// The format is controlled by our own jwt_sign_payload TA function — no whitespace around colons.
-///
-/// Security note: exp is parsed and returned but NOT checked here. TEE_GetSystemTime's epoch is
-/// implementation-defined and unreliable for Unix timestamp comparison on all TEE platforms.
-/// The host-side exp check (performed before reaching TA) is the primary expiry enforcement.
-/// See Issue #15 for a future trusted-time solution.
-///
-/// Security note (JWT Oracle): JwtHmacSign is exposed to the host by design (JWT issuance flow).
-/// A fully compromised host can mint arbitrary JWTs that pass this TA-side HMAC check. The HMAC
-/// gate guards against partial host compromise (bugs, bypass), not total host takeover.
-/// See Issue #16 for passkey-bound JWT issuance as a future hardening.
 fn jwt_parse_claims(signing_input: &[u8]) -> Result<(String, u32)> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
@@ -1084,6 +1094,32 @@ fn extract_json_i64_field(json: &str, field: &str) -> Result<i64> {
     }
     json[start..end].parse::<i64>()
         .map_err(|e| anyhow!("field '{}' is not a valid i64 in JWT payload: {}", field, e))
+}
+
+/// Delete a P256 session key from TEE secure storage.
+/// Called by the host's lazy GC when credential_expires_at has passed.
+/// Returns deleted=false (not an error) if the key is already absent — idempotent.
+fn delete_p256_session_key(
+    input: &proto::DeleteP256SessionKeyInput,
+) -> Result<proto::DeleteP256SessionKeyOutput> {
+    dbg_println!(
+        "[+] Delete P256 session key for wallet: {:?}, index: {}",
+        input.wallet_id,
+        input.session_index
+    );
+    let db = SecureStorageClient::open(DB_NAME)?;
+    let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
+    match db.delete_entry::<P256SessionKey>(&store_id) {
+        Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("ItemNotFound") || msg.contains("ITEM_NOT_FOUND") {
+                Ok(proto::DeleteP256SessionKeyOutput { deleted: false })
+            } else {
+                Err(anyhow!("delete_p256_session_key: secure storage error: {}", msg))
+            }
+        }
+    }
 }
 
 fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTypedDataOutput> {
@@ -1450,6 +1486,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignTypedData => process(serialized_input, sign_typed_data),
         Command::CreateP256SessionKey => process(serialized_input, create_p256_session_key),
         Command::SignP256UserOp => process(serialized_input, sign_p256_user_op),
+        Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
         Command::SignGrantSession => process(serialized_input, sign_grant_session),
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         _ => bail!("Unsupported command"),
