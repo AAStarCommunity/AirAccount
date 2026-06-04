@@ -84,7 +84,6 @@ jobs:
         echo "## Running custom security check..."
         chmod +x ./scripts/security-check.sh
         ./scripts/security-check.sh 2>&1 | tee security-check.txt
-      continue-on-error: true
     
     - name: Check for secrets
       uses: trufflesecurity/trufflehog@main
@@ -171,6 +170,13 @@ jobs:
         if grep -qE "^error\[" cargo-deny.txt 2>/dev/null; then
           echo "❌ cargo deny violations found:"
           grep -E "^error\[" cargo-deny.txt || true
+          exit 1
+        fi
+
+        # custom security checks: fail if any ❌ line present
+        if grep -q "^❌" security-check.txt 2>/dev/null; then
+          echo "❌ Custom security checks failed:"
+          grep "^❌" security-check.txt || true
           exit 1
         fi
 
