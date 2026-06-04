@@ -3,6 +3,26 @@
 > Created: 2026-03-03 15:07
 > Updated: 2026-06-04
 
+## 默认硬件决策（2026-06-04 确认）
+
+**结论：下一代硬件默认选 i.MX93，不等 i.MX95。**
+
+理由：
+- i.MX93 在国内供货正常，i.MX95 到货周期过长。
+- 对于 AirAccount KMS 当前场景（TEE 内生成私钥、TEE 内签名、私钥不出 TEE），i.MX93 是相对 DK2 的质变升级（32→64位、REE-FS→RPMB/eMMC、独立 EdgeLock Secure Enclave）。
+- i.MX93 → i.MX95 是量变，安全模型相同，主要差异是 Advanced Profile 和更高吞吐；对单节点 KMS 意义不大。
+- 后续如有生产级硬件安全认证需求，代码改动极小（重新编译 + 换 BSP），可随时升 MX95。
+
+迁移代码改动要点（DK2 → i.MX93）：
+- CA target: `armv7-unknown-linux-gnueabihf` → `aarch64-unknown-linux-gnu`
+- TA target: `arm-unknown-optee` → `aarch64-unknown-optee`
+- 验证 p256-m aarch64 编译 flags
+- NXP BSP + OP-TEE（替换 ST 那套）
+- `tee-supplicant` 启用 RPMB backend
+- systemd service 补 `WorkingDirectory=/data/kms`
+
+---
+
 ## 2026-06-04 Decision Note: DK2 vs i.MX93 vs i.MX95
 
 相对当前 STM32MP157F-DK2，i.MX93 / i.MX95 在 AirAccount 的 TEE 私钥存储场景里是明显升级；但如果只做 KMS、TEE 内生成私钥、TEE 内签名、私钥不出 TEE，i.MX93 和 i.MX95 之间的差距没有 DK2 到 i.MX93 那么大，i.MX93 很可能够用。
@@ -26,6 +46,51 @@
 - 如果目标只是 TEE 内生成私钥、TEE 内签名、私钥不出 TEE，i.MX93 已经是比 DK2 大幅升级，通常够用。NXP 资料也提到在 i.MX93/i.MX95 生态中使用 OP-TEE/PKCS#11 做安全 key/certificate 存储，并以 EdgeLock Secure Enclave 作为硬件 root of trust，参考 NXP training: <https://www.nxp.com/design/design-center/training/TIP-HOW-CREATE-SECURE-SYSTEMS-IMX95>。
 - 如果目标是生产级硬件安全、强防回滚、防克隆、更高吞吐，或后续可能做车规/工业安全认证，i.MX95 更合适。NXP i.MX95 官方资料说明 EdgeLock Secure Enclave Advanced Profile 提供硬件 root-of-trust、secure boot、secure debug/update、实时签名、认证和加密能力，参考 NXP i.MX95: <https://www.nxp.com/products/i.MX95>。
 - 硬件升级不能弥补 API 把密钥材料吐出 TEE 的问题。生产发布前必须把 mnemonic/private key export 做成 dev/test-only feature，或彻底禁掉；开发调试阶段可以显式启用，生产构建和发布流水线必须禁止。具体方案见 `docs/secret-export-feature-plan.md`。
+
+## FRDM-IMX93 Board Validation Plan
+
+收到 FRDM-IMX93 后需要验证三层，不要只看 Cortex-A55 或 i.MX93 名称：
+
+1. 硬件层：确认板卡确实是 FRDM-IMX93，SoC 是 i.MX93，板载存储是 eMMC 5.1，并存在 RPMB 分区。
+2. BSP/OP-TEE 层：确认镜像中 OP-TEE 已启用，并且 OP-TEE OS 构建配置启用了 RPMB secure storage backend，例如 `CFG_RPMB_FS=y`。如果没有启用，OP-TEE secure storage 可能仍会回退到 REE-FS。
+3. 运行时层：确认 `tee-supplicant` 正常运行，TA 能创建 secure storage object，并确认这些对象不是只落在 `/data/tee` 的 REE-FS fallback。
+
+板子启动后先收集这些信息：
+
+```bash
+cat /proc/device-tree/model
+uname -a
+ls -l /dev/tee* /dev/mmcblk* /dev/mmcblk*rpmb 2>/dev/null
+dmesg | grep -Ei "optee|tee|rpmb|mmc|trustzone"
+ps | grep -E "tee-supplicant|tee_supplicant" | grep -v grep
+mount | grep -Ei "tee|rpmb|data"
+ls -la /data/tee 2>/dev/null
+```
+
+如果看到 `/dev/mmcblk0rpmb` 或类似设备，只能说明 eMMC RPMB 设备存在；还不能证明 OP-TEE secure storage 正在使用 RPMB。下一步要进入 BSP/OP-TEE 构建目录或查看镜像构建日志，确认配置：
+
+```bash
+grep -R "CFG_RPMB_FS" -n build tmp deploy 2>/dev/null
+grep -R "CFG_REE_FS" -n build tmp deploy 2>/dev/null
+grep -R "RPMB" -n build tmp deploy 2>/dev/null
+```
+
+预期目标：
+
+- `CFG_RPMB_FS=y`
+- 不把生产 secure storage 仅依赖在 `CFG_REE_FS=y`
+- `tee-supplicant` 可访问 RPMB 设备
+- KMS TA 创建钱包、重启后钱包仍可读取
+- 尝试回滚 `/data/tee` 文件不能回滚钱包状态；如果能通过复制旧 `/data/tee` 回滚，说明仍在 REE-FS 或配置不完整
+
+验证 AirAccount KMS 时按这个顺序：
+
+1. 部署生产构建 TA，确认没有启用 `export-secrets`。
+2. 调用 CreateWallet/CreateKey，确认返回值不包含 mnemonic 明文。
+3. 调用 DeriveAddress/SignHash，确认私钥可在 TEE 内正常派生和签名。
+4. 直接调用 `ExportPrivateKey` command id，确认生产 TA 返回 disabled error。
+5. 重启系统后再次调用 DeriveAddress/SignHash，确认 secure storage 持久化。
+6. 如需验证防回滚，先记录钱包计数器或派生地址状态，再尝试恢复旧 `/data/tee` 内容；生产目标下状态不应被旧 REE-FS 文件回滚。
 
 ## Storage Architecture: DK2 vs i.MX 95
 
