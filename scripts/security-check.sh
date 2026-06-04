@@ -35,14 +35,15 @@ else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
 
-# 2. Confirm the production (non-feature) stub for ExportPrivateKey is present in TA.
-#    Two independent checks: cfg guard exists AND disabled error string exists in same file.
-if grep -q 'cfg(not(feature = "export-secrets"))' kms/ta/src/main.rs \
-        && grep -q 'ExportPrivateKey is disabled' kms/ta/src/main.rs; then
+# 2. Confirm the production stub for export_private_key contains the disabled error.
+#    Use grep -A context to verify the cfg guard AND disabled string appear within
+#    the same function body (not just anywhere in the file).
+if grep -A5 '#\[cfg(not(feature = "export-secrets"))\]' kms/ta/src/main.rs \
+        | grep -q 'ExportPrivateKey is disabled'; then
     check "TA production stub rejects ExportPrivateKey" "ok"
 else
     check "TA production stub rejects ExportPrivateKey" \
-          "fail: missing cfg(not(export-secrets)) disabled stub in kms/ta/src/main.rs"
+          "fail: missing cfg(not(export-secrets)) stub with disabled error in kms/ta/src/main.rs"
 fi
 
 # 3. export_key binary must not be copied by production deploy scripts.
