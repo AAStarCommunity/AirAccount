@@ -24,10 +24,13 @@ echo ""
 
 # 1. Production TA must not ship with export-secrets.
 #    The feature flag is the compile-time gate; verify no production build script passes it.
-if grep -rE "\-\-features[[:space:]].*export-secrets" scripts/ .github/ 2>/dev/null \
-        | grep -v "export-secrets" | grep -qv "^#"; then
+#    Exclude this script itself (its error-message strings would match) and filter comment lines.
+if grep -rE "\-\-features[[:space:]]+export-secrets" \
+        --exclude="security-check.sh" \
+        scripts/ .github/ kms/scripts/ qemu/ 2>/dev/null \
+        | grep -vE ':[[:space:]]*#' | grep -q .; then
     check "deploy scripts do not enable export-secrets" \
-          "fail: found --features export-secrets in deploy/CI scripts"
+          "fail: found active --features export-secrets in deploy/CI scripts"
 else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
@@ -43,10 +46,12 @@ else
 fi
 
 # 3. export_key binary must not be copied by production deploy scripts.
-if grep -E "cp.*export_key" scripts/kms-deploy.sh scripts/kms-deploy-v2.sh 2>/dev/null \
-        | grep -v "^#"; then
+if grep -rE "cp[[:space:]].*export_key" \
+        --exclude="security-check.sh" \
+        scripts/ kms/scripts/ qemu/ 2>/dev/null \
+        | grep -vE ':[[:space:]]*#' | grep -q .; then
     check "deploy scripts do not copy export_key" \
-          "fail: found active cp export_key line in deploy script"
+          "fail: found active cp export_key in deploy script"
 else
     check "deploy scripts do not copy export_key" "ok"
 fi
