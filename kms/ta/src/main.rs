@@ -562,6 +562,16 @@ fn derive_address_auto(
     })
 }
 
+// Production builds: unconditionally reject — private key must never leave the TEE.
+#[cfg(not(feature = "export-secrets"))]
+fn export_private_key(
+    _input: &proto::ExportPrivateKeyInput,
+) -> Result<proto::ExportPrivateKeyOutput> {
+    Err(anyhow!("ExportPrivateKey is disabled in production TA builds"))
+}
+
+// Dev/test builds only (--features export-secrets): allow explicit export with passkey or admin bypass.
+#[cfg(feature = "export-secrets")]
 fn export_private_key(
     input: &proto::ExportPrivateKeyInput,
 ) -> Result<proto::ExportPrivateKeyOutput> {
@@ -573,20 +583,10 @@ fn export_private_key(
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
-    // In production builds, passkey assertion is ALWAYS required.
-    // The passkey-less admin bypass is only allowed with the export-secrets feature (dev/test).
-    #[cfg(feature = "export-secrets")]
-    {
-        if input.passkey_assertion.is_some() {
-            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
-        } else {
-            dbg_println!("[+] ExportPrivateKey: dev admin mode (no passkey assertion)");
-        }
-    }
-    #[cfg(not(feature = "export-secrets"))]
-    {
-        // Production: always require passkey, no bypass
+    if input.passkey_assertion.is_some() {
         verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    } else {
+        dbg_println!("[+] ExportPrivateKey: dev admin mode (no passkey assertion)");
     }
 
     let private_key = wallet.export_private_key(&input.derivation_path)?;
