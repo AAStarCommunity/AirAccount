@@ -3,13 +3,13 @@
 //! Pure functions: parse attestation, verify assertions, generate options.
 //! No IO or TA calls — those happen in api_server.rs.
 
-use std::convert::TryInto;
-use anyhow::{Result, anyhow};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use p256::EncodedPoint;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::convert::TryInto;
 use uuid::Uuid;
 
 /// Match origin against a pattern that may contain `*` wildcard.
@@ -33,7 +33,9 @@ pub fn b64url_encode(data: &[u8]) -> String {
 }
 
 pub fn b64url_decode(s: &str) -> Result<Vec<u8>> {
-    URL_SAFE_NO_PAD.decode(s).map_err(|e| anyhow!("base64url decode: {}", e))
+    URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|e| anyhow!("base64url decode: {}", e))
 }
 
 /// Generate 32 bytes of randomness using two UUID v4s.
@@ -146,7 +148,11 @@ pub struct RegistrationResponseJSON {
     pub response: AttestationResponseJSON,
     #[serde(rename = "type")]
     pub type_: String,
-    #[serde(rename = "authenticatorAttachment", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "authenticatorAttachment",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub authenticator_attachment: Option<String>,
     #[serde(rename = "clientExtensionResults", default)]
     pub client_extension_results: serde_json::Value,
@@ -158,7 +164,11 @@ pub struct AttestationResponseJSON {
     pub client_data_json: String, // base64url
     #[serde(rename = "attestationObject")]
     pub attestation_object: String, // base64url
-    #[serde(rename = "transports", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "transports",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub transports: Option<Vec<String>>,
 }
 
@@ -182,7 +192,11 @@ pub struct AssertionResponseJSON {
     #[serde(rename = "authenticatorData")]
     pub authenticator_data: String, // base64url
     pub signature: String, // base64url (DER)
-    #[serde(rename = "userHandle", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "userHandle",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub user_handle: Option<String>,
 }
 
@@ -287,7 +301,10 @@ pub fn generate_registration_options(
             },
             challenge: challenge_b64,
             pub_key_cred_params: vec![
-                PubKeyCredParam { type_: "public-key".to_string(), alg: -7 }, // ES256
+                PubKeyCredParam {
+                    type_: "public-key".to_string(),
+                    alg: -7,
+                }, // ES256
             ],
             timeout: 300_000,
             attestation: "none".to_string(),
@@ -316,23 +333,36 @@ pub fn verify_registration_response(
     let client_data: serde_json::Value = serde_json::from_slice(&client_data_bytes)
         .map_err(|e| anyhow!("Invalid clientDataJSON: {}", e))?;
 
-    let cd_type = client_data["type"].as_str()
+    let cd_type = client_data["type"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'type'"))?;
     if cd_type != "webauthn.create" {
-        return Err(anyhow!("clientDataJSON type must be 'webauthn.create', got '{}'", cd_type));
+        return Err(anyhow!(
+            "clientDataJSON type must be 'webauthn.create', got '{}'",
+            cd_type
+        ));
     }
 
-    let cd_challenge = client_data["challenge"].as_str()
+    let cd_challenge = client_data["challenge"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'challenge'"))?;
     let decoded_challenge = b64url_decode(cd_challenge)?;
     if decoded_challenge != expected_challenge {
         return Err(anyhow!("Challenge mismatch"));
     }
 
-    let cd_origin = client_data["origin"].as_str()
+    let cd_origin = client_data["origin"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if !expected_origins.iter().any(|o| origin_matches(o, cd_origin)) {
-        return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
+    if !expected_origins
+        .iter()
+        .any(|o| origin_matches(o, cd_origin))
+    {
+        return Err(anyhow!(
+            "Origin mismatch: expected one of {:?}, got '{}'",
+            expected_origins,
+            cd_origin
+        ));
     }
 
     // 2. Decode attestationObject (CBOR)
@@ -346,7 +376,8 @@ pub fn verify_registration_response(
     };
 
     // 3. Extract authData
-    let auth_data = map.iter()
+    let auth_data = map
+        .iter()
         .find_map(|(k, v)| {
             if matches!(k, ciborium::Value::Text(s) if s == "authData") {
                 match v {
@@ -379,16 +410,22 @@ pub fn verify_registration_response(
         return Err(anyhow!("AT flag not set — no attested credential data"));
     }
 
-    let sign_count = u32::from_be_bytes(auth_data[33..37].try_into()
-        .map_err(|_| anyhow!("bad signCount bytes"))?);
+    let sign_count = u32::from_be_bytes(
+        auth_data[33..37]
+            .try_into()
+            .map_err(|_| anyhow!("bad signCount bytes"))?,
+    );
 
     // 6. Parse attested credential data
     if auth_data.len() < 55 {
         return Err(anyhow!("authData too short for attested credential data"));
     }
     // aaguid = auth_data[37..53] (skip)
-    let cred_id_len = u16::from_be_bytes(auth_data[53..55].try_into()
-        .map_err(|_| anyhow!("bad credIdLength bytes"))?) as usize;
+    let cred_id_len = u16::from_be_bytes(
+        auth_data[53..55]
+            .try_into()
+            .map_err(|_| anyhow!("bad credIdLength bytes"))?,
+    ) as usize;
 
     if auth_data.len() < 55 + cred_id_len + 1 {
         return Err(anyhow!("authData too short for credentialId + COSE key"));
@@ -405,13 +442,15 @@ pub fn verify_registration_response(
         _ => return Err(anyhow!("COSE key is not a CBOR map")),
     };
 
-    let x = find_cose_bytes(cose_map, -2)
-        .ok_or_else(|| anyhow!("COSE key missing x (-2)"))?;
-    let y = find_cose_bytes(cose_map, -3)
-        .ok_or_else(|| anyhow!("COSE key missing y (-3)"))?;
+    let x = find_cose_bytes(cose_map, -2).ok_or_else(|| anyhow!("COSE key missing x (-2)"))?;
+    let y = find_cose_bytes(cose_map, -3).ok_or_else(|| anyhow!("COSE key missing y (-3)"))?;
 
     if x.len() != 32 || y.len() != 32 {
-        return Err(anyhow!("COSE key x/y not 32 bytes: x={}, y={}", x.len(), y.len()));
+        return Err(anyhow!(
+            "COSE key x/y not 32 bytes: x={}, y={}",
+            x.len(),
+            y.len()
+        ));
     }
 
     // 8. Construct uncompressed P-256 point
@@ -421,8 +460,7 @@ pub fn verify_registration_response(
     pubkey.extend_from_slice(&y);
 
     // Validate it's a valid P-256 point
-    EncodedPoint::from_bytes(&pubkey)
-        .map_err(|e| anyhow!("Invalid P-256 point: {:?}", e))?;
+    EncodedPoint::from_bytes(&pubkey).map_err(|e| anyhow!("Invalid P-256 point: {:?}", e))?;
 
     Ok(VerifiedRegistration {
         credential_id,
@@ -497,29 +535,45 @@ pub fn verify_authentication_response(
     let client_data: serde_json::Value = serde_json::from_slice(&client_data_bytes)
         .map_err(|e| anyhow!("Invalid clientDataJSON: {}", e))?;
 
-    let cd_type = client_data["type"].as_str()
+    let cd_type = client_data["type"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'type'"))?;
     if cd_type != "webauthn.get" {
-        return Err(anyhow!("clientDataJSON type must be 'webauthn.get', got '{}'", cd_type));
+        return Err(anyhow!(
+            "clientDataJSON type must be 'webauthn.get', got '{}'",
+            cd_type
+        ));
     }
 
-    let cd_challenge = client_data["challenge"].as_str()
+    let cd_challenge = client_data["challenge"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'challenge'"))?;
     let decoded_challenge = b64url_decode(cd_challenge)?;
     if decoded_challenge != expected_challenge {
         return Err(anyhow!("Challenge mismatch"));
     }
 
-    let cd_origin = client_data["origin"].as_str()
+    let cd_origin = client_data["origin"]
+        .as_str()
         .ok_or_else(|| anyhow!("clientDataJSON missing 'origin'"))?;
-    if !expected_origins.iter().any(|o| origin_matches(o, cd_origin)) {
-        return Err(anyhow!("Origin mismatch: expected one of {:?}, got '{}'", expected_origins, cd_origin));
+    if !expected_origins
+        .iter()
+        .any(|o| origin_matches(o, cd_origin))
+    {
+        return Err(anyhow!(
+            "Origin mismatch: expected one of {:?}, got '{}'",
+            expected_origins,
+            cd_origin
+        ));
     }
 
     // 2. Decode authenticatorData
     let auth_data = b64url_decode(&response.response.authenticator_data)?;
     if auth_data.len() < 37 {
-        return Err(anyhow!("authenticatorData too short: {} bytes", auth_data.len()));
+        return Err(anyhow!(
+            "authenticatorData too short: {} bytes",
+            auth_data.len()
+        ));
     }
 
     // 3. Verify rpIdHash
@@ -535,15 +589,23 @@ pub fn verify_authentication_response(
         return Err(anyhow!("User Presence flag not set"));
     }
     if flags & 0x04 == 0 {
-        return Err(anyhow!("User Verification flag not set (UV=0). Authenticator must verify user identity."));
+        return Err(anyhow!(
+            "User Verification flag not set (UV=0). Authenticator must verify user identity."
+        ));
     }
 
     // 5. Check signCount
-    let sign_count = u32::from_be_bytes(auth_data[33..37].try_into()
-        .map_err(|_| anyhow!("bad signCount bytes"))?);
+    let sign_count = u32::from_be_bytes(
+        auth_data[33..37]
+            .try_into()
+            .map_err(|_| anyhow!("bad signCount bytes"))?,
+    );
     if stored_counter > 0 && sign_count > 0 && sign_count <= stored_counter {
-        return Err(anyhow!("signCount not incremented ({} <= {}), possible cloned authenticator",
-            sign_count, stored_counter));
+        return Err(anyhow!(
+            "signCount not incremented ({} <= {}), possible cloned authenticator",
+            sign_count,
+            stored_counter
+        ));
     }
 
     // 6. Compute client_data_hash
@@ -564,10 +626,12 @@ pub fn verify_authentication_response(
 
     let der_sig = p256::ecdsa::DerSignature::from_bytes(&sig_bytes)
         .map_err(|e| anyhow!("Invalid DER signature: {:?}", e))?;
-    let signature: Signature = der_sig.try_into()
+    let signature: Signature = der_sig
+        .try_into()
         .map_err(|e| anyhow!("DER to Signature: {:?}", e))?;
 
-    verifying_key.verify(&signature_base, &signature)
+    verifying_key
+        .verify(&signature_base, &signature)
         .map_err(|_| anyhow!("WebAuthn signature verification failed"))?;
 
     // 9. Extract r, s for proto::PasskeyAssertion
@@ -611,9 +675,8 @@ mod tests {
 
     #[test]
     fn registration_options_structure() {
-        let (cid, challenge, resp) = generate_registration_options(
-            "AirAccount", "aastar.io", "alice", "Alice", vec![],
-        );
+        let (cid, challenge, resp) =
+            generate_registration_options("AirAccount", "aastar.io", "alice", "Alice", vec![]);
         assert!(!cid.is_empty());
         assert_eq!(challenge.len(), 32);
         assert_eq!(resp.options.rp.id, "aastar.io");
@@ -651,8 +714,10 @@ mod tests {
             client_extension_results: serde_json::Value::Object(Default::default()),
         };
         let result = verify_registration_response(
-            &fake_response, b"wrong-challenge",
-            &["https://example.com".to_string()], "example.com",
+            &fake_response,
+            b"wrong-challenge",
+            &["https://example.com".to_string()],
+            "example.com",
         );
         assert!(result.is_err());
     }
@@ -660,8 +725,8 @@ mod tests {
     // ── P-256 ECDSA signature verification tests ──
     // These test the same logic as api_server::verify_passkey_ca
 
-    use p256::ecdsa::SigningKey;
     use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::SigningKey;
 
     /// Generate a test P-256 keypair for assertion testing
     fn test_keypair() -> (SigningKey, VerifyingKey) {
@@ -701,8 +766,7 @@ mod tests {
     /// Verify a proto::PasskeyAssertion against a pubkey hex — same as verify_passkey_ca
     fn verify_ca_style(pubkey_hex: &str, assertion: &proto::PasskeyAssertion) -> Result<()> {
         let pk_hex = pubkey_hex.trim_start_matches("0x");
-        let pk_bytes = hex::decode(pk_hex)
-            .map_err(|e| anyhow!("Invalid pubkey hex: {}", e))?;
+        let pk_bytes = hex::decode(pk_hex).map_err(|e| anyhow!("Invalid pubkey hex: {}", e))?;
         let encoded_point = EncodedPoint::from_bytes(&pk_bytes)
             .map_err(|e| anyhow!("Invalid P-256 point: {:?}", e))?;
         let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)
@@ -714,7 +778,8 @@ mod tests {
 
         let signature = Signature::from_scalars(assertion.signature_r, assertion.signature_s)
             .map_err(|e| anyhow!("Invalid signature: {:?}", e))?;
-        verifying_key.verify(&msg, &signature)
+        verifying_key
+            .verify(&msg, &signature)
             .map_err(|_| anyhow!("Verification failed"))?;
         Ok(())
     }
@@ -722,9 +787,7 @@ mod tests {
     #[test]
     fn verify_passkey_ca_valid_signature() {
         let (sk, vk) = test_keypair();
-        let pubkey_hex = format!("0x{}", hex::encode(
-            EncodedPoint::from(vk).as_bytes()
-        ));
+        let pubkey_hex = format!("0x{}", hex::encode(EncodedPoint::from(vk).as_bytes()));
 
         let auth_data = [0x05u8; 37]; // realistic length
         let cdh = [0xABu8; 32];
@@ -736,9 +799,7 @@ mod tests {
     #[test]
     fn verify_passkey_ca_tampered_signature() {
         let (sk, vk) = test_keypair();
-        let pubkey_hex = format!("0x{}", hex::encode(
-            EncodedPoint::from(vk).as_bytes()
-        ));
+        let pubkey_hex = format!("0x{}", hex::encode(EncodedPoint::from(vk).as_bytes()));
 
         let auth_data = [0x05u8; 37];
         let cdh = [0xABu8; 32];
@@ -753,9 +814,7 @@ mod tests {
     fn verify_passkey_ca_wrong_key() {
         let (sk, _vk) = test_keypair();
         let (_sk2, vk2) = test_keypair();
-        let wrong_pubkey_hex = format!("0x{}", hex::encode(
-            EncodedPoint::from(vk2).as_bytes()
-        ));
+        let wrong_pubkey_hex = format!("0x{}", hex::encode(EncodedPoint::from(vk2).as_bytes()));
 
         let auth_data = [0x05u8; 37];
         let cdh = [0xABu8; 32];
@@ -768,9 +827,7 @@ mod tests {
     #[test]
     fn verify_passkey_ca_tampered_auth_data() {
         let (sk, vk) = test_keypair();
-        let pubkey_hex = format!("0x{}", hex::encode(
-            EncodedPoint::from(vk).as_bytes()
-        ));
+        let pubkey_hex = format!("0x{}", hex::encode(EncodedPoint::from(vk).as_bytes()));
 
         let auth_data = [0x05u8; 37];
         let cdh = [0xABu8; 32];

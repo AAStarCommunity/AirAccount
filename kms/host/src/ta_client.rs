@@ -763,7 +763,9 @@ impl TeeHandle {
     ) -> Result<proto::SignGrantSessionOutput> {
         let serialized =
             bincode::serialize(&input).context("Failed to serialize SignGrantSessionInput")?;
-        let out = self.call(proto::Command::SignGrantSession, serialized).await?;
+        let out = self
+            .call(proto::Command::SignGrantSession, serialized)
+            .await?;
         let output: proto::SignGrantSessionOutput =
             bincode::deserialize(&out).context("Failed to deserialize SignGrantSessionOutput")?;
         Ok(output)
@@ -773,9 +775,11 @@ impl TeeHandle {
         &self,
         input: proto::SignP256GrantSessionInput,
     ) -> Result<proto::SignP256GrantSessionOutput> {
-        let serialized = bincode::serialize(&input)
-            .context("Failed to serialize SignP256GrantSessionInput")?;
-        let out = self.call(proto::Command::SignP256GrantSession, serialized).await?;
+        let serialized =
+            bincode::serialize(&input).context("Failed to serialize SignP256GrantSessionInput")?;
+        let out = self
+            .call(proto::Command::SignP256GrantSession, serialized)
+            .await?;
         let output: proto::SignP256GrantSessionOutput = bincode::deserialize(&out)
             .context("Failed to deserialize SignP256GrantSessionOutput")?;
         Ok(output)
@@ -795,7 +799,9 @@ impl TeeHandle {
             ttl_secs,
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
-        let out = self.call(proto::Command::CreateP256SessionKey, input).await?;
+        let out = self
+            .call(proto::Command::CreateP256SessionKey, input)
+            .await?;
         let output: proto::CreateP256SessionKeyOutput = bincode::deserialize(&out)
             .context("Failed to deserialize CreateP256SessionKeyOutput")?;
         Ok(output)
@@ -825,6 +831,26 @@ impl TeeHandle {
         let output: proto::SignP256UserOpOutput =
             bincode::deserialize(&out).context("Failed to deserialize SignP256UserOpOutput")?;
         Ok(output.signature)
+    }
+
+    /// Delete a P256 session key from TEE secure storage (GC cleanup).
+    /// Returns true if the key existed and was deleted; false if already absent (idempotent).
+    pub async fn delete_p256_session_key(
+        &self,
+        wallet_id: uuid::Uuid,
+        session_index: u32,
+    ) -> Result<bool> {
+        let input = bincode::serialize(&proto::DeleteP256SessionKeyInput {
+            wallet_id,
+            session_index,
+        })
+        .context("Failed to serialize DeleteP256SessionKeyInput")?;
+        let out = self
+            .call(proto::Command::DeleteP256SessionKey, input)
+            .await?;
+        let output: proto::DeleteP256SessionKeyOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize DeleteP256SessionKeyOutput")?;
+        Ok(output.deleted)
     }
 }
 

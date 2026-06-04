@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(feature = "tee")]
 use chrono::Utc;
 use proto;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,9 @@ pub fn assemble_jwt(tee_out: &proto::CreateAgentKeyOutput) -> Result<(String, i6
 
 /// Assemble a JWT string from the material returned by `create_p256_session_key` TA call.
 /// Reuses the same JWT format and verification path as agent keys.
-pub fn assemble_p256_session_jwt(tee_out: &proto::CreateP256SessionKeyOutput) -> Result<(String, i64)> {
+pub fn assemble_p256_session_jwt(
+    tee_out: &proto::CreateP256SessionKeyOutput,
+) -> Result<(String, i64)> {
     let signature_b64 = URL_SAFE_NO_PAD.encode(tee_out.jwt_hmac);
     let jwt = format!(
         "{}.{}.{}",
@@ -100,7 +103,10 @@ pub fn extract_signing_proof(jwt: &str) -> anyhow::Result<(String, Vec<u8>, Vec<
         .decode(parts[2])
         .map_err(|e| anyhow::anyhow!("JWT signature base64url decode: {}", e))?;
     if hmac_bytes.len() != 32 {
-        return Err(anyhow::anyhow!("JWT HMAC must be 32 bytes, got {}", hmac_bytes.len()));
+        return Err(anyhow::anyhow!(
+            "JWT HMAC must be 32 bytes, got {}",
+            hmac_bytes.len()
+        ));
     }
     Ok((header.kid, signing_input, hmac_bytes))
 }

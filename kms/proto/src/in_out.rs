@@ -235,8 +235,8 @@ pub struct SignAgentUserOpInput {
     /// JWT authorization proof verified inside TEE (defense-in-depth against compromised CA).
     /// Fields extracted from the agent Bearer JWT by the host before calling TA.
     pub jwt_kid: String,
-    pub jwt_signing_input: Vec<u8>,  // b64url(header).b64url(payload) bytes
-    pub jwt_hmac: Vec<u8>,           // 32 bytes — HMAC-SHA256 from JWT signature field
+    pub jwt_signing_input: Vec<u8>, // b64url(header).b64url(payload) bytes
+    pub jwt_hmac: Vec<u8>,          // 32 bytes — HMAC-SHA256 from JWT signature field
     /// Smart Account contract address that this session key is bound to.
     /// Embedded in the v0.17.2 signature wire format: [0x08][account(20)][key(20)][ECDSA(65)].
     /// Verified on-chain by SessionKeyValidator to prevent cross-account session-key abuse.
@@ -451,4 +451,18 @@ pub struct SignP256GrantSessionInput {
 pub struct SignP256GrantSessionOutput {
     /// 65 bytes: R(32) || S(32) || V(1), V normalized to 27/28
     pub signature: Vec<u8>,
+}
+
+/// Delete a P256 session key from TEE secure storage (GC cleanup).
+/// Called by the host's lazy GC on create/sign/revoke when the credential has expired.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DeleteP256SessionKeyInput {
+    pub wallet_id: Uuid,
+    pub session_index: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DeleteP256SessionKeyOutput {
+    /// true if the key existed and was deleted; false if it was already absent (idempotent).
+    pub deleted: bool,
 }

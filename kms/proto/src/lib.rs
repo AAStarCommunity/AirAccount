@@ -41,8 +41,9 @@ pub enum Command {
     SignTypedData = 17,
     CreateP256SessionKey = 18,
     SignP256UserOp = 19,
-    SignGrantSession = 20,
-    SignP256GrantSession = 21,
+    DeleteP256SessionKey = 20,
+    SignGrantSession = 21,
+    SignP256GrantSession = 22,
     #[default]
     Unknown,
 }
@@ -50,7 +51,7 @@ pub enum Command {
 // If Uuid::parse_str() returns an InvalidLength error, there may be an extra
 // newline in your uuid.txt file. You can remove it by running
 // `truncate -s 36 uuid.txt`.
-pub const UUID: &str = &include_str!("../../uuid.txt");
+pub const UUID: &str = include_str!("../../uuid.txt");
 
 #[cfg(test)]
 mod tests {
@@ -87,8 +88,9 @@ mod tests {
         assert_eq!(u32::from(Command::SignTypedData), 17);
         assert_eq!(u32::from(Command::CreateP256SessionKey), 18);
         assert_eq!(u32::from(Command::SignP256UserOp), 19);
-        assert_eq!(u32::from(Command::SignGrantSession), 20);
-        assert_eq!(u32::from(Command::SignP256GrantSession), 21);
+        assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
+        assert_eq!(u32::from(Command::SignGrantSession), 21);
+        assert_eq!(u32::from(Command::SignP256GrantSession), 22);
     }
 
     #[test]
@@ -97,10 +99,20 @@ mod tests {
         assert!(matches!(Command::from(5u32), Command::SignHash));
         assert!(matches!(Command::from(10u32), Command::RegisterPasskeyTa));
         assert!(matches!(Command::from(17u32), Command::SignTypedData));
-        assert!(matches!(Command::from(18u32), Command::CreateP256SessionKey));
+        assert!(matches!(
+            Command::from(18u32),
+            Command::CreateP256SessionKey
+        ));
         assert!(matches!(Command::from(19u32), Command::SignP256UserOp));
-        assert!(matches!(Command::from(20u32), Command::SignGrantSession));
-        assert!(matches!(Command::from(21u32), Command::SignP256GrantSession));
+        assert!(matches!(
+            Command::from(20u32),
+            Command::DeleteP256SessionKey
+        ));
+        assert!(matches!(Command::from(21u32), Command::SignGrantSession));
+        assert!(matches!(
+            Command::from(22u32),
+            Command::SignP256GrantSession
+        ));
     }
 
     #[test]
@@ -112,7 +124,9 @@ mod tests {
     #[test]
     fn command_roundtrip() {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
-        let valid_ids: &[u32] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,17,18,19,20,21];
+        let valid_ids: &[u32] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22,
+        ];
         for &i in valid_ids {
             let cmd = Command::from(i);
             assert_eq!(u32::from(cmd), i);
@@ -395,7 +409,7 @@ mod tests {
             account_address: [0xab; 20],
         });
         bincode_roundtrip(&SignAgentUserOpOutput {
-            signature: vec![0u8; 106],  // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
+            signature: vec![0u8; 106], // v0.17.2: [0x08][account(20)][key(20)][ECDSA(65)]
         });
     }
 
@@ -529,9 +543,18 @@ mod tests {
             types: vec![Eip712TypeDef {
                 name: "Transfer".into(),
                 fields: vec![
-                    Eip712TypeField { name: "to".into(), field_type: "address".into() },
-                    Eip712TypeField { name: "amount".into(), field_type: "uint256".into() },
-                    Eip712TypeField { name: "memo".into(), field_type: "string".into() },
+                    Eip712TypeField {
+                        name: "to".into(),
+                        field_type: "address".into(),
+                    },
+                    Eip712TypeField {
+                        name: "amount".into(),
+                        field_type: "uint256".into(),
+                    },
+                    Eip712TypeField {
+                        name: "memo".into(),
+                        field_type: "string".into(),
+                    },
                 ],
             }],
             message: vec![
@@ -559,7 +582,12 @@ mod tests {
         let input_jwt = SignTypedDataInput {
             wallet_id: test_uuid(),
             hd_path: "m/44'/60'/0'/1/0".into(),
-            domain: Eip712Domain { name: None, version: None, chain_id: Some(1), verifying_contract: None },
+            domain: Eip712Domain {
+                name: None,
+                version: None,
+                chain_id: Some(1),
+                verifying_contract: None,
+            },
             primary_type: "Transfer".into(),
             types: vec![],
             message: vec![],
@@ -686,5 +714,15 @@ mod tests {
         bincode_roundtrip(&SignP256UserOpOutput {
             signature: vec![0u8; 149],
         });
+    }
+
+    #[test]
+    fn delete_p256_session_key_roundtrip() {
+        bincode_roundtrip(&DeleteP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 1,
+        });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: true });
+        bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: false });
     }
 }
