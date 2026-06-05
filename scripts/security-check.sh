@@ -22,14 +22,17 @@ check() {
 echo "=== AirAccount KMS security checks ==="
 echo ""
 
-# 1. Production TA must not ship with export-secrets.
-#    Exclude this script itself and comment lines. docker/ included per review feedback.
-if grep -rE "\-\-features[[:space:]]+export-secrets" \
+# 1. Production TA must not ship with export-secrets enabled.
+#    Detect all Cargo forms: --features=X, --features X, comma-list, quoted list, --all-features.
+#    Whitelist: cargo geiger --all-features in security-audit.yml is static analysis, not a build.
+_check1=$(grep -rE "(--features[[:space:]+=].*export-secrets|--all-features)" \
         --exclude="security-check.sh" \
         scripts/ .github/ kms/scripts/ qemu/ docker/ 2>/dev/null \
-        | grep -vE ':[[:space:]]*#' | grep -q .; then
+        | grep -vE ':[[:space:]]*#' \
+        | grep -v "security-audit.yml:.*cargo geiger.*--all-features" || true)
+if [[ -n "$_check1" ]]; then
     check "deploy scripts do not enable export-secrets" \
-          "fail: found active --features export-secrets in deploy/CI scripts"
+          "fail: found --features ...export-secrets or --all-features in deploy/CI scripts"
 else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
