@@ -68,6 +68,10 @@ jobs:
     - name: Check for unsafe code
       run: |
         echo "## Checking for unsafe code..."
+        # Note: --all-features activates the host-side 'export-secrets' feature for static analysis.
+        # This is intentional — auditing ALL code paths including dev-only ones is correct here.
+        # The security gate in scripts/security-check.sh ensures 'export-secrets' never reaches
+        # production deploy scripts or TA build commands.
         cargo geiger --all-features 2>&1 | tee $GITHUB_WORKSPACE/cargo-geiger.txt
       working-directory: kms/host
       continue-on-error: true
@@ -81,10 +85,10 @@ jobs:
     
     - name: Run custom security check
       run: |
+        set -o pipefail
         echo "## Running custom security check..."
         chmod +x ./scripts/security-check.sh
         ./scripts/security-check.sh 2>&1 | tee security-check.txt
-      continue-on-error: true
     
     - name: Check for secrets
       uses: trufflesecurity/trufflehog@main
@@ -171,6 +175,17 @@ jobs:
         if grep -qE "^error\[" cargo-deny.txt 2>/dev/null; then
           echo "❌ cargo deny violations found:"
           grep -E "^error\[" cargo-deny.txt || true
+          exit 1
+        fi
+
+        # custom security checks: require output file to exist and have no ❌ lines
+        if [ ! -s security-check.txt ]; then
+          echo "❌ security-check.txt missing or empty — custom security checks did not run"
+          exit 1
+        fi
+        if grep -q "^❌" security-check.txt; then
+          echo "❌ Custom security checks failed:"
+          grep "^❌" security-check.txt || true
           exit 1
         fi
 

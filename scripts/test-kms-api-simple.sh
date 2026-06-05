@@ -165,6 +165,16 @@ else
     echo "❌ ScheduleKeyDeletion 失败"
 fi
 
+# Security gate: ExportPrivateKey must be rejected in production builds
+# TODO(issue #29): replace with actual QEMU/hardware integration test that:
+#   1. Calls Command::ExportPrivateKey (id 7) on a production TA binary
+#   2. Asserts the response contains "ExportPrivateKey is disabled in production TA builds"
+#   3. Asserts no private key bytes are returned
+# This test requires a running QEMU or real device and cannot run in CI without
+# hardware; track in docs/secret-export-feature-plan.md acceptance criteria.
+echo ""
+echo "⚠️  ExportPrivateKey rejection test: requires QEMU/hardware (see issue #29)"
+
 # 测试总结
 echo ""
 echo "================================"

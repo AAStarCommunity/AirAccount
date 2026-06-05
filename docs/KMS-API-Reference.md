@@ -159,7 +159,7 @@ OP-TEE Secure World 中 `PersistentObject::create()`（写操作）会**破坏 T
 | 5 | `SignMessage` | 4 | 签名任意消息 | Optional |
 | 6 | `SignHash` | 5 | 签名 32 字节 hash | Optional |
 | 7 | `DeriveAddressAuto` | 6 | 自动派生 m/44'/60'/0'/0/0 | No |
-| 8 | `ExportPrivateKey` | 7 | 导出私钥明文（仅调试） | Optional |
+| 8 | `ExportPrivateKey` | 7 | 导出私钥明文（仅调试，需 `export-secrets` feature） | Optional |
 | 9 | `VerifyPasskey` | 8 | 验证 P-256 ECDSA 签名 | 直接验证 |
 | 10 | `WarmupCache` | 9 | 预热 LRU 缓存 | No |
 | 11 | `RegisterPasskeyTa` | 10 | 更换 passkey 公钥 | Yes (当前) |
@@ -997,7 +997,11 @@ EIP-191 prefix (`\x19Ethereum Signed Message:\n{len}`) + message → Keccak-256 
 | Input | `wallet_id: Uuid`, `derivation_path: String`, `passkey_assertion: Option<PasskeyAssertion>` |
 | Output | `private_key: Vec<u8>` — 32 bytes |
 
-**仅调试用**。导出 HD 派生的私钥明文。生产环境应禁用。
+**仅调试用，编译期门控**。导出 HD 派生的私钥明文。
+
+生产 TA 构建（默认，不带 `--features export-secrets`）直接在 TA 内部返回 `ExportPrivateKey is disabled in production TA builds` 错误，不返回任何私钥材料。只有显式使用 `--features export-secrets` 编译的 TA + host 才可调用此命令。生产部署脚本不构建也不复制 `export_key` 二进制文件。
+
+详见 `docs/secret-export-feature-plan.md` 和 GitHub issue #29。
 
 ### 9.9 VerifyPasskey (8)
 
