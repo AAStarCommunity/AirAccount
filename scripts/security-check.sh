@@ -23,16 +23,20 @@ echo "=== AirAccount KMS security checks ==="
 echo ""
 
 # 1. Production TA must not ship with export-secrets enabled.
-#    Detect all Cargo forms: --features=X, --features X, comma-list, quoted list, --all-features.
-#    Whitelist: cargo geiger --all-features in security-audit.yml is static analysis, not a build.
-_check1=$(grep -rE "(--features[[:space:]+=].*export-secrets|--all-features)" \
+#    Covers all Cargo forms (cargo build --help: -F, --features <FEATURES>):
+#      --features export-secrets  --features=export-secrets
+#      --features foo,export-secrets  --features "export-secrets"
+#      -F export-secrets  -F=export-secrets  (short alias)
+#      --all-features
+#    Whitelist: cargo geiger --all-features in security-audit.yml (static analysis only).
+_check1=$(grep -rE "((--features|-F)[[:space:]+=].*export-secrets|--all-features)" \
         --exclude="security-check.sh" \
         scripts/ .github/ kms/scripts/ qemu/ docker/ 2>/dev/null \
         | grep -vE ':[[:space:]]*#' \
         | grep -v "security-audit.yml:.*cargo geiger.*--all-features" || true)
 if [[ -n "$_check1" ]]; then
     check "deploy scripts do not enable export-secrets" \
-          "fail: found --features ...export-secrets or --all-features in deploy/CI scripts"
+          "fail: found --features/-F ...export-secrets or --all-features in deploy/CI scripts"
 else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
