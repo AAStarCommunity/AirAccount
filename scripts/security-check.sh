@@ -23,11 +23,10 @@ echo "=== AirAccount KMS security checks ==="
 echo ""
 
 # 1. Production TA must not ship with export-secrets.
-#    The feature flag is the compile-time gate; verify no production build script passes it.
-#    Exclude this script itself (its error-message strings would match) and filter comment lines.
+#    Exclude this script itself and comment lines. docker/ included per review feedback.
 if grep -rE "\-\-features[[:space:]]+export-secrets" \
         --exclude="security-check.sh" \
-        scripts/ .github/ kms/scripts/ qemu/ 2>/dev/null \
+        scripts/ .github/ kms/scripts/ qemu/ docker/ 2>/dev/null \
         | grep -vE ':[[:space:]]*#' | grep -q .; then
     check "deploy scripts do not enable export-secrets" \
           "fail: found active --features export-secrets in deploy/CI scripts"
@@ -35,11 +34,19 @@ else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
 
-# 2. Confirm the production stub for export_private_key contains the disabled error.
-#    Use grep -A context to verify the cfg guard AND disabled string appear within
-#    the same function body (not just anywhere in the file).
-if grep -A5 '#\[cfg(not(feature = "export-secrets"))\]' kms/ta/src/main.rs \
-        | grep -q 'ExportPrivateKey is disabled'; then
+# 2. Confirm the cfg(not(export-secrets)) stub for export_private_key contains the disabled error.
+#    Use awk for function-scope matching: track the cfg line → fn export_private_key → closing brace,
+#    verify "ExportPrivateKey is disabled" appears inside that specific function body.
+#    This is robust against future cfg(not(export-secrets)) blocks elsewhere in the file.
+if awk '
+  /^#\[cfg\(not\(feature = "export-secrets"\)\)\]/ { in_cfg=1; next }
+  in_cfg && /fn export_private_key/ { in_stub=1; depth=0; in_cfg=0; next }
+  in_cfg { in_cfg=0 }
+  in_stub && /\{/ { depth++ }
+  in_stub && /\}/ { depth--; if (depth==0) { in_stub=0 } }
+  in_stub && /ExportPrivateKey is disabled/ { found=1 }
+  END { exit !found }
+' kms/ta/src/main.rs; then
     check "TA production stub rejects ExportPrivateKey" "ok"
 else
     check "TA production stub rejects ExportPrivateKey" \
@@ -58,8 +65,15 @@ else
 fi
 
 # 4. No hardcoded private key material or mnemonic patterns in source.
+#    Exclude test/example/doc directories by path (not line content) to avoid false positives.
 if grep -rE "(private_key\s*=\s*['\"]0x[0-9a-fA-F]{64}|mnemonic\s*=\s*['\"][a-z]+ [a-z]+ [a-z]+)" \
-        src/ kms/ 2>/dev/null | grep -v "test\|example\|doc\|spec"; then
+        --exclude-dir="tests" \
+        --exclude-dir="test" \
+        --exclude-dir="examples" \
+        --exclude-dir="docs" \
+        --exclude="*_test.rs" \
+        --exclude="*_spec.rs" \
+        src/ kms/ 2>/dev/null | grep -q .; then
     check "no hardcoded key material in source" \
           "fail: possible hardcoded private key or mnemonic found"
 else
