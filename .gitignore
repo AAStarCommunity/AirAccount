@@ -153,3 +153,5 @@ PASSKEY-WORK-SUMMARY.md
 *.rmeta
 *.rcgu.o
 /optee-utee-build
+kms/host/Cargo.lock
+kms/proto/Cargo.lock
