@@ -1,0 +1,33 @@
+# Cross-compile environment for STM32MP157F-DK2 (ARMv7-A 32-bit)
+# Usage: docker build -f docker/Dockerfile.stm32-builder -t stm32-builder .
+#        docker run --rm -v $(pwd):/workspace stm32-builder
+
+FROM --platform=linux/amd64 ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CARGO_HOME=/opt/cargo
+ENV RUSTUP_HOME=/opt/rustup
+ENV PATH="/opt/cargo/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl wget ca-certificates \
+    gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+    binutils-arm-linux-gnueabihf \
+    python3 python3-pip python3-pycryptodome \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust + ARMv7 target + xargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain nightly \
+    && /opt/cargo/bin/rustup target add armv7-unknown-linux-gnueabihf \
+    && /opt/cargo/bin/rustup component add rust-src \
+    && /opt/cargo/bin/cargo install xargo
+
+# Cargo linker config for armv7
+RUN mkdir -p /root/.cargo && cat > /root/.cargo/config.toml <<'EOF'
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+EOF
+
+WORKDIR /workspace
