@@ -4184,15 +4184,23 @@ pub async fn start_kms_server() -> Result<()> {
         .and_then(handle_get_public_key);
 
     // DeleteKey API (TEE)
+    // Accepts both "TrentService.DeleteKey" (canonical) and
+    // "TrentService.ScheduleKeyDeletion" (AWS KMS compat alias).
     let server7 = Arc::clone(&server);
+    let delete_key_target = warp::header::<String>("x-amz-target")
+        .and_then(|t: String| async move {
+            if t == "TrentService.DeleteKey" || t == "TrentService.ScheduleKeyDeletion" {
+                Ok(())
+            } else {
+                Err(warp::reject::not_found())
+            }
+        })
+        .untuple_one();
     let delete_key = warp::path("DeleteKey")
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact(
-            "x-amz-target",
-            "TrentService.ScheduleKeyDeletion",
-        ))
+        .and(delete_key_target)
         .and(aws_kms_body())
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
