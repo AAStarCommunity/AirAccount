@@ -3191,7 +3191,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "ta_mode": "real",
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
-            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
+            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats"]
         }
     })))
 }
@@ -3611,6 +3611,46 @@ async fn handle_queue_status(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&server.queue_status()))
+}
+
+/// GET /stats — machine-readable JSON stats for internal monitoring / health dashboards.
+/// Aggregated counts only; no key_id list (security: avoids leaking wallet enumeration).
+async fn handle_get_stats(
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let wallets = server.db.list_wallets().unwrap_or_default();
+    let qs = server.queue_status();
+    let tx = server.db.get_tx_stats().unwrap_or_default();
+    let api_keys = server.db.list_api_keys().map(|v| v.len()).unwrap_or(0);
+
+    let resp = serde_json::json!({
+        "service": "kms-api",
+        "version": env!("CARGO_PKG_VERSION"),
+        "ta_mode": "real",
+        "keys": {
+            "total": wallets.len(),
+            "active": wallets.iter().filter(|w| w.status == "ready").count(),
+            "with_address": wallets.iter().filter(|w| w.address.is_some()).count(),
+            "with_passkey": wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count()
+        },
+        "operations": {
+            "total_signs": tx.total_sign,
+            "daily_signs": tx.daily_sign,
+            "total_ops": tx.total_ops,
+            "daily_ops": tx.daily_ops,
+            "avg_sign_ms": tx.avg_sign_ms,
+            "avg_derive_ms": tx.avg_derive_ms,
+            "errors": tx.error_count,
+            "panics": tx.panic_count,
+            "webauthn": tx.webauthn_count
+        },
+        "queue": {
+            "circuit_breaker": if qs.circuit_breaker_open.unwrap_or(false) { "open" } else { "closed" },
+            "consecutive_failures": qs.consecutive_failures.unwrap_or(0)
+        },
+        "api_keys": api_keys
+    });
+    Ok(warp::reply::json(&resp))
 }
 
 async fn handle_create_agent_key(
@@ -4084,6 +4124,13 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
+    // Stats JSON - GET /stats (machine-readable, no auth required, no key_id list)
+    let server_stats = server.clone();
+    let stats_json = warp::path("stats")
+        .and(warp::get())
+        .and(warp::any().map(move || server_stats.clone()))
+        .and_then(handle_get_stats);
+
     // ChangePasskey API (TEE)
     let server_cp = server.clone();
     let change_passkey = warp::path("ChangePasskey")
@@ -4408,6 +4455,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(version)
         .or(key_status)
         .or(queue_status)
+        .or(stats_json)
         .or(change_passkey)
         .boxed();
     let group2 = create_key
