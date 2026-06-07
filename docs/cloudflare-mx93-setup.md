@@ -39,12 +39,33 @@ cloudflared tunnel route dns mx93-kms kms.aastar.io
 
 ## Step 2：准备 cloudflared aarch64 二进制
 
+> **注意**：Yocto MX93 没有 `/usr/local/bin`，安装路径应为 `/usr/bin/cloudflared`。
+
+### 推荐：直接在板子上 wget（板子有出站 WiFi）
+
+WiFi AP 隔离导致 Mac 无法直连板子，但板子能访问互联网。通过串口执行：
+
 ```bash
-# 下载 aarch64 版本（在 Mac 上下载，然后传到板子）
+# 在板子上（通过串口）
+wget -q -O /tmp/cloudflared \
+  'https://github.com/cloudflare/cloudflared/releases/download/2026.5.2/cloudflared-linux-arm64' &
+# 文件约 36MB，约 5 分钟（WiFi 约 1MB/s）
+
+# 下载完成后安装
+ls -lh /tmp/cloudflared  # 确认 ~36MB
+mv /tmp/cloudflared /usr/bin/cloudflared
+chmod +x /usr/bin/cloudflared
+cloudflared --version
+```
+
+### 备选：通过串口 base64 传输（非常慢，不推荐）
+
+```bash
+# 在 Mac 上下载
 CFVER=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
 curl -L "https://github.com/cloudflare/cloudflared/releases/download/${CFVER}/cloudflared-linux-arm64" \
   -o /tmp/cloudflared-arm64
-# 文件约 40MB
+# 36MB 通过串口约需 95 小时 — 不可行
 ```
 
 ---
@@ -85,9 +106,8 @@ def b64_transfer(local_path, remote_path):
 
 import os
 
-# 1. 传输 cloudflared 二进制
-b64_transfer('/tmp/cloudflared-arm64', '/usr/local/bin/cloudflared')
-slow_send("chmod +x /usr/local/bin/cloudflared && cloudflared --version")
+# 1. 仅传输凭证（二进制已在板上通过 wget 下载）
+# 不需要传输二进制（请用 Step 2 的 wget 方法）
 
 # 2. 传输 cert.pem
 slow_send("mkdir -p /root/.cloudflared")
@@ -146,7 +166,7 @@ Wants=kms-api.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/cloudflared tunnel run mx93-kms
+ExecStart=/usr/bin/cloudflared tunnel --config /root/.cloudflared/config.yml run
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/var/log/cloudflared.log
@@ -209,3 +229,5 @@ journalctl -u cloudflared --no-pager -n 20
 | DNS 未生效 | `dig kms.aastar.io CNAME` 检查 CNAME 记录 |
 | 503 Service Unavailable | kms-api.service 是否运行：`systemctl status kms-api` |
 | cert.pem 过期 | 重新 `cloudflared tunnel login`，传 cert.pem 到板子 |
+| 预检报告 FAIL 但实际连通 | 正常现象。WiFi AP 块 UDP/TCP port 7844 预检，但 IPv6 QUIC 连接能成功。看 journalctl 有 "Registered tunnel connection" 就说明隧道建立成功 |
+| DNS 已存在时路由失败 | `cloudflared tunnel route dns --overwrite-dns mx93-kms kms.aastar.io` |
