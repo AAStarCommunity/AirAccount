@@ -16,10 +16,11 @@ TEE私钥管理 · WebAuthn无密码认证 · AWS KMS兼容API
 **定位**: 整个生态的**身份与密钥底层**。SuperPaymaster 依赖它做账户验证，SuperRelay 依赖它做 TEE 双签，Sin90 依赖它做用户隐私保护。
 
 ## 当前状态
-- **当前分支**: KMS（活跃开发）
-- **版本**: v0.16.7
+- **当前分支**: main（活跃开发）
+- **版本**: v0.19.0
 - **架构**: TEE (Trusted Execution Environment) + WebAuthn + AWS KMS 兼容 API
-- **生产 URL**: 通过 Cloudflare Tunnel 暴露
+- **生产 URL**: https://kms.aastar.io（Cloudflare Tunnel → NXP FRDM-IMX93）
+- **硬件**: NXP FRDM-IMX93 (aarch64 Cortex-A55, OP-TEE 4.8, RSA-4096 TA signing)
 
 ## 核心架构（四层）
 ```
@@ -37,9 +38,11 @@ Storage Layer    → Secure Storage in TEE
 - WebAuthn 注册/认证端点（无密码登录）
 
 ## 开发约定
-- 硬件部署：ARM / STM32 / MX95
-- QEMU 模拟开发环境（见 dKMS-deploy-ARM.md）
-- 测试：`./quick-curl-test-commands.sh`
+- 硬件部署：NXP FRDM-IMX93 (aarch64) + DK2 (armv7)
+- 当前硬件：MX93 board（主力），DK2（备用）
+- 测试：`./kms/test-full-api.sh localhost:3000`（本地）或 `./kms/test-full-api.sh kms.aastar.io`（公网）
+- 关键 API header：`x-amz-target: TrentService.<Operation>`（AWS KMS 格式，缺少返回 500）
+- CreateKey 必填：KeySpec + KeyUsage + Description + Origin + PasskeyPublicKey（65字节 P256 uncompressed hex）
 
 ## 关联任务
 - Brood TASK-12: AirAccount 隐形账户（70%，In Progress）
