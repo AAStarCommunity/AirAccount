@@ -4038,10 +4038,16 @@ pub async fn start_kms_server() -> Result<()> {
     let test_ui = warp::path("test")
         .and(warp::get())
         .map(|| {
-            match std::fs::read_to_string("/root/shared/kms-test-page.html") {
-                Ok(html) => warp::reply::html(html),
-                Err(_) => warp::reply::html("<html><body><h1>Test UI not available</h1><p>Please deploy kms-test-page.html to /root/shared/</p></body></html>".to_string())
-            }
+            // Search in priority order: working dir, MX93 deployment path, legacy QEMU path
+            let candidates = [
+                "kms-test-page.html",
+                "/root/AirAccount/kms-test-page.html",
+                "/root/shared/kms-test-page.html",
+            ];
+            let html = candidates.iter()
+                .find_map(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_else(|| "<html><body><h1>Test UI not available</h1><p>Deploy kms-test-page.html to the working directory or /root/AirAccount/</p></body></html>".to_string());
+            warp::reply::html(html)
         });
 
     // Health check
