@@ -1,6 +1,75 @@
 # TA安全增强计划
 
-*创建时间: 2025-09-29*
+*创建时间: 2025-09-29 | 最后更新: 2026-06-07*
+
+---
+
+## 2026-06-07 — MX93 实机测试报告 & 预装 TA 分析
+
+### E2E 测试结果（两次独立运行，结果一致）
+
+**目标**: https://kms.aastar.io（NXP FRDM-IMX93, OP-TEE 4.8, ta_mode=real）
+
+| 分类 | 通过 | 失败 |
+|------|------|------|
+| api | 25 | 1 |
+| consistency | 4 | 0 |
+| crypto | 7 | 0 |
+| security | 16 | 0 |
+| **合计** | **52** | **1** |
+
+唯一失败：`GET /stats` 路由缺失（已知 bug，正确路径是 `GET /`）。
+
+**本次修复部署**：`POST /DeleteKey` warp 路由之前要求 header `TrentService.ScheduleKeyDeletion`，
+而所有客户端发送的是 `TrentService.DeleteKey`，导致 HTTP 500 无日志。
+已修复为同时接受两个值，并在板子上原生编译（aarch64, 3m27s）、systemd 重启，修复生效。
+
+### MX93 预装 TA（27 个 + 我们自己 = 28 个）
+
+板子路径：`/lib/optee_armtz/`（OP-TEE 4.8 Yocto 镜像随附）
+
+#### 可借鉴（7 个，与 AirAccount 直接相关）
+
+| UUID（前8位） | TA 名称 | 对 AirAccount 的价值 |
+|-------------|--------|-------------------|
+| `528938ce` | **PKCS#11 TA** | 将 KMS 密钥操作暴露为标准 PKCS#11 接口，使 OpenSSL/Nginx/各类 SDK 可直接调用 TEE 私钥签名 |
+| `a4c04d50` | PKCS#11 Token TA | PKCS#11 token slot 管理 |
+| `11b5c4aa` | **FIDO/WebAuthn TA** | 把 WebAuthn P256 验签从 CA（host）移进 TEE，彻底消除 host 侧信任依赖 |
+| `b3091a65` | **Trusted Keys TA** | Linux kernel Trusted Keys：用 TEE seal/unseal 密钥，只有特定固件状态下才能解封 |
+| `5ce0c432` | **RPMB TA** | 防回滚存储。`ChangePasskey` 撤销状态存 RPMB，物理攻击无法回滚。**→ 见 [RPMB 防回滚计划](rpmb-anti-rollback-plan.md)** |
+| `731e279e` | **Attestation TA** | TEE 远程证明，客户端可验证"签名真的来自合法 TEE"。**→ 见 [远程证明计划](attestation-plan.md)** |
+| `fd02c9da` | Provisioning TA | 生产密钥注入，批量出厂时把根密钥安全写入每块板子 TEE |
+
+#### 平台能力（6 个，NXP 专属）
+
+| UUID（前8位） | TA 名称 | 说明 |
+|-------------|--------|-----|
+| `5c206987` | EdgeLock ELE TA | TRNG、OTP fuse、设备生命周期。我们的 CreateKey 已在用 |
+| `b689f2a7` | ELE Crypto TA | NXP CAAM 硬件加速（AES/SHA/ECDSA，比纯软快 10-100×） |
+| `380231ac` | IMX Crypto TA | i.MX CAAM 第二通道 |
+| `a720ccbb` | SE05x TA | NXP SE050/SE051 Secure Element i2c 桥接 |
+| `80a4c275` | Secure Boot TA | 安全启动固件完整性校验 |
+| `ffd2bded` | Firmware Verification TA | NXP 固件签名校验 |
+
+#### OP-TEE 测试/示例（11 个）
+
+随 OP-TEE 4.8 发行版附带，主要用于验证 TEE 环境和 crypto 原语是否正常。
+包括：Hello World、AES Test、Crypt、Storage、OTP、Secure Storage v2、Benchmark/SHA、
+OPTEE Test Supp、GP TEE Internal Core API、TrEE Measurement、Secure Channel。
+
+#### 其他
+
+| UUID | TA 名称 |
+|------|--------|
+| `25497083` | SDP/DRM TA（Secure Data Path，媒体 DRM） |
+| `873bcd08` | eCryptfs/IMA TA（文件系统加密密钥管理） |
+
+### 两个高优先级后续工作
+
+1. **RPMB 防回滚**（安全关键）→ 计划文档：[docs/rpmb-anti-rollback-plan.md](rpmb-anti-rollback-plan.md)，GitHub Issue #36
+2. **Attestation 远程证明**（信任升级）→ 计划文档：[docs/attestation-plan.md](attestation-plan.md)，GitHub Issue #37
+
+---
 
 ## 当前安全状况评估
 
