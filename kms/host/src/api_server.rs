@@ -1656,13 +1656,24 @@ impl KmsApiServer {
             .unwrap_or(false);
 
         if is_gap_key {
-            // The TEE Secure Storage still holds the secp256k1 key material for this wallet
-            // (the gap is only in the passkey — an invalid P-256 point that can never verify).
-            // We skip TEE removal here because we have no admin force-delete TA command yet.
-            // The orphaned TEE entry is inaccessible (no SQLite row = no API reachable path)
-            // and consumes negligible storage (~1-2 KB). Tracked in Issue #41.
-            // TODO(#41): add ForceRemoveWallet TA command; call it here before DB delete.
-            println!("⚠️  Gap key detected (invalid P-256 pubkey) — DB purged; TEE orphan tracked in Issue #41");
+            // Gap key: passkey_pubkey is not a valid P-256 curve point.
+            // Attempt TEE force-removal (ForceRemoveWallet = cmd 23, added in TA v0.20.0).
+            // On older TA binaries this call returns "Unsupported command" — we log and
+            // continue so the SQLite row is still cleaned up regardless.
+            match self.tee.force_remove_wallet(wallet_uuid).await {
+                Ok(()) => {
+                    println!("✅ Gap key TEE entry purged (ForceRemoveWallet succeeded)");
+                }
+                Err(e) => {
+                    // TA older than v0.20.0 — TEE orphan remains (~1-2 KB, inaccessible).
+                    // SQLite cleanup still proceeds. Rebuild TA to fully resolve.
+                    eprintln!(
+                        "⚠️  Gap key TEE purge failed (TA may need rebuild): {}. \
+                        SQLite row will still be deleted. TEE orphan is inaccessible.",
+                        e
+                    );
+                }
+            }
         } else {
             let passkey_assertion = self
                 .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
