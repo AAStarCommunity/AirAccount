@@ -1,66 +1,107 @@
 #!/usr/bin/env bash
 # Graceful shutdown for NXP FRDM-IMX93
-# Usage: ./poweroff-imx93.sh [board-ip]
-#
-# Method 1 (preferred): SSH if board IP is reachable on local network
-# Method 2 (fallback):  serial port via `expect`
+# Usage:
+#   ./poweroff-imx93.sh               # serial (auto-detect /dev/cu.usbmodem*)
+#   ./poweroff-imx93.sh <board-ip>    # SSH preferred, serial fallback
 
-SERIAL=/dev/cu.usbmodem5B6D0044901
+SERIAL="${IMXSERIAL:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
 BOARD_IP="${1:-}"
 
+# ── helpers ──────────────────────────────────────────────────────────────────
+
 poweroff_via_ssh() {
-    echo "→ Trying SSH to $1 ..."
+    echo "→ SSH to $1 ..."
     ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@"$1" \
-        "systemctl stop kms-api.service; sync; poweroff" 2>/dev/null
-    return $?
+        "systemctl stop kms-api.service 2>/dev/null; sync; poweroff" 2>/dev/null
 }
 
 poweroff_via_serial() {
-    echo "→ Sending poweroff via serial $SERIAL ..."
-    if ! command -v expect &>/dev/null; then
-        echo "  expect not found. Install with: brew install expect"
-        echo "  Fallback: open a screen session and run: poweroff"
-        echo "    screen $SERIAL 115200"
-        exit 1
-    fi
-    expect -c "
-        set timeout 10
-        spawn -open [open $SERIAL r+]
-        stty -f $SERIAL 115200 cs8 -cstopb -parenb
-        send \"\r\"
-        expect -re {#|\\$}
-        send \"systemctl stop kms-api.service && sync && poweroff\r\"
-        expect {
-            \"reboot\" { puts \"Board is shutting down.\" }
-            timeout    { puts \"Timeout — board may already be off or in another state.\" }
-        }
-    "
+    [[ -z "$SERIAL" ]] && { echo "✗ No serial device found."; exit 1; }
+    [[ ! -e "$SERIAL" ]] && { echo "✗ $SERIAL not found. USB cable connected?"; exit 1; }
+    echo "→ Serial shutdown via $SERIAL ..."
+    python3 - "$SERIAL" <<'PYEOF'
+import sys, time, termios, select, os
+
+dev = sys.argv[1]
+try:
+    fd = open(dev, 'rb+', buffering=0)
+except PermissionError:
+    print(f"✗ Cannot open {dev}: permission denied. Try: sudo chmod 666 {dev}")
+    sys.exit(1)
+
+# configure 115200 8N1
+attrs = termios.tcgetattr(fd)
+import tty
+tty.setraw(fd)
+attrs = termios.tcgetattr(fd)
+attrs[0] = termios.ICRNL                          # input
+attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # control
+attrs[3] = 0                                       # local
+attrs[4] = attrs[5] = termios.B115200             # speed
+termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+def read_for(fd, secs):
+    buf = b''
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            buf += fd.read(256)
+    return buf.decode('utf-8', errors='replace')
+
+def send(fd, s):
+    fd.write(s.encode())
+    time.sleep(0.2)
+
+# Wake up the console
+send(fd, '\r\n')
+out = read_for(fd, 2)
+print(out.strip() or '(no output)')
+
+# Login if needed
+if 'login:' in out:
+    print('[login prompt detected, logging in as root]')
+    send(fd, 'root\r\n')
+    out2 = read_for(fd, 3)
+    print(out2.strip())
+    if 'Password' in out2:
+        print('✗ Board requires a password — connect manually via: screen ' + dev + ' 115200')
+        fd.close(); sys.exit(1)
+
+# Send the shutdown command
+send(fd, 'systemctl stop kms-api.service 2>/dev/null; sync; poweroff\r\n')
+print('Waiting for board to shut down ...')
+out3 = read_for(fd, 12)
+print(out3.strip())
+
+if any(x in out3 for x in ['Power down', 'reboot:', 'Stopping', 'halt']):
+    print('\n✓ Board is shutting down.')
+else:
+    print('\n⚠ No shutdown confirmation received — command was sent, wait 15s then cut power.')
+
+fd.close()
+PYEOF
 }
 
-set -e
+# ── main ─────────────────────────────────────────────────────────────────────
 
-# Try SSH first if IP provided or discoverable via mDNS
 if [[ -n "$BOARD_IP" ]]; then
     if poweroff_via_ssh "$BOARD_IP"; then
         echo "✓ Board shutdown initiated via SSH."
         exit 0
     fi
-    echo "  SSH failed, falling back to serial."
+    echo "  SSH failed, trying serial ..."
 fi
 
-# Try mDNS hostname (sometimes shows up as imx93.local)
-if ping -c1 -W1 imx93.local &>/dev/null 2>&1; then
-    if poweroff_via_ssh imx93.local; then
-        echo "✓ Board shutdown initiated via SSH (mDNS)."
-        exit 0
+# Auto-discover via mDNS
+for host in imx93.local frdm-imx93.local; do
+    if ping -c1 -W1 "$host" &>/dev/null 2>&1; then
+        if poweroff_via_ssh "$host"; then
+            echo "✓ Board shutdown via SSH ($host)."
+            exit 0
+        fi
     fi
-fi
-
-# Serial fallback
-if [[ ! -e "$SERIAL" ]]; then
-    echo "✗ Serial device $SERIAL not found. Is the USB cable connected?"
-    exit 1
-fi
+done
 
 poweroff_via_serial
-echo "✓ Shutdown command sent. Wait ~10s before cutting power."
+echo "Wait ~15s for board LEDs to go dark, then cut power."
