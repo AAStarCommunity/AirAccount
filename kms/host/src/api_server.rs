@@ -3738,11 +3738,11 @@ async fn handle_get_stats(
             }
         }
     });
-    let json_str = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
-    Ok(warp::http::Response::builder()
-        .header("content-type", "application/json; charset=utf-8")
-        .body(json_str)
-        .unwrap())
+    Ok(warp::reply::with_header(
+        warp::reply::json(&resp),
+        "content-type",
+        "application/json; charset=utf-8",
+    ))
 }
 
 async fn handle_create_agent_key(
