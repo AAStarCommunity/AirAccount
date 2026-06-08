@@ -459,7 +459,18 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
         ));
     }
 
-    let mut wallet = Wallet::new()?;
+    // If the CA supplied pre-generated entropy (CAAM-bypass mode), use it directly.
+    // Otherwise fall back to TEE_GenerateRandom() — which can hang if CAAM TRNG is stuck.
+    let mut wallet = match &input.entropy_seed {
+        Some(seed) => {
+            dbg_println!("[+] create_wallet: using CA-provided entropy (CAAM bypass)");
+            Wallet::from_seed(seed)?
+        }
+        None => {
+            dbg_println!("[+] create_wallet: using TEE_GenerateRandom (hardware TRNG)");
+            Wallet::new()?
+        }
+    };
     wallet.set_passkey(input.passkey_pubkey.clone());
     let wallet_id = wallet.get_id();
 

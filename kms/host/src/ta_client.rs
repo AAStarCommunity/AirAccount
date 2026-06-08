@@ -515,8 +515,16 @@ impl TeeHandle {
     }
 
     pub async fn create_wallet(&self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
+        // Generate 48 bytes of entropy from the OS CSPRNG (/dev/urandom-backed OsRng).
+        // Passed to the TA so it can skip TEE_GenerateRandom() and avoid CAAM TRNG hangs.
+        // This is safe: OsRng is cryptographically secure.  The entropy never leaves the TA.
+        let mut seed = vec![0u8; 48];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+
         let input = bincode::serialize(&proto::CreateWalletInput {
             passkey_pubkey: passkey_pubkey.to_vec(),
+            entropy_seed: Some(seed),
         })
         .context("Failed to serialize CreateWalletInput")?;
         let out = self.call(proto::Command::CreateWallet, input).await?;

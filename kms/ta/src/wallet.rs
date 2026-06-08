@@ -77,6 +77,30 @@ impl Wallet {
         })
     }
 
+    /// Create a wallet from CA-provided entropy seed (CAAM bypass mode).
+    /// seed: 48 bytes — first 32 are BIP39 wallet entropy, last 16 are UUID bytes.
+    /// Used when the hardware TRNG (CAAM) is unreliable or stuck.
+    pub fn from_seed(seed: &[u8]) -> Result<Self> {
+        if seed.len() < 48 {
+            return Err(anyhow!("[-] Wallet::from_seed(): need 48 bytes, got {}", seed.len()));
+        }
+        let entropy = seed[..32].to_vec();
+        let uuid_bytes: [u8; 16] = seed[32..48]
+            .try_into()
+            .map_err(|_| anyhow!("[-] Wallet::from_seed(): invalid uuid bytes"))?;
+        let uuid = uuid::Builder::from_random_bytes(uuid_bytes).into_uuid();
+
+        Ok(Self {
+            id: uuid,
+            entropy,
+            next_address_index: 0,
+            next_account_index: 0,
+            cached_seed: None,
+            cached_account_root: None,
+            passkey_pubkey: None,
+        })
+    }
+
     pub fn get_next_address_index(&self) -> u32 {
         self.next_address_index
     }

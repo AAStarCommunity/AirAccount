@@ -71,6 +71,7 @@ log = "0.4.21"
 num_enum = "0.7.3"
 base64 = "0.21"
 p256 = { version = "0.13", features = ["ecdsa"] }
+rand = { version = "0.8", features = ["std"] }
 sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 ciborium = "0.2"
