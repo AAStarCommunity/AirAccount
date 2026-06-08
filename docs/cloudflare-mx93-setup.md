@@ -153,15 +153,99 @@ cloudflared tunnel run mx93-kms
 
 ---
 
+## Step 4b：WiFi 和 DNS 持久化（MX93 必做）
+
+MX93 使用 NXP IW612 WiFi 芯片（`mlan0`），connman 管理 WiFi 存在问题。需用 wpa_supplicant 独立管理，且 ISP 路由器 DNS 无法解析 argotunnel.com SRV 记录，必须强制 DNS 为 1.1.1.1。
+
+```bash
+# 1. 排除 mlan0 不由 connman 管理
+mkdir -p /etc/connman
+cat > /etc/connman/main.conf << 'EOF'
+[General]
+NetworkInterfaceBlacklist=mlan0,uap0,wfd0
+EOF
+systemctl restart connman
+
+# 2. 写 WiFi 配置（替换 SSID 和密码）
+cat > /etc/wpa_supplicant.conf << 'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+ctrl_interface_group=0
+update_config=1
+
+network={
+    ssid="ChinaNet-AuRfsu-5G"
+    psk="REDACTED-home-WiFi-PSK"
+    key_mgmt=WPA-PSK
+    priority=10
+}
+
+network={
+    ssid="ChinaNet-AuRfsu"
+    psk="REDACTED-home-WiFi-PSK"
+    key_mgmt=WPA-PSK
+    priority=5
+}
+EOF
+
+# 3. 创建 WiFi systemd 服务
+cat > /etc/systemd/system/wifi-mlan0.service << 'EOF'
+[Unit]
+Description=WiFi (wpa_supplicant + udhcpc) on mlan0
+After=tee-supplicant@teepriv0.service
+Before=cloudflared.service
+Wants=cloudflared.service
+
+[Service]
+Type=forking
+ExecStartPre=/sbin/ip link set mlan0 up
+ExecStart=/sbin/wpa_supplicant -B -i mlan0 -c /etc/wpa_supplicant.conf -P /run/wpa_supplicant.pid
+ExecStartPost=/bin/sh -c 'sleep 5 && /sbin/udhcpc -i mlan0 -b -p /run/udhcpc-mlan0.pid -q'
+ExecStop=/bin/sh -c 'kill $(cat /run/wpa_supplicant.pid 2>/dev/null) 2>/dev/null; kill $(cat /run/udhcpc-mlan0.pid 2>/dev/null) 2>/dev/null; /sbin/ip link set mlan0 down'
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 4. DNS 持久化钩子（udhcpc 每次续租都会覆盖 resolv.conf，这里强制 1.1.1.1）
+# 原因：ISP 路由器 DNS（192.168.2.1）不能解析 argotunnel.com SRV 记录
+mkdir -p /etc/udhcpc.d
+cat > /etc/udhcpc.d/60dns << 'EOF'
+#!/bin/sh
+case "$1" in
+  bound|renew)
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf
+    echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    ;;
+esac
+EOF
+chmod +x /etc/udhcpc.d/60dns
+
+# 5. 启用并启动 WiFi 服务
+systemctl daemon-reload
+systemctl enable wifi-mlan0.service
+systemctl start wifi-mlan0.service
+
+# 6. 验证 WiFi 连接
+wpa_cli -i mlan0 status | grep -E "ssid|wpa_state|ip_address"
+cat /etc/resolv.conf  # 应显示 1.1.1.1
+```
+
+---
+
 ## Step 5：systemd 服务（开机自启）
+
+> **注意**：cloudflared.service 必须在 wifi-mlan0.service 之后启动，否则隧道启动时 WiFi/DNS 尚未就绪。
 
 ```bash
 # 在板子上
 cat > /etc/systemd/system/cloudflared.service << 'EOF'
 [Unit]
-Description=Cloudflare Tunnel (kms.aastar.io)
-After=network.target kms-api.service
-Wants=kms-api.service
+Description=Cloudflare Tunnel - kms.aastar.io
+After=network-online.target wifi-mlan0.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -169,8 +253,8 @@ User=root
 ExecStart=/usr/bin/cloudflared tunnel --config /root/.cloudflared/config.yml run
 Restart=on-failure
 RestartSec=10
-StandardOutput=append:/var/log/cloudflared.log
-StandardError=append:/var/log/cloudflared.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -230,4 +314,6 @@ journalctl -u cloudflared --no-pager -n 20
 | 503 Service Unavailable | kms-api.service 是否运行：`systemctl status kms-api` |
 | cert.pem 过期 | 重新 `cloudflared tunnel login`，传 cert.pem 到板子 |
 | 预检报告 FAIL 但实际连通 | 正常现象。WiFi AP 块 UDP/TCP port 7844 预检，但 IPv6 QUIC 连接能成功。看 journalctl 有 "Registered tunnel connection" 就说明隧道建立成功 |
+| DNS 无法解析 argotunnel.com | ISP DNS 不支持 SRV 记录。检查 `/etc/resolv.conf`，应为 `1.1.1.1`。执行 Step 4b 安装 DNS 钩子 `/etc/udhcpc.d/60dns` |
+| cloudflared 早于 WiFi 启动失败 | 检查 `cloudflared.service` 的 `After=` 是否包含 `wifi-mlan0.service` |
 | DNS 已存在时路由失败 | `cloudflared tunnel route dns --overwrite-dns mx93-kms kms.aastar.io` |
