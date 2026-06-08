@@ -54,6 +54,18 @@ pub struct RemoveWalletInput {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RemoveWalletOutput {}
 
+/// Admin force-delete: removes wallet from TEE secure storage without passkey verification.
+/// Used exclusively for gap keys (passkey_pubkey bytes are not a valid P-256 curve point).
+/// NOT called for normal wallets — requires the caller (api_server) to have already validated
+/// that the key is a gap key before invoking.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ForceRemoveWalletInput {
+    pub wallet_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ForceRemoveWalletOutput {}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DeriveAddressInput {
     pub wallet_id: Uuid,

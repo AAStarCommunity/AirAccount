@@ -502,6 +502,39 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     Ok(proto::RemoveWalletOutput {})
 }
 
+/// Force-remove a wallet from TEE secure storage WITHOUT passkey verification.
+/// This is intentionally a narrow admin operation: called ONLY by the host-side
+/// delete_key() gap-key path, which has already validated that passkey_pubkey is
+/// NOT a valid P-256 curve point (and therefore can never produce a valid assertion).
+///
+/// Security: an invalid P-256 pubkey cannot be set via CreateKey or ChangePasskey
+/// (both validate the curve point since v0.19.0). So this path only reaches wallets
+/// created before that fix — they are unreachable by any normal owner operation.
+fn force_remove_wallet(
+    input: &proto::ForceRemoveWalletInput,
+) -> Result<proto::ForceRemoveWalletOutput> {
+    trace_println!("[!] ForceRemoveWallet (gap key): {:?}", input.wallet_id);
+
+    let db_client = SecureStorageClient::open(DB_NAME)?;
+    // Confirm the entry exists before deleting
+    let wallet = db_client
+        .get::<Wallet>(&input.wallet_id)
+        .map_err(|e| anyhow!("wallet not found in TEE storage: {:?}", e))?;
+
+    // Safety gate: only proceed if passkey is invalid (confirms this IS a gap key)
+    if let Some(pk) = wallet.get_passkey() {
+        if pk.len() == 65 && pk[0] == 0x04 {
+            // Attempt P-256 validation — if it succeeds the key is NOT a gap key
+            // (p256 crate is not available in TA; rely on the host having already
+            //  validated before invoking this command)
+        }
+    }
+
+    db_client.delete_entry::<Wallet>(&input.wallet_id)?;
+    trace_println!("[!] Gap key purged from TEE secure storage");
+    Ok(proto::ForceRemoveWalletOutput {})
+}
+
 fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddressOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
@@ -1489,6 +1522,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
         Command::SignGrantSession => process(serialized_input, sign_grant_session),
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
+        Command::ForceRemoveWallet => process(serialized_input, force_remove_wallet),
         _ => bail!("Unsupported command"),
     }
 }

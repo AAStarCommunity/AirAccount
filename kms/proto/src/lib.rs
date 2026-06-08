@@ -44,6 +44,11 @@ pub enum Command {
     DeleteP256SessionKey = 20,
     SignGrantSession = 21,
     SignP256GrantSession = 22,
+    /// Force-remove wallet from TEE secure storage without passkey verification.
+    /// Used exclusively for gap keys (invalid P-256 pubkeys that can never verify).
+    /// NOT exposed as a public API endpoint — only called internally by DeleteKey
+    /// when a gap key is detected. Requires TA rebuild to activate.
+    ForceRemoveWallet = 23,
     #[default]
     Unknown,
 }
@@ -91,6 +96,7 @@ mod tests {
         assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
         assert_eq!(u32::from(Command::SignGrantSession), 21);
         assert_eq!(u32::from(Command::SignP256GrantSession), 22);
+        assert_eq!(u32::from(Command::ForceRemoveWallet), 23);
     }
 
     #[test]

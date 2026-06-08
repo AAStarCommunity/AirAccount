@@ -504,6 +504,17 @@ impl TeeHandle {
         Ok(())
     }
 
+    /// Force-remove a gap key from TEE secure storage.
+    /// Only called when `api_server` has confirmed the wallet's passkey_pubkey
+    /// is not a valid P-256 curve point. Requires TA v0.20.0+ (ForceRemoveWallet = 23).
+    /// On older TAs returns an error which the caller handles gracefully.
+    pub async fn force_remove_wallet(&self, wallet_id: uuid::Uuid) -> Result<()> {
+        let input = bincode::serialize(&proto::ForceRemoveWalletInput { wallet_id })
+            .context("Failed to serialize ForceRemoveWalletInput")?;
+        self.call(proto::Command::ForceRemoveWallet, input).await?;
+        Ok(())
+    }
+
     pub async fn derive_address(
         &self,
         wallet_id: uuid::Uuid,
