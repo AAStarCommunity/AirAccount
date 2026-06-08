@@ -1023,6 +1023,12 @@ impl KmsApiServer {
                 passkey_pubkey.len()
             ));
         }
+        // Validate the point is actually on the P-256 curve (prevents gap keys)
+        if p256::PublicKey::from_sec1_bytes(&passkey_pubkey).is_err() {
+            return Err(anyhow!(
+                "PasskeyPublicKey is not a valid point on the P-256 curve"
+            ));
+        }
 
         let wallet_id = self.tee.create_wallet(&passkey_pubkey).await?;
         let now = Utc::now();
@@ -3623,6 +3629,22 @@ async fn handle_get_stats(
     let tx = server.db.get_tx_stats().unwrap_or_default();
     let api_keys = server.db.list_api_keys().map(|v| v.len()).unwrap_or(0);
 
+    let mut warnings: Vec<serde_json::Value> = Vec::new();
+    if api_keys == 0 {
+        warnings.push(serde_json::json!({
+            "code": "NO_API_KEYS",
+            "en": "No API keys registered — server is in open mode, all requests allowed. Add an API key before production.",
+            "zh": "未注册 API Key，服务处于开放模式，所有请求均放行。生产上线前必须添加 API Key。"
+        }));
+    }
+    if qs.circuit_breaker_open.unwrap_or(false) {
+        warnings.push(serde_json::json!({
+            "code": "CIRCUIT_BREAKER_OPEN",
+            "en": "TEE call queue circuit breaker is OPEN — TA may be unresponsive.",
+            "zh": "TEE 调用队列熔断器已断开，TA 可能无响应。"
+        }));
+    }
+
     let resp = serde_json::json!({
         "service": "kms-api",
         "version": env!("CARGO_PKG_VERSION"),
@@ -3648,7 +3670,39 @@ async fn handle_get_stats(
             "circuit_breaker": if qs.circuit_breaker_open.unwrap_or(false) { "open" } else { "closed" },
             "consecutive_failures": qs.consecutive_failures.unwrap_or(0)
         },
-        "api_keys": api_keys
+        "api_keys": api_keys,
+        "warnings": warnings,
+        "_explain": {
+            "service":    { "en": "Service name",                                          "zh": "服务名称" },
+            "version":    { "en": "Binary version (semver)",                               "zh": "二进制版本号" },
+            "ta_mode":    { "en": "'real' = real OP-TEE hardware; 'mock' = software-only", "zh": "'real'=真实 OP-TEE 硬件；'mock'=纯软件模拟" },
+            "api_keys":   { "en": "Registered API keys count. 0 = open mode (dev only!)", "zh": "已注册 API Key 数量。0 = 开放模式（仅限开发！）" },
+            "warnings":   { "en": "Active configuration warnings",                        "zh": "当前配置警告列表" },
+            "keys": {
+                "_":             { "en": "TEE-protected wallet summary",                          "zh": "TEE 保护的钱包汇总" },
+                "total":         { "en": "All wallet records in DB (including test keys)",        "zh": "数据库中钱包总数（含测试 key）" },
+                "active":        { "en": "Wallets with status='ready' (key derived)",            "zh": "status='ready'（已完成密钥派生）的钱包数" },
+                "with_address":  { "en": "Wallets that have an Ethereum address derived",        "zh": "已派生以太坊地址的钱包数" },
+                "with_passkey":  { "en": "Wallets bound to a P-256 passkey public key",          "zh": "已绑定 P-256 passkey 公钥的钱包数" }
+            },
+            "operations": {
+                "_":             { "en": "Cumulative operation counters (since service start)",  "zh": "累计操作计数（服务启动以来）" },
+                "total_ops":     { "en": "All operations (CreateKey, Sign, etc.)",               "zh": "所有操作总次数（含 CreateKey/Sign 等）" },
+                "daily_ops":     { "en": "Operations today (UTC day boundary)",                  "zh": "今日操作次数（UTC 日边界）" },
+                "total_signs":   { "en": "Total secp256k1 signing operations",                   "zh": "累计 secp256k1 签名次数" },
+                "daily_signs":   { "en": "Signing operations today",                             "zh": "今日签名次数" },
+                "avg_sign_ms":   { "en": "Average TEE signing latency (ms). ~39ms = pure-SW k256; target <1ms with CAAM (Issue #40)", "zh": "平均 TEE 签名耗时(ms)。~39ms=纯软件 k256；接 CAAM 后目标 <1ms（Issue #40）" },
+                "avg_derive_ms": { "en": "Average BIP-32 key derivation latency (ms)",          "zh": "平均 BIP-32 密钥派生耗时(ms)" },
+                "errors":        { "en": "Total error count (includes intentional security-test rejections)", "zh": "累计错误次数（含安全测试的主动拒绝，非生产故障）" },
+                "panics":        { "en": "TA panic count. Non-zero = critical, investigate immediately", "zh": "TA panic 次数。非零 = 严重问题，立即排查" },
+                "webauthn":      { "en": "WebAuthn authentication operations count",             "zh": "WebAuthn 认证操作次数" }
+            },
+            "queue": {
+                "_":                    { "en": "TEE call queue health",           "zh": "TEE 调用队列健康状态" },
+                "circuit_breaker":      { "en": "'closed'=normal; 'open'=TA unresponsive, calls failing", "zh": "'closed'=正常；'open'=TA 无响应，调用失败" },
+                "consecutive_failures": { "en": "Consecutive TEE failures before circuit opens", "zh": "熔断前连续失败次数" }
+            }
+        }
     });
     Ok(warp::reply::json(&resp))
 }
