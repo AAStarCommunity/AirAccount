@@ -1642,12 +1642,29 @@ impl KmsApiServer {
         println!("📝 KMS DeleteKey API called for key: {}", req.key_id);
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
-            .await?;
-        self.tee
-            .remove_wallet(wallet_uuid, passkey_assertion)
-            .await?;
+
+        // Check whether the stored passkey is a valid P-256 curve point.
+        // If it isn't (a "gap key" created before the CreateKey validation was
+        // tightened), skip passkey verification and TEE removal — the TEE has
+        // no valid key material to protect, so the DB record is all that remains.
+        let is_gap_key = self
+            .db
+            .get_wallet(&req.key_id)?
+            .and_then(|w| w.passkey_pubkey)
+            .and_then(|hex| hex::decode(hex.trim_start_matches("0x")).ok())
+            .map(|bytes| p256::PublicKey::from_sec1_bytes(&bytes).is_err())
+            .unwrap_or(false);
+
+        if is_gap_key {
+            println!("⚠️  Gap key detected (invalid P-256 pubkey) — skipping TEE removal, purging DB only");
+        } else {
+            let passkey_assertion = self
+                .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+                .await?;
+            self.tee
+                .remove_wallet(wallet_uuid, passkey_assertion)
+                .await?;
+        }
 
         // Remove from DB (CASCADE deletes address_index entries)
         self.db.delete_wallet(&req.key_id)?;
