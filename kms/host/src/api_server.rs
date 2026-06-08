@@ -241,6 +241,24 @@ pub struct DeleteKeyResponse {
     pub deletion_date: DateTime<Utc>,
 }
 
+/// Admin force-purge request — bypasses passkey, deletes from TEE + SQLite.
+/// Requires Authorization: Bearer $KMS_ADMIN_TOKEN header.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdminPurgeKeyRequest {
+    pub key_id: String,
+    /// Human-readable reason for audit log (e.g. "orphan cleanup", "test key")
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdminPurgeKeyResponse {
+    pub key_id: String,
+    pub tee_purged: bool,
+    pub sqlite_deleted: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetPublicKeyRequest {
     #[serde(rename = "KeyId")]
@@ -1693,6 +1711,43 @@ impl KmsApiServer {
             key_id: req.key_id,
             deletion_date,
         })
+    }
+
+    /// Admin force-purge: removes a key from TEE + SQLite without passkey verification.
+    /// Used for: TEE orphans (SQLite row gone), test keys, gap keys.
+    /// Requires KMS_ADMIN_TOKEN to be set in the environment.
+    /// Returns (tee_purged, sqlite_deleted).
+    pub async fn admin_purge_key(&self, key_id: &str, reason: &str) -> Result<(bool, bool)> {
+        let wallet_uuid = Uuid::parse_str(key_id)?;
+
+        println!("🔑 AdminPurgeKey: {} reason={}", key_id, reason);
+
+        // Try TEE removal (ForceRemoveWallet = cmd 23).
+        // Succeeds only if the entry exists in TEE and TA supports cmd 23.
+        let tee_ok = match self.tee.force_remove_wallet(wallet_uuid).await {
+            Ok(()) => {
+                println!("  ✅ TEE entry purged");
+                true
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  TEE purge failed (orphan or old TA): {}", e);
+                false
+            }
+        };
+
+        // Delete from SQLite (ignore if already gone).
+        let sqlite_ok = match self.db.delete_wallet(key_id) {
+            Ok(()) => {
+                println!("  ✅ SQLite row deleted");
+                true
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  SQLite delete failed (row may not exist): {}", e);
+                false
+            }
+        };
+
+        Ok((tee_ok, sqlite_ok))
     }
 
     // ── WebAuthn ceremonies ──
@@ -3500,6 +3555,44 @@ async fn handle_delete_key(
     }
 }
 
+/// POST /admin/purge-key — admin force-delete from TEE + SQLite (no passkey needed).
+/// Requires Authorization: Bearer $KMS_ADMIN_TOKEN.
+/// Used for: TEE orphans, test keys, gap keys whose SQLite row is already deleted.
+async fn handle_admin_purge_key(
+    body: AdminPurgeKeyRequest,
+    admin_token: String,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    // Validate admin token
+    let expected = std::env::var("KMS_ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        return Err(warp::reject::custom(ApiError(
+            "KMS_ADMIN_TOKEN not configured — admin endpoints disabled".into(),
+        )));
+    }
+    if admin_token != expected {
+        return Err(warp::reject::custom(ApiError("Invalid admin token".into())));
+    }
+
+    let reason = if body.reason.is_empty() { "unspecified".to_string() } else { body.reason.clone() };
+    match server.admin_purge_key(&body.key_id, &reason).await {
+        Ok((tee_ok, sqlite_ok)) => {
+            let msg = format!(
+                "tee_purged={} sqlite_deleted={} reason={}",
+                tee_ok, sqlite_ok, reason
+            );
+            println!("✅ AdminPurgeKey OK key={} {}", body.key_id, msg);
+            Ok(warp::reply::json(&AdminPurgeKeyResponse {
+                key_id: body.key_id,
+                tee_purged: tee_ok,
+                sqlite_deleted: sqlite_ok,
+                message: msg,
+            }))
+        }
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_change_passkey(
     body: ChangePasskeyRequest,
     server: Arc<KmsApiServer>,
@@ -3653,11 +3746,21 @@ async fn handle_queue_status(
     Ok(warp::reply::json(&server.queue_status()))
 }
 
-/// GET /stats — machine-readable JSON stats for internal monitoring / health dashboards.
-/// Aggregated counts only; no key_id list (security: avoids leaking wallet enumeration).
+/// Query params for /stats
+#[derive(serde::Deserialize, Default)]
+struct StatsQuery {
+    /// ?pretty=1 or ?pretty=true → human-readable indented JSON
+    #[serde(default)]
+    pretty: Option<String>,
+}
+
+/// GET /stats — JSON stats for internal monitoring / health dashboards.
+/// Add ?pretty=1 for human-readable indented output.
 async fn handle_get_stats(
+    query: StatsQuery,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let pretty = query.pretty.map(|v| v == "1" || v == "true").unwrap_or(false);
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
     let tx = server.db.get_tx_stats().unwrap_or_default();
@@ -3738,8 +3841,14 @@ async fn handle_get_stats(
             }
         }
     });
+    let body = if pretty {
+        serde_json::to_string_pretty(&resp)
+    } else {
+        serde_json::to_string(&resp)
+    }
+    .unwrap_or_else(|_| "{}".to_string());
     Ok(warp::reply::with_header(
-        warp::reply::json(&resp),
+        warp::reply::Response::new(body.into()),
         "content-type",
         "application/json; charset=utf-8",
     ))
@@ -4216,10 +4325,11 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
-    // Stats JSON - GET /stats (machine-readable, no auth required, no key_id list)
+    // Stats JSON - GET /stats[?pretty=1] (machine-readable, no auth required)
     let server_stats = server.clone();
     let stats_json = warp::path("stats")
         .and(warp::get())
+        .and(warp::query::<StatsQuery>())
         .and(warp::any().map(move || server_stats.clone()))
         .and_then(handle_get_stats);
 
@@ -4575,10 +4685,27 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
         .boxed();
+    // POST /admin/purge-key — admin force-delete (no passkey). Requires KMS_ADMIN_TOKEN.
+    let server_admin = server.clone();
+    let admin_purge = warp::path!("admin" / "purge-key")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(
+            warp::header::optional::<String>("authorization")
+                .map(|h: Option<String>| {
+                    h.unwrap_or_default()
+                        .trim_start_matches("Bearer ")
+                        .to_string()
+                }),
+        )
+        .and(warp::any().map(move || server_admin.clone()))
+        .and_then(handle_admin_purge_key);
+
     let routes = group1
         .or(group2)
         .or(group3)
         .or(group4)
+        .or(admin_purge)
         .recover(handle_rejection);
 
     println!(
