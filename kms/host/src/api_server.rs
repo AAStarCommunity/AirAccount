@@ -1656,7 +1656,13 @@ impl KmsApiServer {
             .unwrap_or(false);
 
         if is_gap_key {
-            println!("⚠️  Gap key detected (invalid P-256 pubkey) — skipping TEE removal, purging DB only");
+            // The TEE Secure Storage still holds the secp256k1 key material for this wallet
+            // (the gap is only in the passkey — an invalid P-256 point that can never verify).
+            // We skip TEE removal here because we have no admin force-delete TA command yet.
+            // The orphaned TEE entry is inaccessible (no SQLite row = no API reachable path)
+            // and consumes negligible storage (~1-2 KB). Tracked in Issue #41.
+            // TODO(#41): add ForceRemoveWallet TA command; call it here before DB delete.
+            println!("⚠️  Gap key detected (invalid P-256 pubkey) — DB purged; TEE orphan tracked in Issue #41");
         } else {
             let passkey_assertion = self
                 .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
