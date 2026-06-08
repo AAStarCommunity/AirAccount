@@ -441,23 +441,58 @@ impl TeeHandle {
 
     // ---- async wrappers (mirror TaClient API) ----
 
+    // Maximum seconds to wait for the TEE worker to respond.
+    // If the TA freezes (e.g. CAAM RNG hang), the caller receives a 503 instead
+    // of blocking forever.  After CB_THRESHOLD timeouts the circuit breaker opens.
+    const TEE_CALL_TIMEOUT_SECS: u64 = 30;
+
     async fn call(&self, command: proto::Command, input: Vec<u8>) -> Result<Vec<u8>> {
         // Circuit breaker: reject immediately if TA is repeatedly failing
         self.cb.check()?;
 
         self.pending.fetch_add(1, Ordering::SeqCst);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.tx
+        if self
+            .tx
             .send(TeeCommand {
                 command,
                 input,
                 reply: reply_tx,
             })
-            .map_err(|_| anyhow::anyhow!("TEE worker thread has exited"))?;
-        let result = reply_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("TEE worker dropped reply channel"))?;
+            .is_err()
+        {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow::anyhow!("TEE worker thread has exited"));
+        }
+
+        // Race the reply against a hard timeout.  If the TA hangs the worker
+        // thread blocks in invoke_on_session(), but we return immediately here.
+        // When the TA eventually wakes up the worker sends to the dropped oneshot
+        // (harmless Err(SendError)) and resumes processing the queue.
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_secs(Self::TEE_CALL_TIMEOUT_SECS),
+            reply_rx,
+        )
+        .await;
+
         self.pending.fetch_sub(1, Ordering::SeqCst);
+
+        let result = match timed {
+            Err(_elapsed) => {
+                // TA frozen: circuit breaker records a failure so repeated
+                // timeouts trip the breaker and callers get fast 503s.
+                self.cb.record_failure();
+                return Err(anyhow::anyhow!(
+                    "TEE call timed out after {}s — TA may be frozen (CAAM/RNG hang?)",
+                    Self::TEE_CALL_TIMEOUT_SECS
+                ));
+            }
+            Ok(Err(_recv_err)) => {
+                self.cb.record_failure();
+                return Err(anyhow::anyhow!("TEE worker dropped reply channel"));
+            }
+            Ok(Ok(inner)) => inner,
+        };
 
         // Update circuit breaker based on result
         match &result {
