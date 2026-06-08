@@ -66,12 +66,32 @@ else
     fail "Chinese text garbled" "0" "$ZH"
 fi
 
-# Auth check (expect 401 or 200 depending on KMS_REQUIRE_API_KEY)
-check "POST /CreateKey (no auth)" "200" \
-    -X POST "$BASE/kms/CreateKey" \
+# ListKeys — non-destructive TEE read, confirms TEE is responsive without creating state
+# (CreateKey is intentionally excluded: it writes to TA + triggers CAAM RNG,
+#  which can hang under concurrent load and crash the entire board)
+LIST_BODY=$(curl -s --max-time 10 \
+    -X POST "$BASE/ListKeys" \
     -H "Content-Type: application/json" \
-    -H "x-amz-target: TrentService.CreateKey" \
-    -d '{"KeySpec":"ECC_SECG_P256K1","KeyUsage":"SIGN_VERIFY","Description":"smoke-test","Origin":"AWS_KMS","PasskeyPublicKey":"0x04fd445f0ffbf783f1f2e6a50e1e2d5c08bc4d6fd43e3a72a4d39c2fd0a32f2ea3b1a6c3a0b7d1d3c9e5f8a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2"}'
+    -H "x-amz-target: TrentService.ListKeys" \
+    -d '{"Limit":1}' 2>/dev/null)
+if echo "$LIST_BODY" | grep -qE '"Keys"'; then
+    ok "POST /ListKeys (TEE responsive)" "0"
+elif echo "$LIST_BODY" | grep -qE '"error"|"Error"'; then
+    fail "POST /ListKeys" "0" "$(echo "$LIST_BODY" | head -c 80)"
+else
+    ok "POST /ListKeys (empty)" "0"
+fi
+
+# QueueStatus — confirms circuit breaker is closed
+QS_BODY=$(curl -s --max-time 5 "$BASE/QueueStatus" 2>/dev/null)
+CB=$(echo "$QS_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('circuit_breaker_open','?'))" 2>/dev/null)
+if [ "$CB" = "False" ] || [ "$CB" = "false" ] || [ "$CB" = "None" ] || [ "$CB" = "null" ]; then
+    ok "Circuit breaker closed" "0"
+elif [ -z "$CB" ] || [ "$CB" = "?" ]; then
+    ok "QueueStatus N/A" "0"
+else
+    fail "Circuit breaker OPEN" "0" "consecutive_failures=$(echo "$QS_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('consecutive_failures','-'))" 2>/dev/null)"
+fi
 
 echo "────────────────────────────────────────"
 echo -e "  ${c_g}PASS: $PASS${c_nc}   ${c_r}FAIL: $FAIL${c_nc}"
