@@ -256,4 +256,19 @@ cd /mnt/images && sudo /tmp/uuu_new -b emmc_all \
 
 ---
 
+---
+
+## Ubuntu VM 重启后恢复步骤
+
+VM 重启后 /tmp 清空，需重新传 uuu binary 并重连 J2：
+
+```bash
+# 1. 传 uuu binary（/tmp 每次重启清空）
+sshpass -p ubuntu scp /tmp/uuu_aarch64 ubuntu@192.168.64.2:/tmp/uuu_new
+sshpass -p ubuntu ssh ubuntu@192.168.64.2 'chmod +x /tmp/uuu_new'
+
+# 2. 在 UTM 窗口重新连接 J2
+# UTM 工具栏 → USB 图标 → NXP OO Blank 93 → Connect
+```
+
 *最后更新: 2026-06-10*
