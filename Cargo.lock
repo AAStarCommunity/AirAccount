@@ -803,6 +803,7 @@ dependencies = [
  "optee-teec",
  "p256",
  "proto",
+ "rand",
  "rusqlite",
  "serde",
  "serde_json",
