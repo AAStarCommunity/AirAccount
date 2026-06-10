@@ -142,8 +142,14 @@ else
 fi
 
 # ─── Create destination directories ──────────────────────────────────────────
+# H-5: backups contain Cloudflare tunnel credentials (cert.pem + credentials.json)
+# and wallet metadata. Default umask (022) would make these dirs world-readable
+# (0755) so any local user could read the creds. Force private permissions
+# (0700) on the backup tree so only the owner (root) can traverse it.
 if [[ "$DRY_RUN" == false ]]; then
     mkdir -p "$FILES_DIR"
+    chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
+    chmod 700 "$BACKUP_DIR" "$FILES_DIR"
 fi
 
 # ─── Helper: rsync a source path (file or directory) into FILES_DIR ──────────
@@ -176,9 +182,19 @@ backup_path() {
         --exclude='*.priv'
     )
 
-    # Add --link-dest for incremental (saves disk space via hard links)
+    # Add --link-dest for incremental (saves disk space via hard links).
+    # rsync resolves each transferred file's relative path against --link-dest,
+    # so --link-dest must point at a DIRECTORY:
+    #   - directory source: the previous backup's matching directory
+    #   - single-file source: the DIRNAME of the previous file (NOT the file
+    #     itself; pointing it at the file makes rsync look for "<file>/<file>"
+    #     and the hard-link optimization silently never matches). (H-4)
     if [[ -n "$PREV_BACKUP" && -e "${PREV_BACKUP}/files/${rel_dest}" ]]; then
-        rsync_opts+=(--link-dest="${PREV_BACKUP}/files/${rel_dest}")
+        if [[ -d "$src" ]]; then
+            rsync_opts+=(--link-dest="${PREV_BACKUP}/files/${rel_dest}")
+        else
+            rsync_opts+=(--link-dest="$(dirname "${PREV_BACKUP}/files/${rel_dest}")")
+        fi
     fi
 
     if [[ -d "$src" ]]; then
@@ -186,6 +202,53 @@ backup_path() {
     else
         rsync "${rsync_opts[@]}" "$src" "$full_dest"
     fi
+}
+
+# ─── Consistent SQLite backup ────────────────────────────────────────────────
+# M-6: kms-api-server may be writing kms.db while we back it up. A plain rsync of
+# a live SQLite file can capture a torn (half-written) page and yield a corrupt
+# backup. Prefer `sqlite3 .backup` (online backup API — consistent snapshot of a
+# live DB). If the sqlite3 CLI is unavailable, fall back to copying the DB plus
+# its WAL/SHM sidecars together so the WAL can be replayed at restore time.
+backup_sqlite_db() {
+    local src="$1"
+    local rel_dest="$2"
+    local full_dest="${FILES_DIR}/${rel_dest}"
+
+    if [[ ! -e "$src" ]]; then
+        log "SKIP (not found): ${src}"
+        return
+    fi
+
+    log "Backing up SQLite DB: ${src} -> ${rel_dest}"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log "[DRY-RUN] consistent sqlite backup ${src} -> ${full_dest}"
+        return
+    fi
+
+    mkdir -p "$(dirname "$full_dest")"
+
+    if command -v sqlite3 &>/dev/null; then
+        # Online backup: consistent even while the DB is being written.
+        if sqlite3 "$src" ".backup '${full_dest}'" 2>/dev/null; then
+            chmod 600 "$full_dest" 2>/dev/null || true
+            log "  sqlite3 .backup OK"
+            return
+        fi
+        log "  WARNING: sqlite3 .backup failed — falling back to file copy + WAL/SHM"
+    else
+        log "  sqlite3 CLI not available — copying DB + WAL/SHM sidecars"
+    fi
+
+    # Fallback: copy the main DB and any WAL/SHM so a restore can replay the WAL.
+    cp -p "$src" "$full_dest"
+    for ext in -wal -shm; do
+        if [[ -e "${src}${ext}" ]]; then
+            cp -p "${src}${ext}" "${full_dest}${ext}"
+        fi
+    done
+    chmod 600 "$full_dest" "${full_dest}-wal" "${full_dest}-shm" 2>/dev/null || true
 }
 
 # ─── Gather system info ───────────────────────────────────────────────────────
@@ -259,8 +322,8 @@ collect_system_info() {
 # ─── Main backup logic ────────────────────────────────────────────────────────
 log_section "Backing up files"
 
-# 1. SQLite wallet metadata DB
-backup_path "$DB_PATH"           "root/AirAccount/kms.db"
+# 1. SQLite wallet metadata DB (consistent online backup — see M-6)
+backup_sqlite_db "$DB_PATH"      "root/AirAccount/kms.db"
 
 # 2. TA binary
 backup_path "$TA_PATH"           "lib/optee_armtz/${TA_UUID}.ta"
@@ -285,6 +348,15 @@ backup_path "$SCRIPTS_DIR"       "root/AirAccount/kms/scripts"
 
 # 7. System info snapshot
 collect_system_info
+
+# ─── Harden permissions on backed-up sensitive material ───────────────────────
+# H-5: ensure no file in the backup tree is group/other-readable, and lock the
+# Cloudflare credentials and DB down to owner-only. Belt-and-suspenders on top
+# of the 0700 directory perms above.
+if [[ "$DRY_RUN" == false ]]; then
+    find "$FILES_DIR" -type d -exec chmod 700 {} + 2>/dev/null || true
+    find "$FILES_DIR" -type f -exec chmod 600 {} + 2>/dev/null || true
+fi
 
 # ─── Generate SHA-256 manifest ────────────────────────────────────────────────
 log_section "Generating SHA-256 manifest"

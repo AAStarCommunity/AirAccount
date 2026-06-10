@@ -11,22 +11,31 @@ Before=kms-api.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Guard against 0-byte or partially-written dirf.db (< 16 KB).
+# Guard against a 0-byte or clearly-truncated dirf.db.
 # After eMMC re-flash, tee-supplicant may create an empty or truncated dirf.db;
 # OP-TEE treats it as TEE_ERROR_CORRUPT_OBJECT (0xf0100001) and every TA session
-# fails with 0xffff3025. Fix: stop tee-supplicant, delete the bad file, restart
-# it, and poll until a valid (>= 16 KB) file appears.
+# fails with 0xffff3025.
+#
+# H-6: the threshold was 16384 bytes, which is DANGEROUSLY high — a perfectly
+# valid dirf.db holding only a few objects can legitimately be a few KB, so the
+# old check would delete a healthy store and destroy real wallet metadata. The
+# observed fault is a 0-byte (or header-only) truncation. We now use a tight
+# lower bound (512 bytes): catches the actual 0-byte / truncated-header fault
+# while never touching a valid populated store.
+# Fix path: stop tee-supplicant, delete the bad file, restart it, and poll until
+# tee-supplicant recreates a non-truncated file.
 ExecStart=/bin/sh -c '\
   DB=/var/lib/tee/dirf.db; \
+  MIN=512; \
   SIZE=$(stat -c%%s "$DB" 2>/dev/null || echo 0); \
-  if [ "$SIZE" -lt 16384 ]; then \
-    echo "[dirf-repair] dirf.db is $SIZE bytes (expected >= 16384) — repairing"; \
+  if [ "$SIZE" -lt "$MIN" ]; then \
+    echo "[dirf-repair] dirf.db is $SIZE bytes (expected >= $MIN) — repairing"; \
     systemctl stop tee-supplicant@teepriv0.service || true; \
     rm -f "$DB"; \
     systemctl start tee-supplicant@teepriv0.service; \
     for i in $(seq 1 15); do \
       SIZE2=$(stat -c%%s "$DB" 2>/dev/null || echo 0); \
-      if [ "$SIZE2" -ge 16384 ]; then \
+      if [ "$SIZE2" -ge "$MIN" ]; then \
         echo "[dirf-repair] Repair OK — dirf.db is now $SIZE2 bytes"; \
         exit 0; \
       fi; \
