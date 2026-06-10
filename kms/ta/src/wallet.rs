@@ -265,12 +265,45 @@ impl TryFrom<Wallet> for Vec<u8> {
     }
 }
 
+/// Legacy wallet format serialized before the RPMB anti-rollback feature.
+/// Used as a fallback in TryFrom to maintain backward compatibility.
+/// bincode does not support serde's `#[serde(default)]` for missing trailing fields —
+/// deserialization fails with an EOF error rather than using the default. We handle
+/// this by trying the current format first, then falling back to this legacy struct.
+#[derive(Serialize, Deserialize)]
+struct WalletLegacy {
+    id: Uuid,
+    entropy: Vec<u8>,
+    next_address_index: u32,
+    next_account_index: u32,
+    cached_seed: Option<Vec<u8>>,
+    cached_account_root: Option<Vec<u8>>,
+    passkey_pubkey: Option<Vec<u8>>,
+}
+
 impl TryFrom<Vec<u8>> for Wallet {
     type Error = anyhow::Error;
 
     fn try_from(data: Vec<u8>) -> Result<Wallet> {
-        bincode::deserialize::<Wallet>(&data)
-            .map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))
+        // Try current format (with rollback_epoch) first.
+        if let Ok(w) = bincode::deserialize::<Wallet>(&data) {
+            return Ok(w);
+        }
+        // Fall back: wallet was serialized before rollback_epoch was added.
+        // bincode encodes structs as ordered fields without names, so adding a new
+        // field at the end breaks deserialization of old data — it hits unexpected EOF.
+        let legacy = bincode::deserialize::<WalletLegacy>(&data)
+            .map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))?;
+        Ok(Wallet {
+            id: legacy.id,
+            entropy: legacy.entropy,
+            next_address_index: legacy.next_address_index,
+            next_account_index: legacy.next_account_index,
+            cached_seed: legacy.cached_seed,
+            cached_account_root: legacy.cached_account_root,
+            passkey_pubkey: legacy.passkey_pubkey,
+            rollback_epoch: 0,
+        })
     }
 }
 
