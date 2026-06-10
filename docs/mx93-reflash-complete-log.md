@@ -1,7 +1,7 @@
 # MX93 FRDM-IMX93 完整刷机决策日志
 
 > 持续更新中。记录从根因到最终修复的每一步决策、假设、尝试和教训。
-> 最后更新：2026-06-10
+> 最后更新：2026-06-10（eMMC PARTITION_CONFIG 修复）
 
 ---
 
@@ -184,22 +184,137 @@ U-Boot SPL 2024.04+gde16f4f1722+p0 (Sep 02 2024 - 10:44:35 +0000)
 
 ---
 
-## 当前卡死的核心问题：SPL 在 SDPS 模式下崩溃
+## 成功路径（最终解决方案）
+
+### 阶段一：SD 卡启动 v6.18.2 gdet_auto
+
+**时间**: 2026-06-10
+
+**关键发现**:
+- v6.6.36 被 ELE anti-rollback 拒绝（ELE SNVS 计数器已推进）
+- v6.12.34 无串口输出（DDR init 崩溃或 ELE 也拒绝）
+- **v6.18.2 gdet_auto** = 唯一有效版本
+  - `gdet_auto` 变体自动检测 DDR 配置（板子 revision 差异）
+  - 普通 `singleboot` 变体在此板子上 DDR init 崩溃
+
+**SD 卡写入命令（Mac）**:
+```bash
+# 脚本: /tmp/flash_sd_v18_gdet.sh
+BOOT="/Users/jason/Dev/aastar/AirAccount/LF_v6-LF_v6.18.2-1.0.0_images_IMX93EVK/imx-boot-imx93-11x11-lpddr4x-frdm-sd.bin-flash_singleboot_gdet_auto"
+diskutil unmountDisk /dev/disk6
+dd if="$BOOT" of=/dev/rdisk6 seek=64 bs=512 conv=notrunc
+sync
+```
+
+**启动配置**: SW1=0011（1号+2号 ON），SD 卡含 v6.6.36 rootfs 分区
+
+**结果**:
+- 蓝色 LED 亮起 ✓
+- Linux 启动成功（串口输出为二进制乱码因 baud 不匹配，但 SSH 可用）
+- SSH 访问：`ssh root@192.168.2.37`（hostname: imx93frdm）
+
+---
+
+### 阶段二：确认 eMMC 分区表完整
+
+**SSH 检查结果**:
+```
+/dev/mmcblk0: 29.12GiB
+  p1: FAT32  sector 16384  256MB   ← 含 kernel Image + FRDM DTBs ✓
+  p2: ext4   sector 540672 8.5GB   ← 根文件系统（100% 满，pre-existing）✓
+```
+
+**结论**: eMMC 分区表完整，内核和 rootfs 未损坏。只有 bootloader 区域（sector 0-65）被损坏。
+
+---
+
+### 阶段三：将 v6.18.2 gdet_auto 写入 eMMC sector 66
+
+**操作**（从 SD 启动的 Linux 内执行）:
+```bash
+ssh root@192.168.2.37 "
+dd if=/dev/mmcblk1 of=/dev/mmcblk0 skip=64 seek=66 bs=512 count=8192 conv=notrunc
+sync
+"
+```
+- `mmcblk1` = SD 卡（含 v6.18.2 bootloader 在 sector 64）
+- `mmcblk0` = eMMC（写入 sector 66，i.MX93 eMMC 用户区标准偏移）
+- 验证：sector 66 开头为 `00 20 02 87 01 00 00 00`（AHAB container，tag=0x87 ✓）
+
+---
+
+### 阶段四：修复 eMMC PARTITION_CONFIG
+
+**问题**: eMMC 直接启动（SW1=0010）失败 — 无 serial 输出，蓝灯不亮
+
+**诊断**:
+```bash
+ssh root@192.168.2.37 "mmc extcsd read /dev/mmcblk0 | grep PARTITION_CONFIG"
+# Boot configuration bytes [PARTITION_CONFIG: 0x00]
+```
+
+**根因**: `PARTITION_CONFIG=0x00` 表示 `BOOT_PARTITION_ENABLE=0`（未配置 boot source）。
+i.MX93 ROM 需要此寄存器显式指向 user area（值=7）才会从 eMMC user area 的 sector 66 读取 bootloader。
+
+**修复**:
+```bash
+ssh root@192.168.2.37 "mmc bootpart enable 7 1 /dev/mmcblk0"
+# PARTITION_CONFIG: 0x00 → 0x78
+# 0x78 = BOOT_ACK=1, BOOT_PARTITION_ENABLE=7(user area), PARTITION_ACCESS=0
+```
+
+**状态**: 已修复（2026-06-10）。待验证：断电 → 拔 SD 卡 → SW1=0010 → 加电，看蓝灯是否亮。
+
+---
+
+## 当前卡死的核心问题：ELE Anti-Rollback + UTM USB 访问权限
+
+### ELE Anti-Rollback（2026-06-07 发现）
 
 ```
-已确认死路（不再尝试）:
-  ✗ macOS 直接 uuu — IOHIDFamily 永久阻塞
+根因：运行过 LF_v6.18.2 的 SDPS，ELE SNVS 单调计数器被推进
+结果：LF_v6.6.36 的 ELE FW 版本低于阈值，ROM 说 "Okay" 但 SPL 永远不执行
+症状：SDPS 100% 成功传输，但 0x0151 (SDPV) 永远不出现，串口无任何输出
+
+LF_v6.18.2：ELE 接受，但 SPL/DDR init 在 UART 初始化前崩溃（无串口输出）
+LF_v6.12.34：中间版本（Sep 2025），ELE FW 更新 + DDR 参数可能正确，当前测试中
+```
+
+### 已确认死路
+
+```
+  ✗ macOS 直接 uuu（无 sudo）— LIBUSB_ERROR_TIMEOUT，HID 写超时
   ✗ UTM SPICE 自动转发 — 不可能对重枚举设备自动化
   ✗ flash_singleboot 变体 — 崩溃更快，无改善
   ✗ authorized=0 — UTM fatal IO error
-  
-SDPS 状态：
-  ✓ SDPS（ROM 接收 imx-boot.bin）: 每次 100% 成功，4.4-4.5秒
-  ✗ SDPV（SPL USB gadget 模式）: 从未出现，SPL 在 USB init 前崩溃
-  
-SPL 串口输出（SDPS 模式）：
-  SOC/DDR/M33 初始化成功，U-Boot SPL 启动 banner 出现
-  "Trying to boot from USB SDP" 从未出现 → 复位循环
+  ✗ LF_v6.6.36 所有变体 — ELE anti-rollback 拒绝
+  ✗ LF_v6.18.2 所有变体 — SPL DDR init 崩溃，UART 前
+```
+
+### UTM USB LIBUSB_ERROR_ACCESS（2026-06-10 新问题）
+
+```
+症状：UTM GUI 手动连接 NXP 设备时报 "could not claim interface 0 (configuration 2): LIBUSB_ERROR_ACCESS"
+根因：macOS IOKit 在 USB 设备接入时先占 interface，UTM 的 libusb 无法 detach
+  - pkill uuu / kill 进程 = 无效（只杀应用层，不释放内核驱动）
+  - 需要 libusb_detach_kernel_driver() = 需要 root 权限
+
+发现：Mac 本地已安装 uuu 1.5.243（/opt/homebrew/bin/uuu）
+解决方案：sudo /opt/homebrew/bin/uuu — root 权限让 libusb 能 detach IOKit 驱动，不需要 UTM
+```
+
+### 当前状态（2026-06-10）
+
+```
+✓ SD 卡 v6.18.2 gdet_auto 启动成功
+✓ SSH 可达 192.168.2.37 (root@imx93frdm)
+✓ eMMC 分区表完整（FAT32 p1 + ext4 p2）
+✓ eMMC sector 66 写入 v6.18.2 bootloader
+✓ eMMC PARTITION_CONFIG 已修复：0x00 → 0x78 (BOOT_PARTITION_ENABLE=7)
+
+待验证：
+  断电 → 拔 SD 卡 → SW1=0010 → 加电 → 蓝灯亮 = eMMC 启动成功
+  若成功，下一步：从 /Users/jason/mx93-backup/mx93-backup.tgz 恢复 KMS 服务
 ```
 
 ---
