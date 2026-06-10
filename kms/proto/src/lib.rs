@@ -391,7 +391,6 @@ mod tests {
                 client_data_hash: [0xcd; 32],
                 signature_r: [0x11; 32],
                 signature_s: [0x22; 32],
-                rp_id_hash: None,
             }),
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
@@ -495,21 +494,11 @@ mod tests {
 
     #[test]
     fn passkey_assertion_roundtrip() {
-        // Without rp_id_hash (backwards-compatible None default)
         bincode_roundtrip(&PasskeyAssertion {
             authenticator_data: vec![0u8; 37],
             client_data_hash: [0xbb; 32],
             signature_r: [0x11; 32],
             signature_s: [0x22; 32],
-            rp_id_hash: None,
-        });
-        // With rp_id_hash present (TA will verify authenticatorData[9..41] == this)
-        bincode_roundtrip(&PasskeyAssertion {
-            authenticator_data: vec![0u8; 37],
-            client_data_hash: [0xbb; 32],
-            signature_r: [0x11; 32],
-            signature_s: [0x22; 32],
-            rp_id_hash: Some([0xcc; 32]),
         });
     }
 
@@ -534,7 +523,6 @@ mod tests {
             client_data_hash: [0xcc; 32],
             signature_r: [0xaa; 32],
             signature_s: [0xbb; 32],
-            rp_id_hash: None,
         };
         bincode_roundtrip(&SignHashInput {
             wallet_id: test_uuid(),
