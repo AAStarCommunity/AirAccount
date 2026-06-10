@@ -359,9 +359,26 @@ fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
 /// Since load_wallet_cached is always followed by verify_passkey_for_wallet
 /// (which may use TLS-backed allocators), we must never call db.put in this path.
 /// Seed persistence is handled exclusively by derive_address_auto.
+///
+/// Anti-rollback: reads RPMB counter first (read-only, TLS-safe) to detect
+/// wallets whose epoch is ahead of RPMB — which is impossible in normal operation
+/// and indicates either an atomicity failure (RPMB write failed after wallet save)
+/// or tampered wallet bytes with a forged future epoch.
 fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
+    // Read RPMB before any TLS access. rpmb_read_counter uses open+read (safe).
+    let rpmb_now = rpmb_read_counter()?;
+
     // Fast path: cache hit
     if let Some(mut w) = cache_get(wallet_id) {
+        // Epoch > RPMB is impossible: epoch is set to current RPMB value then
+        // RPMB is advanced. If epoch > RPMB, either our write was non-atomic
+        // or the wallet was tampered with a forged epoch. Reject hard.
+        if w.rollback_epoch != 0 && w.rollback_epoch > rpmb_now {
+            return Err(anyhow!(
+                "anti-rollback: wallet epoch {} > RPMB {} for {:?} — state inconsistent, rejecting",
+                w.rollback_epoch, rpmb_now, wallet_id
+            ));
+        }
         let changed = w.ensure_seed_cached()?;
         if changed {
             // Update in-memory cache only — NO db.put (would corrupt TLS)
@@ -379,6 +396,14 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     let mut w = db
         .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
+
+    if w.rollback_epoch != 0 && w.rollback_epoch > rpmb_now {
+        return Err(anyhow!(
+            "anti-rollback: wallet epoch {} > RPMB {} for {:?} — state inconsistent, rejecting",
+            w.rollback_epoch, rpmb_now, wallet_id
+        ));
+    }
+
     let changed = w.ensure_seed_cached()?;
     if changed {
         trace_println!(
