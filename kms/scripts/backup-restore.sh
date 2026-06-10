@@ -201,12 +201,20 @@ NEVER_RESTORE_PATTERNS=(
     "*.priv"
 )
 
+# M-7: build the exclude args as a real bash array. The previous version did
+# `echo "${args[@]}"` and the caller captured it via unquoted `$(...)`, which
+# subjects the result to word-splitting AND pathname expansion. If a `*.key` /
+# `*.pem` / `*.priv` file happened to exist in the CWD, the shell would expand
+# `--exclude=*.key` into the matching filename, silently dropping the exclusion
+# and risking restore of private-key material. Populating a global array and
+# expanding it quoted (`"${EXCLUDE_ARGS[@]}"`) avoids both hazards.
+EXCLUDE_ARGS=()
 build_exclude_args() {
-    local args=()
+    EXCLUDE_ARGS=()
+    local pat
     for pat in "${NEVER_RESTORE_PATTERNS[@]}"; do
-        args+=(--exclude="$pat")
+        EXCLUDE_ARGS+=(--exclude="$pat")
     done
-    echo "${args[@]}"
 }
 
 # ─── Restore ──────────────────────────────────────────────────────────────────
@@ -227,10 +235,11 @@ if [[ "$DEST_ROOT" == "/" && "$DRY_RUN" == false ]]; then
     fi
 fi
 
+build_exclude_args
 RSYNC_OPTS=(
     -a
     --checksum
-    $(build_exclude_args)
+    "${EXCLUDE_ARGS[@]}"
 )
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -263,6 +272,10 @@ restore_path() {
 # Restore each backed-up item
 TA_UUID="4319f351-0b24-4097-b659-80ee4f824cdd"
 restore_path "root/AirAccount/kms.db"
+# M-6: if the backup used the WAL/SHM fallback (no sqlite3 CLI at backup time),
+# restore the sidecars too so the WAL can be replayed on first open.
+restore_path "root/AirAccount/kms.db-wal"
+restore_path "root/AirAccount/kms.db-shm"
 restore_path "lib/optee_armtz/${TA_UUID}.ta"
 restore_path "root/AirAccount/target/release/kms-api-server"
 restore_path "etc/systemd/system/kms-api.service"
