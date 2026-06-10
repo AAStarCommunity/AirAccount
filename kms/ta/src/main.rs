@@ -381,6 +381,18 @@ pub extern "C" fn p256_generate_random(output: *mut u8, output_size: u32) -> i32
     0 // P256_SUCCESS
 }
 
+/// SHA-256("aastar.io") — the relying party ID for this KMS deployment.
+/// Hardcoded in TA so a compromised CA cannot substitute a different rpId.
+/// To change for a different deployment: recompute SHA-256 of the new rpId
+/// and update this constant; then rebuild and re-flash the TA.
+/// Computed: echo -n "aastar.io" | sha256sum
+const EXPECTED_RP_ID_HASH: [u8; 32] = [
+    0xd9, 0x44, 0xd2, 0xad, 0xbd, 0x65, 0x6d, 0x76,
+    0x9a, 0x81, 0x15, 0x28, 0xd2, 0xac, 0xa5, 0x14,
+    0x71, 0xd5, 0xfc, 0x5c, 0x7f, 0xca, 0xd4, 0x1d,
+    0x86, 0x31, 0x08, 0x3b, 0x20, 0x9a, 0xa6, 0x3a,
+];
+
 /// Verify passkey assertion against the passkey bound to this wallet.
 /// All wallets MUST have a passkey bound — rejects if missing.
 ///
@@ -399,7 +411,10 @@ fn verify_passkey_for_wallet(
     let _assertion =
         assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
 
-    // Verify authenticatorData structure (WebAuthn §6.1)
+    // Verify authenticatorData structure (WebAuthn Level 2 §6.1):
+    //   [0..32]  rpIdHash  (32 bytes, SHA-256 of rpId)
+    //   [32]     flags     (1 byte: bit0=UP, bit2=UV, bit6=AT, bit7=ED)
+    //   [33..37] signCount (4 bytes, big-endian uint32)
     if _assertion.authenticator_data.len() < 37 {
         return Err(anyhow!(
             "authenticatorData too short: {} bytes (minimum 37)",
@@ -407,24 +422,31 @@ fn verify_passkey_for_wallet(
         ));
     }
 
-    // Verify User Presence (UP) flag — bit 0 of flags byte (offset 32)
+    // Verify rpId hash — MANDATORY, hardcoded in TA (not CA-controlled).
+    // Prevents credential-substitution attack: attacker cannot use a valid
+    // credential from evil.com because its rpId hash will not match aastar.io's.
+    // Constant-time XOR comparison prevents timing side-channel.
+    let actual_rp_id_hash = &_assertion.authenticator_data[0..32];
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= EXPECTED_RP_ID_HASH[i] ^ actual_rp_id_hash[i];
+    }
+    if diff != 0 {
+        return Err(anyhow!(
+            "WebAuthn rpId hash mismatch: expected SHA-256(\"aastar.io\"), got different value"
+        ));
+    }
+    trace_println!("[+] rpId hash verified in TA (constant-time)");
+
+    // Verify User Presence (UP) flag — bit 0 of flags byte (offset 32).
+    // Ensures the user physically interacted with the authenticator.
+    // Checked after rpId to fail fast on wrong-RP assertions.
     let flags = _assertion.authenticator_data[32];
     if flags & 0x01 == 0 {
         return Err(anyhow!(
             "WebAuthn User Presence flag not set (flags=0x{:02x})",
             flags
         ));
-    }
-
-    // Verify rpId hash if provided (authenticatorData[9..41] = SHA-256(rpId))
-    if let Some(expected_rp_id_hash) = &_assertion.rp_id_hash {
-        let actual_rp_id_hash = &_assertion.authenticator_data[9..41];
-        if actual_rp_id_hash != expected_rp_id_hash.as_ref() {
-            return Err(anyhow!(
-                "WebAuthn rpId hash mismatch: TA-side verification failed"
-            ));
-        }
-        trace_println!("[+] rpId hash verified in TA");
     }
 
     // signature = r(32) || s(32) = 64 bytes
