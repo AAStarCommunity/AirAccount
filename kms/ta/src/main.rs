@@ -392,7 +392,7 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     }
 
     // Slow path: cache miss — read from storage
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let mut w = db
         .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
@@ -563,7 +563,7 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
 
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     // save_wallet does cache_put (TLS) then db.put (corrupts TLS). After this,
     // no more thread_local access — safe to call rpmb_write_counter.
     save_wallet(&db_client, &wallet)?;
@@ -582,7 +582,7 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     // Read RPMB epoch before any thread_local access (read doesn't corrupt TLS).
     let next_epoch = rpmb_next_epoch()?;
 
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
 
     // Load from DB (not cache) — read op doesn't corrupt TLS
     let wallet = db_client
@@ -637,7 +637,7 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
 fn derive_address_auto(
     input: &proto::DeriveAddressAutoInput,
 ) -> Result<proto::DeriveAddressAutoOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
 
     dbg_println!("[+] DeriveAddressAuto for wallet: {:?}", input.wallet_id);
     let mut wallet = match cache_get(&input.wallet_id) {
@@ -725,7 +725,7 @@ fn register_passkey_ta(
     wallet.set_passkey(input.passkey_pubkey.clone());
     wallet.rollback_epoch = epoch;
 
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     // save_wallet does cache_put (TLS) then db.put (corrupts TLS).
     save_wallet(&db, &wallet)?;
     rpmb_write_counter(epoch)?;
@@ -889,7 +889,7 @@ struct JwtSignedMaterial {
 fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let mut store = JwtSecretStore::load(&db);
     let current = store.ensure_current()?.clone();
     store.save(&db)?;
@@ -1005,7 +1005,7 @@ fn create_p256_session_key(
     // Persist both private key and public key in TEE secure storage.
     // Public key is stored so sign_p256_user_op can embed it in the 149-byte output
     // without needing to re-derive it from the private key.
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let sk = P256SessionKey {
         store_id: P256SessionKey::store_id_for(&input.wallet_id, input.session_index),
         private_key: priv_bytes.to_vec(),
@@ -1069,7 +1069,7 @@ fn sign_p256_user_op(
     }
 
     // Load P-256 key pair from TEE secure storage
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let sk = P256SessionKey::load(&db, &input.wallet_id, input.session_index)?;
     if sk.private_key.len() != 32 {
         return Err(anyhow!(
@@ -1221,7 +1221,7 @@ fn delete_p256_session_key(
         input.wallet_id,
         input.session_index
     );
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
     match db.delete_entry::<P256SessionKey>(&store_id) {
         Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
@@ -1529,7 +1529,7 @@ fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<p
 }
 
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let store = JwtSecretStore::load(&db);
     let valid = match store.find(&input.kid) {
         Some(entry) => {
@@ -1545,7 +1545,7 @@ fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVe
 }
 
 fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRotateSecretOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
     let mut store = JwtSecretStore::load(&db);
     let had_current = store.current().is_some();
 
