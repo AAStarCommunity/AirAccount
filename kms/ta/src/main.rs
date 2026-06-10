@@ -368,17 +368,35 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     // Read RPMB before any TLS access. rpmb_read_counter uses open+read (safe).
     let rpmb_now = rpmb_read_counter()?;
 
-    // Fast path: cache hit
-    if let Some(mut w) = cache_get(wallet_id) {
-        // Epoch > RPMB is impossible: epoch is set to current RPMB value then
-        // RPMB is advanced. If epoch > RPMB, either our write was non-atomic
-        // or the wallet was tampered with a forged epoch. Reject hard.
-        if w.rollback_epoch != 0 && w.rollback_epoch > rpmb_now {
+    // Anti-rollback epoch validation:
+    //
+    //   Normal state:    wallet.rollback_epoch <= rpmb_now
+    //   Recovery state:  wallet.rollback_epoch == rpmb_now + 1
+    //     → previous mutation saved wallet (epoch=N+1) but crashed before
+    //       rpmb_write_counter(N+1). We complete the interrupted write on load.
+    //   Tampered state:  wallet.rollback_epoch > rpmb_now + 1
+    //     → impossible in normal operation; reject hard.
+    //
+    // TLS ordering: rpmb_write_counter (TEE write) corrupts tpidr_el0; it must
+    // be called AFTER all thread_local access (cache_put). A `needs_recovery`
+    // flag defers it to after cache_put.
+
+    fn epoch_check(epoch: u64, rpmb_now: u64, wallet_id: &uuid::Uuid) -> Result<bool> {
+        if epoch == 0 {
+            return Ok(false); // legacy wallet, skip check
+        }
+        if epoch > rpmb_now + 1 {
             return Err(anyhow!(
-                "anti-rollback: wallet epoch {} > RPMB {} for {:?} — state inconsistent, rejecting",
-                w.rollback_epoch, rpmb_now, wallet_id
+                "anti-rollback: wallet epoch {} > RPMB {}+1 for {:?} — tampered or corrupt",
+                epoch, rpmb_now, wallet_id
             ));
         }
+        Ok(epoch == rpmb_now + 1) // true = needs RPMB recovery write
+    }
+
+    // Fast path: cache hit
+    if let Some(mut w) = cache_get(wallet_id) {
+        let needs_recovery = epoch_check(w.rollback_epoch, rpmb_now, wallet_id)?;
         let changed = w.ensure_seed_cached()?;
         if changed {
             // Update in-memory cache only — NO db.put (would corrupt TLS)
@@ -387,6 +405,14 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
                 wallet_id
             );
             cache_put(&w);
+        }
+        // Recovery: complete interrupted RPMB write — AFTER all TLS (cache_put above)
+        if needs_recovery {
+            trace_println!(
+                "[!] load_wallet_cached: recovering RPMB counter to {} for {:?}",
+                w.rollback_epoch, wallet_id
+            );
+            rpmb_write_counter(w.rollback_epoch)?;
         }
         return Ok(w);
     }
@@ -397,12 +423,7 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
         .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
 
-    if w.rollback_epoch != 0 && w.rollback_epoch > rpmb_now {
-        return Err(anyhow!(
-            "anti-rollback: wallet epoch {} > RPMB {} for {:?} — state inconsistent, rejecting",
-            w.rollback_epoch, rpmb_now, wallet_id
-        ));
-    }
+    let needs_recovery = epoch_check(w.rollback_epoch, rpmb_now, wallet_id)?;
 
     let changed = w.ensure_seed_cached()?;
     if changed {
@@ -413,6 +434,14 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     }
     // Always cache in memory (NO db.put — avoids TLS corruption in signing path)
     cache_put(&w);
+    // Recovery: complete interrupted RPMB write — AFTER cache_put (last TLS access)
+    if needs_recovery {
+        trace_println!(
+            "[!] load_wallet_cached: recovering RPMB counter to {} for {:?}",
+            w.rollback_epoch, wallet_id
+        );
+        rpmb_write_counter(w.rollback_epoch)?;
+    }
     Ok(w)
 }
 
