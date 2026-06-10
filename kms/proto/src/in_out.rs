@@ -30,6 +30,12 @@ pub struct PasskeyAssertion {
     pub signature_r: [u8; 32],
     /// ECDSA signature s component (32 bytes)
     pub signature_s: [u8; 32],
+    /// Optional rpId hash to verify (SHA-256 of relying party ID string).
+    /// When present, TA verifies authenticatorData[9..41] == this value.
+    /// Set to SHA-256(b"kms.aastar.io") for full security; None skips rpId check
+    /// (backwards-compatible default).
+    #[serde(default)]
+    pub rp_id_hash: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
