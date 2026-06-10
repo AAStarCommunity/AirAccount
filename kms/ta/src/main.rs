@@ -25,7 +25,7 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{Error, ErrorKind, Parameters, Random};
+use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random};
 use proto::Command;
 use secure_db::{SecureStorageClient, Storable};
 
@@ -41,6 +41,10 @@ use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
 const JWT_SECRET_STORE_ID: &str = "jwt_hmac";
+
+// RPMB anti-rollback counter object ID (≤64 bytes per GP spec).
+// Written to TEE_STORAGE_PRIVATE_RPMB, NOT the REE-FS filesystem.
+const RPMB_COUNTER_ID: &[u8] = b"kms_arc_v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -279,6 +283,64 @@ impl P256SessionKey {
     }
 }
 
+// ── RPMB Anti-Rollback Counter ──
+//
+// The counter is stored in TEE_STORAGE_PRIVATE_RPMB (0x80000003), backed by the
+// eMMC RPMB partition. This provides hardware-enforced monotonicity: unlike REE-FS,
+// RPMB objects cannot be silently rolled back by restoring the filesystem.
+//
+// TLS safety: TEE_OpenPersistentObject (read) does NOT corrupt TLS; only write
+// syscalls do. Read counter BEFORE any thread_local access; write AFTER save_wallet().
+
+fn rpmb_read_counter() -> Result<u64> {
+    match PersistentObject::open(
+        ObjectStorageConstants::Rpmb,
+        RPMB_COUNTER_ID,
+        DataFlag::ACCESS_READ | DataFlag::SHARE_READ,
+    ) {
+        Ok(obj) => {
+            let mut buf = [0u8; 8];
+            let n = obj.read(&mut buf)?;
+            if n != 8 {
+                return Err(anyhow!("RPMB counter: short read ({} bytes)", n));
+            }
+            Ok(u64::from_be_bytes(buf))
+        }
+        Err(e) => match e.kind() {
+            ErrorKind::ItemNotFound => Ok(0),
+            _ => Err(anyhow!("RPMB counter read failed: {:?}", e)),
+        },
+    }
+}
+
+// Write counter to RPMB. OVERWRITES any existing counter object atomically.
+// Caller MUST ensure no thread_local access follows this call in the same frame.
+fn rpmb_write_counter(value: u64) -> Result<()> {
+    let flags = DataFlag::ACCESS_READ
+        | DataFlag::ACCESS_WRITE
+        | DataFlag::ACCESS_WRITE_META
+        | DataFlag::OVERWRITE;
+    PersistentObject::create(
+        ObjectStorageConstants::Rpmb,
+        RPMB_COUNTER_ID,
+        flags,
+        None,
+        &value.to_be_bytes(),
+    )
+    .map_err(|e| anyhow!("RPMB counter write failed: {:?}", e))?;
+    trace_println!("[+] RPMB anti-rollback counter written: {}", value);
+    Ok(())
+}
+
+// Increment RPMB counter and return the new value.
+// Safe ordering: call rpmb_read_counter() before thread_local access;
+// call rpmb_write_counter() only after save_wallet() (all thread_local done).
+fn rpmb_next_epoch() -> Result<u64> {
+    let current = rpmb_read_counter()?;
+    current.checked_add(1)
+        .ok_or_else(|| anyhow!("RPMB anti-rollback counter overflow"))
+}
+
 /// Save wallet to secure storage AND update cache.
 fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
     // Cache MUST come before db.put: OP-TEE secure storage syscall corrupts TLS,
@@ -459,8 +521,12 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
         ));
     }
 
+    // Read RPMB counter before any thread_local access (reads don't corrupt TLS).
+    let epoch = rpmb_next_epoch()?;
+
     let mut wallet = Wallet::new()?;
     wallet.set_passkey(input.passkey_pubkey.clone());
+    wallet.rollback_epoch = epoch;
     let wallet_id = wallet.get_id();
 
     // Mnemonic never crosses TEE boundary in production.
@@ -473,8 +539,11 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
+    // save_wallet does cache_put (TLS) then db.put (corrupts TLS). After this,
+    // no more thread_local access — safe to call rpmb_write_counter.
     save_wallet(&db_client, &wallet)?;
-    dbg_println!("[+] Wallet saved in secure storage (passkey bound)");
+    rpmb_write_counter(epoch)?;
+    dbg_println!("[+] Wallet saved (passkey bound, RPMB epoch={})", epoch);
 
     Ok(proto::CreateWalletOutput {
         wallet_id,
@@ -484,6 +553,9 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
 
 fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWalletOutput> {
     trace_println!("[+] Removing wallet: {:?}", input.wallet_id);
+
+    // Read RPMB epoch before any thread_local access (read doesn't corrupt TLS).
+    let next_epoch = rpmb_next_epoch()?;
 
     let db_client = SecureStorageClient::open(DB_NAME)?;
 
@@ -495,9 +567,13 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     // Mandatory passkey verification
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
 
+    // delete_entry corrupts TLS; write RPMB counter after.
     db_client.delete_entry::<Wallet>(&input.wallet_id)?;
-    // No cache_remove — borrow_mut panic risk after secure storage write
-    trace_println!("[+] Wallet removed from secure storage (passkey verified)");
+    rpmb_write_counter(next_epoch)?;
+    trace_println!(
+        "[+] Wallet removed (passkey verified, RPMB epoch={})",
+        next_epoch
+    );
 
     Ok(proto::RemoveWalletOutput {})
 }
@@ -615,14 +691,20 @@ fn register_passkey_ta(
         );
     }
 
+    // Read RPMB epoch before load_wallet_cached (which touches thread_local cache).
+    let epoch = rpmb_next_epoch()?;
+
     let mut wallet = load_wallet_cached(&input.wallet_id)?;
     // Verify current passkey before allowing change
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     wallet.set_passkey(input.passkey_pubkey.clone());
+    wallet.rollback_epoch = epoch;
 
     let db = SecureStorageClient::open(DB_NAME)?;
+    // save_wallet does cache_put (TLS) then db.put (corrupts TLS).
     save_wallet(&db, &wallet)?;
-    trace_println!("[+] PassKey registered and wallet saved");
+    rpmb_write_counter(epoch)?;
+    trace_println!("[+] PassKey registered, wallet saved (RPMB epoch={})", epoch);
 
     Ok(proto::RegisterPasskeyTaOutput { registered: true })
 }
@@ -634,6 +716,13 @@ fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOut
         cached: true,
         cache_size: cache_len() as u32,
     })
+}
+
+fn read_rollback_counter(
+    _input: &proto::ReadRollbackCounterInput,
+) -> Result<proto::ReadRollbackCounterOutput> {
+    let counter = rpmb_read_counter()?;
+    Ok(proto::ReadRollbackCounterOutput { counter })
 }
 
 fn agent_derivation_path(agent_index: u32) -> String {
@@ -1489,6 +1578,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::DeleteP256SessionKey => process(serialized_input, delete_p256_session_key),
         Command::SignGrantSession => process(serialized_input, sign_grant_session),
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
+        Command::ReadRollbackCounter => process(serialized_input, read_rollback_counter),
         _ => bail!("Unsupported command"),
     }
 }

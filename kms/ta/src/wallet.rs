@@ -42,6 +42,10 @@ pub struct Wallet {
     cached_account_root: Option<Vec<u8>>,
     /// P-256 passkey public key (65 bytes uncompressed: 0x04 || x || y)
     passkey_pubkey: Option<Vec<u8>>,
+    /// RPMB anti-rollback epoch captured at creation/passkey-registration time.
+    /// 0 = wallet pre-dates anti-rollback feature. Must be last for bincode compat.
+    #[serde(default)]
+    pub rollback_epoch: u64,
 }
 
 impl Storable for Wallet {
@@ -74,6 +78,7 @@ impl Wallet {
             cached_seed: None,
             cached_account_root: None,
             passkey_pubkey: None,
+            rollback_epoch: 0,
         })
     }
 
@@ -281,5 +286,6 @@ impl Drop for Wallet {
         if let Some(ref mut pk) = self.passkey_pubkey {
             pk.iter_mut().for_each(|x| *x = 0);
         }
+        self.rollback_epoch = 0;
     }
 }

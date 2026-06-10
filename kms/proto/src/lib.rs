@@ -44,6 +44,7 @@ pub enum Command {
     DeleteP256SessionKey = 20,
     SignGrantSession = 21,
     SignP256GrantSession = 22,
+    ReadRollbackCounter = 23,
     #[default]
     Unknown,
 }
@@ -91,6 +92,7 @@ mod tests {
         assert_eq!(u32::from(Command::DeleteP256SessionKey), 20);
         assert_eq!(u32::from(Command::SignGrantSession), 21);
         assert_eq!(u32::from(Command::SignP256GrantSession), 22);
+        assert_eq!(u32::from(Command::ReadRollbackCounter), 23);
     }
 
     #[test]
@@ -113,6 +115,10 @@ mod tests {
             Command::from(22u32),
             Command::SignP256GrantSession
         ));
+        assert!(matches!(
+            Command::from(23u32),
+            Command::ReadRollbackCounter
+        ));
     }
 
     #[test]
@@ -125,7 +131,7 @@ mod tests {
     fn command_roundtrip() {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
         let valid_ids: &[u32] = &[
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -724,5 +730,15 @@ mod tests {
         });
         bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: true });
         bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: false });
+    }
+
+    #[test]
+    fn read_rollback_counter_roundtrip() {
+        bincode_roundtrip(&ReadRollbackCounterInput {});
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: 0 });
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: 42 });
+        bincode_roundtrip(&ReadRollbackCounterOutput {
+            counter: u64::MAX,
+        });
     }
 }
