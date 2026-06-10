@@ -1166,6 +1166,10 @@ impl KmsApiServer {
         }
     }
 
+    pub async fn read_rollback_counter(&self) -> Result<u64> {
+        self.tee.read_rollback_counter().await
+    }
+
     pub async fn change_passkey(&self, req: ChangePasskeyRequest) -> Result<ChangePasskeyResponse> {
         println!("📝 KMS ChangePasskey API called for key: {}", req.key_id);
 
@@ -3613,6 +3617,19 @@ async fn handle_queue_status(
     Ok(warp::reply::json(&server.queue_status()))
 }
 
+async fn handle_rollback_counter(
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    #[derive(serde::Serialize)]
+    struct RollbackCounterResponse {
+        counter: u64,
+    }
+    match server.read_rollback_counter().await {
+        Ok(counter) => Ok(warp::reply::json(&RollbackCounterResponse { counter })),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_create_agent_key(
     body: CreateAgentKeyRequest,
     server: Arc<KmsApiServer>,
@@ -4078,6 +4095,13 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
+    // RollbackCounter - GET /RollbackCounter
+    let server_rc = server.clone();
+    let rollback_counter = warp::path("RollbackCounter")
+        .and(warp::get())
+        .and(warp::any().map(move || server_rc.clone()))
+        .and_then(handle_rollback_counter);
+
     // ChangePasskey API (TEE)
     let server_cp = server.clone();
     let change_passkey = warp::path("ChangePasskey")
@@ -4394,6 +4418,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(version)
         .or(key_status)
         .or(queue_status)
+        .or(rollback_counter)
         .or(change_passkey)
         .boxed();
     let group2 = create_key
@@ -4448,6 +4473,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /BeginAuthentication   - WebAuthn authentication challenge");
     println!("   GET  /KeyStatus             - Key derivation status (polling)");
     println!("   GET  /QueueStatus           - TEE queue depth");
+    println!("   GET  /RollbackCounter       - RPMB anti-rollback counter (diagnostic)");
     println!("   GET  /health                - Health check");
     println!("   POST /kms/create-agent-key       - Create AI agent key (WebAuthn)");
     println!("   POST /kms/sign-agent             - Agent sign userOpHash (Bearer JWT)");

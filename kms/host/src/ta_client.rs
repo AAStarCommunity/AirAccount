@@ -785,6 +785,18 @@ impl TeeHandle {
         Ok(output)
     }
 
+    /// Read the current RPMB anti-rollback counter value (diagnostic endpoint).
+    pub async fn read_rollback_counter(&self) -> Result<u64> {
+        let input = bincode::serialize(&proto::ReadRollbackCounterInput {})
+            .context("Failed to serialize ReadRollbackCounterInput")?;
+        let out = self
+            .call(proto::Command::ReadRollbackCounter, input)
+            .await?;
+        let output: proto::ReadRollbackCounterOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize ReadRollbackCounterOutput")?;
+        Ok(output.counter)
+    }
+
     pub async fn create_p256_session_key(
         &self,
         wallet_id: uuid::Uuid,
