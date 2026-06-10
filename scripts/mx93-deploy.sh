@@ -12,8 +12,11 @@
 #   MX93_BOARD_USER  SSH user (default: root)
 #
 # Note: The deployed service is named kms-api.service (not kms-api-server.service).
-# The ExecStartPre guard in the service file handles the 0-byte dirf.db bug that
-# causes TEE_ERROR_CORRUPT_OBJECT (0xffff3025 / 0xf0100001) after eMMC re-flash.
+# dirf-repair.service handles the 0-byte/corrupt dirf.db bug that causes
+# TEE_ERROR_CORRUPT_OBJECT (0xffff3025 / 0xf0100001) after eMMC re-flash.
+# It runs as a separate oneshot unit (not ExecStartPre) to avoid the systemd
+# deadlock that occurs when restarting a Requires= dependency from within the
+# dependent unit's own startup.
 
 set -euo pipefail
 
@@ -27,6 +30,8 @@ BOARD_IP="${MX93_BOARD_IP:-}"
 BOARD_USER="${MX93_BOARD_USER:-root}"
 FIRST_RUN=false
 [[ "${1:-}" == "--first-run" ]] && FIRST_RUN=true
+
+REPAIR_SERVICE_FILE="$PROJECT_ROOT/kms/deploy/mx93/dirf-repair.service"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${BLUE}[mx93-deploy]${NC} $*"; }
@@ -44,6 +49,7 @@ push()  { scp "$1" "${BOARD_USER}@${BOARD_IP}:$2"; }
 [[ -f "$BUILD_OUT/${UUID}.ta" ]]     || die "TA not found at $BUILD_OUT/${UUID}.ta. Run ./scripts/mx93-build.sh first."
 [[ -f "$BUILD_OUT/kms-api-server" ]] || die "CA not found at $BUILD_OUT/kms-api-server. Run ./scripts/mx93-build.sh first."
 [[ -f "$SERVICE_FILE" ]]             || die "Service file not found at $SERVICE_FILE."
+[[ -f "$REPAIR_SERVICE_FILE" ]]      || die "Service file not found at $REPAIR_SERVICE_FILE."
 
 log "Target board: ${BOARD_USER}@${BOARD_IP} (NXP FRDM-IMX93, aarch64)"
 log "TA:  $BUILD_OUT/${UUID}.ta  ($(du -h "$BUILD_OUT/${UUID}.ta" | cut -f1))"
@@ -73,26 +79,28 @@ push "$BUILD_OUT/kms-api-server" "/root/AirAccount/target/release/kms-api-server
 board "chmod +x /root/AirAccount/target/release/kms-api-server"
 ok "CA deployed."
 
-# --- install/update systemd service ---
-# Always update the service file to pick up any ExecStartPre guard changes.
-log "Installing/updating systemd service (kms-api.service)..."
+# --- install/update systemd services ---
+log "Installing/updating systemd services..."
 push "$SERVICE_FILE" "/etc/systemd/system/kms-api.service"
+push "$REPAIR_SERVICE_FILE" "/etc/systemd/system/dirf-repair.service"
 board "systemctl daemon-reload"
 if $FIRST_RUN; then
+    board "systemctl enable dirf-repair.service"
     board "systemctl enable kms-api.service"
-    ok "Service enabled (will start on boot)."
+    ok "Services enabled (will start on boot)."
 fi
-ok "Service file updated."
+ok "Service files updated."
 
-# --- reload TA (restart tee-supplicant) ---
+# --- reload TA (restart tee-supplicant on board, wait there for stability) ---
 log "Reloading TA (restarting tee-supplicant@teepriv0.service)..."
-board "systemctl restart tee-supplicant@teepriv0.service"
-sleep 2
+board "systemctl restart tee-supplicant@teepriv0.service && sleep 2"
 
-# --- start service (ExecStartPre guard runs here) ---
-log "Starting kms-api.service (dirf.db guard will run)..."
+# --- start services (dirf-repair runs first, then kms-api) ---
+log "Starting kms-api.service (dirf-repair.service will run first)..."
 board "systemctl start kms-api.service"
-sleep 3
+# Wait on the board for the service to reach active state (max 15s)
+board "for i in \$(seq 1 15); do systemctl is-active kms-api.service >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1" \
+    || { warn "Service did not become active within 15s"; board "journalctl -u kms-api.service -n 20 --no-pager 2>/dev/null || tail -20 /var/log/kms-api.log" || true; die "Deploy failed"; }
 
 # --- smoke test ---
 log "Smoke test: GET /health"

@@ -1,0 +1,41 @@
+[Unit]
+Description=Repair corrupt dirf.db before KMS API starts
+# This oneshot unit runs BEFORE kms-api.service and has no Requires relationship
+# with tee-supplicant, so it can safely stop/start tee-supplicant without the
+# cyclic-dependency deadlock that ExecStartPre would cause (systemd holds the
+# tee-supplicant unit lock while kms-api.service starts, so restarting it from
+# ExecStartPre blocks on a systemd transaction that never resolves).
+DefaultDependencies=no
+Before=kms-api.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Guard against 0-byte or partially-written dirf.db (< 16 KB).
+# After eMMC re-flash, tee-supplicant may create an empty or truncated dirf.db;
+# OP-TEE treats it as TEE_ERROR_CORRUPT_OBJECT (0xf0100001) and every TA session
+# fails with 0xffff3025. Fix: stop tee-supplicant, delete the bad file, restart
+# it, and poll until a valid (>= 16 KB) file appears.
+ExecStart=/bin/sh -c '\
+  DB=/var/lib/tee/dirf.db; \
+  SIZE=$(stat -c%%s "$DB" 2>/dev/null || echo 0); \
+  if [ "$SIZE" -lt 16384 ]; then \
+    echo "[dirf-repair] dirf.db is $SIZE bytes (expected >= 16384) — repairing"; \
+    systemctl stop tee-supplicant@teepriv0.service || true; \
+    rm -f "$DB"; \
+    systemctl start tee-supplicant@teepriv0.service; \
+    for i in $(seq 1 15); do \
+      SIZE2=$(stat -c%%s "$DB" 2>/dev/null || echo 0); \
+      if [ "$SIZE2" -ge 16384 ]; then \
+        echo "[dirf-repair] Repair OK — dirf.db is now $SIZE2 bytes"; \
+        exit 0; \
+      fi; \
+      sleep 1; \
+    done; \
+    echo "[dirf-repair] ERROR: dirf.db still $SIZE2 bytes after 15 s" >&2; \
+    exit 1; \
+  fi; \
+  echo "[dirf-repair] dirf.db OK ($SIZE bytes)"'
+
+[Install]
+WantedBy=multi-user.target

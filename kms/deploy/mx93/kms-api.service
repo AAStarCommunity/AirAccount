@@ -1,19 +1,18 @@
 [Unit]
 Description=AirAccount KMS API Server
-After=network.target tee-supplicant@teepriv0.service
-Requires=tee-supplicant@teepriv0.service
+# dirf-repair.service must run first: it stops/starts tee-supplicant to repair
+# a corrupt dirf.db. Running that logic in ExecStartPre here would deadlock because
+# systemd holds the tee-supplicant unit lock while starting kms-api.service, and
+# restarting tee-supplicant from ExecStartPre blocks on a transaction that never
+# resolves. The separate oneshot unit avoids this dependency cycle entirely.
+After=network.target tee-supplicant@teepriv0.service dirf-repair.service
+Requires=tee-supplicant@teepriv0.service dirf-repair.service
 
 [Service]
 Environment=KMS_ENABLE_CREATEKEY=1
 Type=simple
 User=root
 WorkingDirectory=/root/AirAccount
-# Guard against 0-byte dirf.db which causes TEE_ERROR_CORRUPT_OBJECT (0xffff3025).
-# After eMMC re-flash, tee-supplicant may create an empty dirf.db; OP-TEE then
-# treats it as a corrupted object store and every TA session fails with 0xf0100001.
-# Solution: detect the empty file, remove it, and restart tee-supplicant so it
-# recreates a valid (non-empty) store before kms-api-server starts.
-ExecStartPre=/bin/sh -c 'if [ -f /var/lib/tee/dirf.db ] && [ ! -s /var/lib/tee/dirf.db ]; then rm -f /var/lib/tee/dirf.db && systemctl restart tee-supplicant@teepriv0.service && sleep 2; fi'
 ExecStart=/root/AirAccount/target/release/kms-api-server
 Restart=on-failure
 RestartSec=5
