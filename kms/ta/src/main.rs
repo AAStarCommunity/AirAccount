@@ -515,6 +515,34 @@ fn verify_passkey_for_wallet(
     let _assertion =
         assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
 
+    // Verify authenticatorData structure (WebAuthn §6.1)
+    if _assertion.authenticator_data.len() < 37 {
+        return Err(anyhow!(
+            "authenticatorData too short: {} bytes (minimum 37)",
+            _assertion.authenticator_data.len()
+        ));
+    }
+
+    // Verify User Presence (UP) flag — bit 0 of flags byte (offset 32)
+    let flags = _assertion.authenticator_data[32];
+    if flags & 0x01 == 0 {
+        return Err(anyhow!(
+            "WebAuthn User Presence flag not set (flags=0x{:02x})",
+            flags
+        ));
+    }
+
+    // Verify rpId hash if provided (authenticatorData[9..41] = SHA-256(rpId))
+    if let Some(expected_rp_id_hash) = &_assertion.rp_id_hash {
+        let actual_rp_id_hash = &_assertion.authenticator_data[9..41];
+        if actual_rp_id_hash != expected_rp_id_hash.as_ref() {
+            return Err(anyhow!(
+                "WebAuthn rpId hash mismatch: TA-side verification failed"
+            ));
+        }
+        trace_println!("[+] rpId hash verified in TA");
+    }
+
     // signature = r(32) || s(32) = 64 bytes
     let mut sig_bytes = [0u8; 64];
     sig_bytes[..32].copy_from_slice(&_assertion.signature_r);
