@@ -1042,8 +1042,14 @@ impl KmsApiServer {
             passkey_public_key: Some(req.passkey_public_key.clone()),
         };
 
-        // Persist to DB
-        self.db.insert_wallet(&WalletRow {
+        // Persist to DB.
+        // H-C: if this insert fails the TA wallet becomes an invisible orphan
+        // (occupies an RPMB slot, unreachable via API). A host-side
+        // compensating delete is impossible — the TA mandates passkey
+        // verification for removal. So: retry the (usually transient) SQLite
+        // failure, and if it still fails, log CRITICAL with the orphan id for
+        // ForceRemoveWallet cleanup (admin command, PR #35).
+        let row = WalletRow {
             key_id: wallet_id.to_string(),
             address: None,
             public_key: None,
@@ -1058,7 +1064,33 @@ impl KmsApiServer {
             status: "deriving".to_string(),
             error_msg: None,
             created_at: now.to_rfc3339(),
-        })?;
+        };
+        let mut insert_result = self.db.insert_wallet(&row);
+        for attempt in 1..=3u64 {
+            if insert_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  CreateKey: DB insert attempt {}/4 failed for {}: {:?}",
+                attempt, wallet_id, insert_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            insert_result = self.db.insert_wallet(&row);
+        }
+        if let Err(e) = insert_result {
+            eprintln!(
+                "🔴 CRITICAL: TA wallet {} created but DB insert failed after retries — \
+                 ORPHAN in TEE storage (no DB row). Clean up via ForceRemoveWallet. \
+                 Error: {:?}",
+                wallet_id, e
+            );
+            return Err(anyhow!(
+                "CreateKey: metadata persistence failed (TEE wallet {} orphaned, \
+                 operator notified): {}",
+                wallet_id,
+                e
+            ));
+        }
 
         // Spawn background address derivation
         let db = self.db.clone();
@@ -1191,7 +1223,7 @@ impl KmsApiServer {
 
         // Resolve current passkey assertion (WebAuthn or legacy hex)
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
             .await?;
 
         // Change passkey in TEE secure storage (TA verifies current passkey first)
@@ -1200,9 +1232,41 @@ impl KmsApiServer {
             .register_passkey_ta(wallet_uuid, &pubkey_bytes, passkey_assertion)
             .await?;
 
-        // Update DB
+        // H-B: the TA has now committed the NEW passkey. If the DB update
+        // below is lost, the DB keeps the OLD pubkey and every subsequent
+        // WebAuthn verification for this wallet fails against the wrong key —
+        // the wallet is effectively locked out. Retry with backoff and log
+        // CRITICAL with the exact recovery SQL if all retries fail.
         let new_pk = format!("0x{}", pubkey_hex);
-        self.db.update_wallet_passkey(&req.key_id, &new_pk, None)?;
+        let mut db_result = Ok(());
+        for attempt in 1..=3 {
+            db_result = self
+                .db
+                .update_wallet_passkey(&req.key_id, &new_pk, None)
+                .map(|_| ());
+            if db_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  ChangePasskey: DB update attempt {}/3 failed for key {}: {:?}",
+                attempt, req.key_id, db_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+        }
+        if let Err(e) = db_result {
+            eprintln!(
+                "🔴 CRITICAL: TA passkey changed but DB update FAILED for key {} — \
+                 WebAuthn for this wallet will verify against a STALE pubkey. \
+                 Manual recovery: UPDATE wallets SET passkey_pubkey='{}' WHERE key_id='{}'; \
+                 error: {:?}",
+                req.key_id, new_pk, req.key_id, e
+            );
+            return Err(anyhow!(
+                "Passkey changed in TEE but metadata update failed — contact operator \
+                 (wallet may not authenticate until DB is repaired): {}",
+                e
+            ));
+        }
 
         Ok(ChangePasskeyResponse {
             key_id: req.key_id,
@@ -1371,6 +1435,68 @@ impl KmsApiServer {
         }
     }
 
+    /// P0-2: strict resolver for the signing / mutating endpoints
+    /// (Sign, SignHash, DeriveAddress, DeleteKey, ChangePasskey).
+    ///
+    /// Two hardenings over `resolve_passkey_assertion`:
+    /// 1. The legacy raw-hex path carries NO challenge binding — a captured
+    ///    assertion is replayable forever. It is rejected here unless
+    ///    `KMS_ALLOW_LEGACY_PASSKEY=1` is set (test environments only).
+    /// 2. If the wallet has a passkey bound, an assertion is REQUIRED at the
+    ///    CA layer (defence in depth). Previously we passed `None` through
+    ///    and relied on the TA alone; every agent/p256/grant endpoint already
+    ///    enforces presence host-side — the core KMS paths now match.
+    ///
+    /// Wallets with no passkey bound (legacy/pre-passkey wallets) still pass
+    /// `None` through; the TA applies its own policy for those.
+    async fn resolve_passkey_assertion_strict(
+        &self,
+        key_id: &str,
+        raw: Option<&PasskeyAssertion>,
+        wa: Option<&WebAuthnAssertion>,
+    ) -> Result<Option<proto::PasskeyAssertion>> {
+        if raw.is_some() && wa.is_none() {
+            let legacy_allowed =
+                std::env::var("KMS_ALLOW_LEGACY_PASSKEY").ok().as_deref() == Some("1");
+            if !legacy_allowed {
+                return Err(anyhow!(
+                    "Legacy raw passkey assertions are not accepted for signing/mutating \
+                     operations (no challenge binding — replayable). Use the WebAuthn \
+                     ceremony via /webauthn/begin-authentication. \
+                     (KMS_ALLOW_LEGACY_PASSKEY=1 re-enables it for test environments only.)"
+                ));
+            }
+            eprintln!(
+                "⚠️  KMS_ALLOW_LEGACY_PASSKEY=1: accepting replayable legacy assertion \
+                 for key_id={} — NEVER enable this in production",
+                key_id
+            );
+        }
+
+        let resolved = self.resolve_passkey_assertion(key_id, raw, wa).await?;
+
+        if resolved.is_none() {
+            // No assertion supplied at all. Only acceptable when the wallet
+            // genuinely has no passkey bound.
+            if let Some(w) = self.db.get_wallet(key_id)? {
+                let has_passkey = w
+                    .passkey_pubkey
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if has_passkey {
+                    return Err(anyhow!(
+                        "Passkey authorization required: key {} has a passkey bound. \
+                         Provide a WebAuthn assertion (begin-authentication ceremony).",
+                        key_id
+                    ));
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
     /// WebAuthn assertion resolver with operation-specific purpose check.
     /// Ensures the challenge was created specifically for the given purpose
     /// (e.g., "grant-session"), preventing cross-operation challenge replay.
@@ -1435,7 +1561,7 @@ impl KmsApiServer {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
             .await?;
         let address_bytes = self
             .tee
@@ -1488,7 +1614,7 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
             .await?;
 
         // Prepare sign payload
@@ -1600,7 +1726,7 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
             .await?;
 
         let signature = self
@@ -1641,14 +1767,43 @@ impl KmsApiServer {
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
             .await?;
         self.tee
             .remove_wallet(wallet_uuid, passkey_assertion)
             .await?;
 
-        // Remove from DB (CASCADE deletes address_index entries)
-        self.db.delete_wallet(&req.key_id)?;
+        // Remove from DB (CASCADE deletes address_index entries).
+        // H-C: the TA wallet is already gone. If this DB delete is lost the
+        // row becomes a "ghost" — later operations on it fail with confusing
+        // TEE errors. Retry, and on persistent failure mark the row instead
+        // of leaving it looking alive.
+        let mut del_result = self.db.delete_wallet(&req.key_id).map(|_| ());
+        for attempt in 1..=3u64 {
+            if del_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  DeleteKey: DB delete attempt {}/4 failed for {}: {:?}",
+                attempt, req.key_id, del_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            del_result = self.db.delete_wallet(&req.key_id).map(|_| ());
+        }
+        if let Err(e) = del_result {
+            // Best effort: flag the ghost row so it doesn't pose as a live key.
+            let _ = self.db.update_wallet_status(
+                &req.key_id,
+                "error",
+                Some("TEE wallet deleted but DB row could not be removed — ghost row"),
+            );
+            eprintln!(
+                "🔴 CRITICAL: TEE wallet {} deleted but DB row removal failed — \
+                 ghost row flagged as 'error'. Manual cleanup: \
+                 DELETE FROM wallets WHERE key_id='{}'; Error: {:?}",
+                req.key_id, req.key_id, e
+            );
+        }
 
         let days = req.pending_window_in_days.unwrap_or(7);
         let deletion_date = Utc::now() + chrono::Duration::days(days as i64);
@@ -3876,6 +4031,9 @@ async fn handle_rejection(
             warp::http::StatusCode::UNAUTHORIZED
         } else if api_error.0.contains("circuit breaker") {
             warp::http::StatusCode::SERVICE_UNAVAILABLE
+        } else if api_error.0.contains("TEE call timeout") {
+            // P0-1: hung TA call — outcome unknown, server-side fault
+            warp::http::StatusCode::GATEWAY_TIMEOUT
         } else if api_error.0.contains("0xffff")
             || api_error.0.contains("panicked")
             || api_error.0.contains("TEE error")
@@ -4014,6 +4172,26 @@ pub async fn start_kms_server() -> Result<()> {
     });
     let db = KmsDb::open(&db_path)?;
     println!("💾 SQLite DB: {}", db_path);
+
+    // M-c: periodic challenge GC. consume_challenge only deletes the consumed
+    // row; unconsumed expired challenges otherwise accumulate forever — the
+    // unauthenticated Begin* endpoints write 1-2 rows each, so without this
+    // the challenges table is an unbounded-growth DoS vector.
+    {
+        let gc_db = db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                tick.tick().await;
+                match gc_db.cleanup_expired_challenges() {
+                    Ok(n) if n > 0 => println!("🧹 Challenge GC: removed {} expired rows", n),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("⚠️  Challenge GC failed: {:?}", e),
+                }
+            }
+        });
+        println!("🧹 Challenge GC: every 600s");
+    }
 
     let server = Arc::new(KmsApiServer::new(db.clone()));
 

@@ -400,6 +400,56 @@ fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
     Ok(())
 }
 
+/// Anti-rollback epoch validation (pure function — unit-testable, H-D):
+///
+///   Normal state:    wallet.rollback_epoch <= rpmb_now        → Ok(false)
+///   Recovery state:  wallet.rollback_epoch == rpmb_now + 1    → Ok(true)
+///     → previous mutation saved wallet (epoch=N+1) but crashed before
+///       rpmb_write_counter(N+1). Caller completes the interrupted write.
+///   Tampered state:  wallet.rollback_epoch > rpmb_now + 1     → Err
+///     → impossible in normal operation; reject hard.
+///
+/// C-2 (counter object absent): if the RPMB counter object does not exist
+/// (eMMC reflash, RPMB key reset, replaced storage) we read 0 with
+/// counter_present=false. A legitimate wallet may still carry epoch=N>1.
+/// Treating that as "tampered" would brick a real wallet. Instead, when the
+/// counter is absent we self-heal: re-initialize the RPMB counter to the
+/// wallet's own epoch (return Ok(true)). Safe because an absent counter means
+/// there is no monotonic baseline to violate — we are establishing one.
+///
+/// TLS ordering contract for the CALLER: a returned `true` means an RPMB
+/// write (rpmb_write_counter, a TEE write that corrupts tpidr_el0) is due —
+/// it must be performed AFTER all thread_local access (cache_put).
+fn epoch_check(
+    epoch: u64,
+    rpmb_now: u64,
+    counter_present: bool,
+    wallet_id: &uuid::Uuid,
+) -> Result<bool> {
+    if epoch == 0 {
+        return Ok(false); // legacy wallet, skip check
+    }
+    if !counter_present {
+        // C-2: counter object missing → no baseline exists. Re-establish it
+        // from this wallet's epoch rather than rejecting a legitimate wallet.
+        trace_println!(
+            "[!] anti-rollback: RPMB counter absent, re-initializing to epoch {} for {:?}",
+            epoch, wallet_id
+        );
+        return Ok(true); // needs RPMB (re-)init write
+    }
+    // saturating_add: rpmb_now == u64::MAX would otherwise overflow-panic in
+    // debug builds (unreachable in practice, but free to harden).
+    let recovery_epoch = rpmb_now.saturating_add(1);
+    if epoch > recovery_epoch {
+        return Err(anyhow!(
+            "anti-rollback: wallet epoch {} > RPMB {}+1 for {:?} — tampered or corrupt",
+            epoch, rpmb_now, wallet_id
+        ));
+    }
+    Ok(epoch == recovery_epoch) // true = needs RPMB recovery write
+}
+
 /// Load wallet + ensure seed cached.
 /// On cache hit with seed already cached: ZERO secure storage I/O.
 ///
@@ -419,54 +469,6 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     // `counter_present == false` means the RPMB counter object is absent
     // (fresh device or post-reflash) — see C-2 handling in epoch_check.
     let (rpmb_now, counter_present) = rpmb_read_counter_ex()?;
-
-    // Anti-rollback epoch validation:
-    //
-    //   Normal state:    wallet.rollback_epoch <= rpmb_now
-    //   Recovery state:  wallet.rollback_epoch == rpmb_now + 1
-    //     → previous mutation saved wallet (epoch=N+1) but crashed before
-    //       rpmb_write_counter(N+1). We complete the interrupted write on load.
-    //   Tampered state:  wallet.rollback_epoch > rpmb_now + 1
-    //     → impossible in normal operation; reject hard.
-    //
-    // C-2 (counter object absent): if the RPMB counter object does not exist
-    // (eMMC reflash, RPMB key reset, replaced storage) we read 0 with
-    // counter_present=false. A legitimate wallet may still carry epoch=N>1.
-    // Treating that as "tampered" would brick a real wallet. Instead, when the
-    // counter is absent we self-heal: re-initialize the RPMB counter to the
-    // wallet's own epoch. This is safe because the counter being absent means
-    // there is no monotonic baseline to violate — we are establishing one.
-    //
-    // TLS ordering: rpmb_write_counter (TEE write) corrupts tpidr_el0; it must
-    // be called AFTER all thread_local access (cache_put). A `needs_recovery`
-    // flag defers it to after cache_put.
-
-    fn epoch_check(
-        epoch: u64,
-        rpmb_now: u64,
-        counter_present: bool,
-        wallet_id: &uuid::Uuid,
-    ) -> Result<bool> {
-        if epoch == 0 {
-            return Ok(false); // legacy wallet, skip check
-        }
-        if !counter_present {
-            // C-2: counter object missing → no baseline exists. Re-establish it
-            // from this wallet's epoch rather than rejecting a legitimate wallet.
-            trace_println!(
-                "[!] anti-rollback: RPMB counter absent, re-initializing to epoch {} for {:?}",
-                epoch, wallet_id
-            );
-            return Ok(true); // needs RPMB (re-)init write
-        }
-        if epoch > rpmb_now + 1 {
-            return Err(anyhow!(
-                "anti-rollback: wallet epoch {} > RPMB {}+1 for {:?} — tampered or corrupt",
-                epoch, rpmb_now, wallet_id
-            ));
-        }
-        Ok(epoch == rpmb_now + 1) // true = needs RPMB recovery write
-    }
 
     // Fast path: cache hit
     if let Some(mut w) = cache_get(wallet_id) {
@@ -528,6 +530,25 @@ fn create() -> optee_utee::Result<()> {
 #[ta_open_session]
 fn open_session(_params: &mut Parameters) -> optee_utee::Result<()> {
     trace_println!("[+] TA open session");
+    // H-A: run the REE-FS → RPMB migration HERE, where no thread_local is
+    // touched afterwards in this entry. On the first boot after upgrade,
+    // open_rpmb_migrating() performs TEE writes (RPMB puts + marker + REE
+    // clear) which corrupt tpidr_el0 — any thread_local access after that in
+    // the SAME entry panics. Handlers (load_wallet_cached, create_wallet,
+    // derive_address_auto) access the thread_local WALLET_CACHE after calling
+    // open_rpmb_migrating, so the migration must already be complete by then.
+    // Post-migration the call is a read-only marker check (TLS-safe).
+    //
+    // A failure here is logged but does NOT fail the session: handlers retry
+    // migration themselves (idempotent, crash-safe), preserving the previous
+    // self-healing behaviour as a fallback.
+    if let Err(e) = SecureStorageClient::open_rpmb_migrating(DB_NAME) {
+        trace_println!(
+            "[!] open_session: RPMB migration attempt failed ({:?}) — \
+             handlers will retry; first command after upgrade may fail once",
+            e
+        );
+    }
     Ok(())
 }
 
@@ -1856,6 +1877,67 @@ fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()
     p2.set_a(output_vec.len() as u32);
 
     Ok(())
+}
+
+// H-D: anti-rollback epoch_check boundary tests. This is the core security
+// decision function for RPMB anti-rollback — pure logic, pinned here against
+// regression. (TA-crate tests follow the eip712.rs convention: compiled under
+// cfg(test), executed when a TA test runner is available.)
+#[cfg(test)]
+mod rollback_tests {
+    use super::epoch_check;
+
+    fn wid() -> uuid::Uuid {
+        uuid::Uuid::from_bytes([0x22; 16])
+    }
+
+    #[test]
+    fn epoch_zero_skips_check() {
+        // legacy wallets (epoch 0) bypass anti-rollback entirely
+        assert!(!epoch_check(0, 0, true, &wid()).unwrap());
+        assert!(!epoch_check(0, 100, true, &wid()).unwrap());
+        assert!(!epoch_check(0, 0, false, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_equal_passes_no_recovery() {
+        assert!(!epoch_check(5, 5, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_behind_counter_passes() {
+        // wallet not mutated recently; counter moved on via other wallets (M-8)
+        assert!(!epoch_check(3, 5, true, &wid()).unwrap());
+        assert!(!epoch_check(1, u64::MAX, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_plus_one_triggers_recovery() {
+        // crash window: wallet saved with N+1 but counter write was interrupted
+        assert!(epoch_check(6, 5, true, &wid()).unwrap());
+        assert!(epoch_check(1, 0, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_plus_two_rejected_as_tampered() {
+        assert!(epoch_check(7, 5, true, &wid()).is_err());
+        assert!(epoch_check(u64::MAX, 5, true, &wid()).is_err());
+    }
+
+    #[test]
+    fn counter_absent_reinitializes_from_wallet_epoch() {
+        // C-2: post-reflash the RPMB counter object is gone; a legitimate
+        // wallet with epoch N must NOT brick — it re-establishes the baseline
+        assert!(epoch_check(5, 0, false, &wid()).unwrap());
+        assert!(epoch_check(u64::MAX, 0, false, &wid()).unwrap());
+    }
+
+    #[test]
+    fn counter_at_max_does_not_overflow() {
+        // saturating_add guard: must not panic in debug builds
+        assert!(!epoch_check(5, u64::MAX, true, &wid()).unwrap());
+        assert!(epoch_check(u64::MAX, u64::MAX - 1, true, &wid()).unwrap());
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/user_ta_header.rs"));
