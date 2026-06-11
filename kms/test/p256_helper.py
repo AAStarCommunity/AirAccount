@@ -50,7 +50,10 @@ def make_assertion(privkey_pem: str):
     private_key = serialization.load_pem_private_key(privkey_pem.encode(), password=None)
 
     # Realistic authenticatorData: rpIdHash(32) + flags(1) + signCount(4) = 37 bytes
-    rp_id_hash = hashlib.sha256(b"localhost").digest()
+    # rpId must match the TA's hardcoded EXPECTED_RP_ID_HASH = SHA-256("aastar.io")
+    # (PR#44 / Issue #39). Using any other rpId makes the TA reject the assertion
+    # with "WebAuthn rpId hash mismatch".
+    rp_id_hash = hashlib.sha256(b"aastar.io").digest()
     flags = bytes([0x05])  # UP=1, UV=1
     sign_count = struct.pack(">I", 1)
     auth_data = rp_id_hash + flags + sign_count
@@ -59,7 +62,7 @@ def make_assertion(privkey_pem: str):
     client_data_json = json.dumps({
         "type": "webauthn.get",
         "challenge": "dGVzdC1jaGFsbGVuZ2U",
-        "origin": "http://localhost:3000"
+        "origin": "https://aastar.io"
     }).encode()
     client_data_hash = hashlib.sha256(client_data_json).digest()
 

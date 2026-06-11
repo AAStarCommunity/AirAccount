@@ -29,6 +29,15 @@ edition = "2018"
 # Allows mnemonic export from CreateWallet and passkey-less ExportPrivateKey.
 export-secrets = []
 
+# Storage backend selector. When enabled, the TA uses REE-FS
+# (TEE_STORAGE_PRIVATE) for all wallet storage and skips every RPMB operation
+# entirely — no anti-rollback counter, no RPMB migration. Use this on hardware
+# whose eMMC RPMB authentication key is NOT programmed (e.g. NXP FRDM-IMX93 out
+# of the box), where any RPMB access faults/kills the TA. When the RPMB key is
+# programmed in production (issue #50), build WITHOUT this feature to get
+# hardware anti-rollback. Default (feature off) = RPMB, matching PR#47.
+ree-fs-only = []
+
 [dependencies]
 libc = { path = "../../../../rust/libc" }
 proto = { path = "../proto" }
