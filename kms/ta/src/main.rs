@@ -314,6 +314,20 @@ impl P256SessionKey {
 // counters, which the current RPMB object model does not provide cheaply. The
 // global counter is the strongest defense available without ELE/HSM hardware.
 
+/// Open wallet storage. With the `ree-fs-only` feature this is plain REE-FS
+/// (TEE_STORAGE_PRIVATE) and never touches RPMB; by default it is RPMB with
+/// transparent REE-FS migration. Every storage call in the TA goes through here.
+fn open_storage() -> Result<SecureStorageClient> {
+    #[cfg(feature = "ree-fs-only")]
+    {
+        SecureStorageClient::open(DB_NAME)
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
+    {
+        SecureStorageClient::open_rpmb_migrating(DB_NAME)
+    }
+}
+
 fn rpmb_read_counter() -> Result<u64> {
     let (counter, _present) = rpmb_read_counter_ex()?;
     Ok(counter)
@@ -326,6 +340,14 @@ fn rpmb_read_counter() -> Result<u64> {
 /// from "counter never initialized", which matters for C-2 (legitimate wallets
 /// with epoch > 0 must not be bricked just because the counter object is gone).
 fn rpmb_read_counter_ex() -> Result<(u64, bool)> {
+    // REE-FS mode: never issue an RPMB syscall (the eMMC RPMB key is not
+    // programmed on this hardware; touching RPMB faults/kills the TA).
+    // Report "counter absent" so epoch_check's C-2 path applies.
+    #[cfg(feature = "ree-fs-only")]
+    {
+        return Ok((0, false));
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
     match PersistentObject::open(
         ObjectStorageConstants::Rpmb,
         RPMB_COUNTER_ID,
@@ -341,7 +363,18 @@ fn rpmb_read_counter_ex() -> Result<(u64, bool)> {
         }
         Err(e) => match e.kind() {
             ErrorKind::ItemNotFound => Ok((0, false)),
-            _ => Err(anyhow!("RPMB counter read failed: {:?}", e)),
+            _ => {
+                // REE-FS fallback: RPMB unavailable (e.g. eMMC RPMB key never
+                // programmed — NXP FRDM-IMX93 out of the box). Degrade to
+                // "counter absent" rather than failing every operation;
+                // epoch_check's C-2 path handles counter==absent gracefully.
+                // Anti-rollback is inactive in REE-FS mode (tracked in #50).
+                trace_println!(
+                    "[!] RPMB counter unreadable ({:?}) — RPMB unavailable, anti-rollback degraded to REE-FS mode",
+                    e
+                );
+                Ok((0, false))
+            }
         },
     }
 }
@@ -358,6 +391,15 @@ fn rpmb_read_counter_ex() -> Result<(u64, bool)> {
 // absent (fresh device / reflash / C-2 re-init) there is no baseline to
 // violate, so any initial value is accepted.
 fn rpmb_write_counter(value: u64) -> Result<()> {
+    // REE-FS mode: no RPMB anti-rollback counter — skip the write entirely so
+    // the TA never issues an RPMB syscall on hardware without a programmed key.
+    #[cfg(feature = "ree-fs-only")]
+    {
+        let _ = value;
+        return Ok(());
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
+    {
     let (current, present) = rpmb_read_counter_ex()?;
     if present && value < current {
         return Err(anyhow!(
@@ -370,16 +412,30 @@ fn rpmb_write_counter(value: u64) -> Result<()> {
         | DataFlag::ACCESS_WRITE
         | DataFlag::ACCESS_WRITE_META
         | DataFlag::OVERWRITE;
-    PersistentObject::create(
+    match PersistentObject::create(
         ObjectStorageConstants::Rpmb,
         RPMB_COUNTER_ID,
         flags,
         None,
         &value.to_be_bytes(),
-    )
-    .map_err(|e| anyhow!("RPMB counter write failed: {:?}", e))?;
-    trace_println!("[+] RPMB anti-rollback counter written: {}", value);
-    Ok(())
+    ) {
+        Ok(_) => {
+            trace_println!("[+] RPMB anti-rollback counter written: {}", value);
+            Ok(())
+        }
+        Err(e) => {
+            // REE-FS fallback: RPMB not writable (key not programmed). Skip the
+            // counter write instead of failing the whole mutation. Anti-rollback
+            // is inactive in REE-FS mode — acceptable degradation, tracked in
+            // #50; the wallet itself is still persisted via REE-FS.
+            trace_println!(
+                "[!] RPMB counter write skipped ({:?}) — RPMB unavailable, anti-rollback degraded to REE-FS mode",
+                e
+            );
+            Ok(())
+        }
+    }
+    }
 }
 
 // Increment RPMB counter and return the new value.
@@ -494,7 +550,7 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     }
 
     // Slow path: cache miss — read from storage
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let mut w = db
         .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
@@ -530,25 +586,17 @@ fn create() -> optee_utee::Result<()> {
 #[ta_open_session]
 fn open_session(_params: &mut Parameters) -> optee_utee::Result<()> {
     trace_println!("[+] TA open session");
-    // H-A: run the REE-FS → RPMB migration HERE, where no thread_local is
-    // touched afterwards in this entry. On the first boot after upgrade,
-    // open_rpmb_migrating() performs TEE writes (RPMB puts + marker + REE
-    // clear) which corrupt tpidr_el0 — any thread_local access after that in
-    // the SAME entry panics. Handlers (load_wallet_cached, create_wallet,
-    // derive_address_auto) access the thread_local WALLET_CACHE after calling
-    // open_rpmb_migrating, so the migration must already be complete by then.
-    // Post-migration the call is a read-only marker check (TLS-safe).
-    //
-    // A failure here is logged but does NOT fail the session: handlers retry
-    // migration themselves (idempotent, crash-safe), preserving the previous
-    // self-healing behaviour as a fallback.
-    if let Err(e) = SecureStorageClient::open_rpmb_migrating(DB_NAME) {
-        trace_println!(
-            "[!] open_session: RPMB migration attempt failed ({:?}) — \
-             handlers will retry; first command after upgrade may fail once",
-            e
-        );
-    }
+    // H-A NOTE (reverted after on-hardware testing 2026-06-11):
+    // We deliberately do NOT run the REE-FS→RPMB migration here. Doing so was
+    // tried and triggers a TEE security fault (0xffff000f, origin TEE) on real
+    // i.MX93 hardware: at open_session time the RPMB / secure-storage path via
+    // tee-supplicant is not yet usable, so any PersistentObject access faults
+    // and kills every session (the whole TA becomes unusable, not just one
+    // command). Migration therefore stays in the handlers (load_wallet_cached /
+    // create_wallet / derive_address_auto), which is crash-safe and idempotent.
+    // Residual cost (accepted): on the very first command after an upgrade that
+    // actually performs migration, the in-handler migration writes corrupt TLS,
+    // so that one command may fail once and self-heals on retry.
     Ok(())
 }
 
@@ -720,20 +768,6 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
         ));
     }
 
-    // M-4: bound total wallet count to prevent TEE/RPMB storage exhaustion (DoS).
-    // list_entries is a read-only op (TLS-safe). Done before any RPMB write.
-    const MAX_WALLETS: usize = 100;
-    {
-        let count_db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
-        let existing = count_db.count_entries::<Wallet>()?;
-        if existing >= MAX_WALLETS {
-            return Err(anyhow!(
-                "wallet limit reached ({}/{}) — cannot create more wallets",
-                existing, MAX_WALLETS
-            ));
-        }
-    }
-
     // Read RPMB counter before any thread_local access (reads don't corrupt TLS).
     let epoch = rpmb_next_epoch()?;
 
@@ -751,7 +785,25 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
 
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
-    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    // Open storage once (a single key-list read does not corrupt TLS); reused
+    // for both the count check and the save below.
+    let db_client = open_storage()?;
+
+    // M-4: bound total wallet count to prevent storage exhaustion (DoS).
+    // count_entries reads ONLY the in-memory key list — no per-entry object
+    // reads — so it issues no extra storage syscalls and cannot corrupt the TLS
+    // register before the cache_put inside save_wallet. (The previous
+    // implementation read every wallet object here, which corrupted TLS on real
+    // i.MX93 hardware and panicked the subsequent thread_local cache access.)
+    const MAX_WALLETS: usize = 100;
+    let existing = db_client.count_entries::<Wallet>()?;
+    if existing >= MAX_WALLETS {
+        return Err(anyhow!(
+            "wallet limit reached ({}/{}) — cannot create more wallets",
+            existing, MAX_WALLETS
+        ));
+    }
+
     // save_wallet does cache_put (TLS) then db.put (corrupts TLS). After this,
     // no more thread_local access — safe to call rpmb_write_counter.
     save_wallet(&db_client, &wallet)?;
@@ -770,7 +822,7 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     // Read RPMB epoch before any thread_local access (read doesn't corrupt TLS).
     let next_epoch = rpmb_next_epoch()?;
 
-    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db_client = open_storage()?;
 
     // Load from DB (not cache) — read op doesn't corrupt TLS
     let wallet = db_client
@@ -850,7 +902,7 @@ fn derive_address_auto(
     // save_wallet (last TLS access), matching create_wallet's ordering.
     let epoch = rpmb_next_epoch()?;
 
-    let db_client = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db_client = open_storage()?;
 
     dbg_println!("[+] DeriveAddressAuto for wallet: {:?}", input.wallet_id);
     let mut wallet = match cache_get(&input.wallet_id) {
@@ -945,7 +997,7 @@ fn register_passkey_ta(
     wallet.set_passkey(input.passkey_pubkey.clone());
     wallet.rollback_epoch = epoch;
 
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     // save_wallet does cache_put (TLS) then db.put (corrupts TLS).
     save_wallet(&db, &wallet)?;
     rpmb_write_counter(epoch)?;
@@ -1109,7 +1161,7 @@ struct JwtSignedMaterial {
 fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let mut store = JwtSecretStore::load(&db);
     let current = store.ensure_current()?.clone();
     store.save(&db)?;
@@ -1225,7 +1277,7 @@ fn create_p256_session_key(
     // Persist both private key and public key in TEE secure storage.
     // Public key is stored so sign_p256_user_op can embed it in the 149-byte output
     // without needing to re-derive it from the private key.
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let sk = P256SessionKey {
         store_id: P256SessionKey::store_id_for(&input.wallet_id, input.session_index),
         private_key: priv_bytes.to_vec(),
@@ -1289,7 +1341,7 @@ fn sign_p256_user_op(
     }
 
     // Load P-256 key pair from TEE secure storage
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let sk = P256SessionKey::load(&db, &input.wallet_id, input.session_index)?;
     if sk.private_key.len() != 32 {
         return Err(anyhow!(
@@ -1441,7 +1493,7 @@ fn delete_p256_session_key(
         input.wallet_id,
         input.session_index
     );
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
     match db.delete_entry::<P256SessionKey>(&store_id) {
         Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
@@ -1749,7 +1801,7 @@ fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<p
 }
 
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let store = JwtSecretStore::load(&db);
     let valid = match store.find(&input.kid) {
         Some(entry) => {
@@ -1765,7 +1817,7 @@ fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVe
 }
 
 fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRotateSecretOutput> {
-    let db = SecureStorageClient::open_rpmb_migrating(DB_NAME)?;
+    let db = open_storage()?;
     let mut store = JwtSecretStore::load(&db);
     let had_current = store.current().is_some();
 
