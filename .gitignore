@@ -59,10 +59,13 @@ out/
 
 # Environment variables
 .env
+.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+# Test keypairs (contain EC private key scalars — must never be committed)
+.env.kms-test
 
 # Local development
 .local/

@@ -528,8 +528,9 @@ pub struct SignMicropaymentVoucherRequest {
     /// Cumulative amount (decimal or 0x… hex, up to uint256)
     #[serde(rename = "cumulativeAmount")]
     pub cumulative_amount: String,
-    #[serde(rename = "passkeyAssertion", default)]
-    pub passkey_assertion: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 /// `POST /kms/SignGTokenAuthorization`
@@ -557,8 +558,9 @@ pub struct SignGTokenAuthorizationRequest {
     pub valid_before: String,
     /// 32-byte random nonce (0x…)
     pub nonce: String,
-    #[serde(rename = "passkeyAssertion", default)]
-    pub passkey_assertion: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 /// `POST /kms/SignX402Payment`
@@ -583,8 +585,9 @@ pub struct SignX402PaymentRequest {
     pub recipient: String,
     /// Deadline Unix timestamp (decimal or 0x… hex)
     pub deadline: String,
-    #[serde(rename = "passkeyAssertion", default)]
-    pub passkey_assertion: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
 // P2 responses share the same shape as SignTypedDataResponse
@@ -770,60 +773,6 @@ pub struct SignP256UserOpResponse {
     pub pub_key_y: String,
     /// Hex-encoded 149-byte wire format: [0x08][account(20)][keyX(32)][keyY(32)][r(32)][s(32)]
     pub signature: String,
-}
-
-fn parse_hex_address(hex_str: &str) -> Result<[u8; 20]> {
-    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-        .map_err(|e| anyhow!("Invalid address hex '{}': {}", hex_str, e))?;
-    if bytes.len() != 20 {
-        return Err(anyhow!("Address must be 20 bytes, got {}", bytes.len()));
-    }
-    let mut arr = [0u8; 20];
-    arr.copy_from_slice(&bytes);
-    Ok(arr)
-}
-
-fn parse_hex_bytes32(hex_str: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-        .map_err(|e| anyhow!("Invalid bytes32 hex '{}': {}", hex_str, e))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!("bytes32 must be exactly 32 bytes, got {}", bytes.len()));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(arr)
-}
-
-fn parse_uint_str(s: &str) -> Result<Vec<u8>> {
-    if s.is_empty() {
-        return Err(anyhow!("uint value must not be empty"));
-    }
-    if s.starts_with("0x") {
-        let hex_part = s.trim_start_matches("0x");
-        // "0x" alone with no digits is ambiguous — require at least one hex digit
-        if hex_part.is_empty() {
-            return Err(anyhow!("uint hex must have at least one digit after '0x' (use '0x0' for zero)"));
-        }
-        // hex::decode requires even-length strings; left-pad odd-length with "0"
-        let padded;
-        let hex_to_decode = if hex_part.len() % 2 != 0 {
-            padded = format!("0{}", hex_part);
-            padded.as_str()
-        } else {
-            hex_part
-        };
-        let bytes = hex::decode(hex_to_decode)
-            .map_err(|e| anyhow!("Invalid uint hex '{}': {}", s, e))?;
-        if bytes.len() > 32 {
-            return Err(anyhow!("uint value exceeds uint256 (32 bytes): got {} bytes", bytes.len()));
-        }
-        Ok(bytes)
-    } else {
-        // Decimal string — support up to u128 (covers uint8–uint128 and typical token amounts)
-        let n: u128 = s.parse()
-            .map_err(|_| anyhow!("Invalid uint decimal '{}' (only values up to 2^128-1 are supported as decimal; use 0x prefix for uint256)", s))?;
-        Ok(n.to_be_bytes().to_vec())
-    }
 }
 
 /// Parse compound agent keyId "wallet_uuid:agent_index"
@@ -2607,160 +2556,104 @@ impl KmsApiServer {
         })
     }
 
-    pub async fn sign_micropayment_voucher(&self, req: SignMicropaymentVoucherRequest) -> Result<SignTypedDataResponse> {
-        let wallet_id = Self::validate_key_id(&req.key_id)?;
-        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
+    // P2 convenience signers build a fixed EIP-712 struct in the host and delegate to
+    // sign_typed_data(), inheriting its auth gate (Bearer agent-JWT OR replay-protected
+    // WebAuthn ceremony; legacy raw passkey is rejected). They add no new TA command.
 
-        let verifying_contract = parse_hex_address(&req.verifying_contract)?;
-        let channel_id_bytes = parse_hex_bytes32(&req.channel_id)?;
-        let cumulative_amount_bytes = parse_uint_str(&req.cumulative_amount)?;
-
-        let domain = proto::Eip712Domain {
-            name: Some("MicroPaymentChannel".to_string()),
-            version: Some("1".to_string()),
-            chain_id: Some(req.chain_id),
-            verifying_contract: Some(verifying_contract),
-        };
-        let types = vec![proto::Eip712TypeDef {
-            name: "Voucher".to_string(),
-            fields: vec![
-                proto::Eip712TypeField { name: "channelId".to_string(), field_type: "bytes32".to_string() },
-                proto::Eip712TypeField { name: "cumulativeAmount".to_string(), field_type: "uint256".to_string() },
-            ],
-        }];
-        let message = vec![
-            proto::Eip712FieldValue { name: "channelId".to_string(), value: proto::Eip712Value::Bytes32(channel_id_bytes) },
-            proto::Eip712FieldValue { name: "cumulativeAmount".to_string(), value: proto::Eip712Value::Uint(cumulative_amount_bytes) },
-        ];
-
-        let output = self.tee.sign_typed_data(proto::SignTypedDataInput {
-            wallet_id,
-            hd_path: req.hd_path.clone(),
-            domain,
+    pub async fn sign_micropayment_voucher(&self, bearer: Option<String>, req: SignMicropaymentVoucherRequest) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
+            key_id: req.key_id,
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("MicroPaymentChannel".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.verifying_contract),
+            },
             primary_type: "Voucher".to_string(),
-            types,
-            message,
-            passkey_assertion,
-            jwt_kid: None,
-            jwt_signing_input: None,
-            jwt_hmac: None,
-        }).await?;
-
-        println!("✅ SignMicropaymentVoucher: keyId={}", req.key_id);
-        Ok(SignTypedDataResponse {
-            key_id: req.key_id,
-            signature: format!("0x{}", hex::encode(&output.signature)),
-        })
+            types: vec![JsonEip712TypeDef {
+                name: "Voucher".to_string(),
+                fields: vec![
+                    JsonEip712TypeField { name: "channelId".to_string(), field_type: "bytes32".to_string() },
+                    JsonEip712TypeField { name: "cumulativeAmount".to_string(), field_type: "uint256".to_string() },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue { name: "channelId".to_string(), value: serde_json::Value::String(req.channel_id) },
+                JsonEip712FieldValue { name: "cumulativeAmount".to_string(), value: serde_json::Value::String(req.cumulative_amount) },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
     }
 
-    pub async fn sign_gtoken_authorization(&self, req: SignGTokenAuthorizationRequest) -> Result<SignTypedDataResponse> {
-        let wallet_id = Self::validate_key_id(&req.key_id)?;
-        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
-
-        let verifying_contract = parse_hex_address(&req.gtoken_address)?;
-        let from_bytes = parse_hex_address(&req.from)?;
-        let to_bytes = parse_hex_address(&req.to)?;
-        let value_bytes = parse_uint_str(&req.value)?;
-        let valid_after_bytes = parse_uint_str(&req.valid_after)?;
-        let valid_before_bytes = parse_uint_str(&req.valid_before)?;
-        let nonce_bytes = parse_hex_bytes32(&req.nonce)?;
-
-        let domain = proto::Eip712Domain {
-            name: Some("GToken".to_string()),
-            version: Some("1".to_string()),
-            chain_id: Some(req.chain_id),
-            verifying_contract: Some(verifying_contract),
-        };
-        let types = vec![proto::Eip712TypeDef {
-            name: "TransferWithAuthorization".to_string(),
-            fields: vec![
-                proto::Eip712TypeField { name: "from".to_string(), field_type: "address".to_string() },
-                proto::Eip712TypeField { name: "to".to_string(), field_type: "address".to_string() },
-                proto::Eip712TypeField { name: "value".to_string(), field_type: "uint256".to_string() },
-                proto::Eip712TypeField { name: "validAfter".to_string(), field_type: "uint256".to_string() },
-                proto::Eip712TypeField { name: "validBefore".to_string(), field_type: "uint256".to_string() },
-                proto::Eip712TypeField { name: "nonce".to_string(), field_type: "bytes32".to_string() },
-            ],
-        }];
-        let message = vec![
-            proto::Eip712FieldValue { name: "from".to_string(), value: proto::Eip712Value::Address(from_bytes) },
-            proto::Eip712FieldValue { name: "to".to_string(), value: proto::Eip712Value::Address(to_bytes) },
-            proto::Eip712FieldValue { name: "value".to_string(), value: proto::Eip712Value::Uint(value_bytes) },
-            proto::Eip712FieldValue { name: "validAfter".to_string(), value: proto::Eip712Value::Uint(valid_after_bytes) },
-            proto::Eip712FieldValue { name: "validBefore".to_string(), value: proto::Eip712Value::Uint(valid_before_bytes) },
-            proto::Eip712FieldValue { name: "nonce".to_string(), value: proto::Eip712Value::Bytes32(nonce_bytes) },
-        ];
-
-        let output = self.tee.sign_typed_data(proto::SignTypedDataInput {
-            wallet_id,
-            hd_path: req.hd_path.clone(),
-            domain,
+    pub async fn sign_gtoken_authorization(&self, bearer: Option<String>, req: SignGTokenAuthorizationRequest) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
+            key_id: req.key_id,
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("GToken".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.gtoken_address),
+            },
             primary_type: "TransferWithAuthorization".to_string(),
-            types,
-            message,
-            passkey_assertion,
-            jwt_kid: None,
-            jwt_signing_input: None,
-            jwt_hmac: None,
-        }).await?;
-
-        println!("✅ SignGTokenAuthorization: keyId={}", req.key_id);
-        Ok(SignTypedDataResponse {
-            key_id: req.key_id,
-            signature: format!("0x{}", hex::encode(&output.signature)),
-        })
+            types: vec![JsonEip712TypeDef {
+                name: "TransferWithAuthorization".to_string(),
+                fields: vec![
+                    JsonEip712TypeField { name: "from".to_string(), field_type: "address".to_string() },
+                    JsonEip712TypeField { name: "to".to_string(), field_type: "address".to_string() },
+                    JsonEip712TypeField { name: "value".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField { name: "validAfter".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField { name: "validBefore".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField { name: "nonce".to_string(), field_type: "bytes32".to_string() },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue { name: "from".to_string(), value: serde_json::Value::String(req.from) },
+                JsonEip712FieldValue { name: "to".to_string(), value: serde_json::Value::String(req.to) },
+                JsonEip712FieldValue { name: "value".to_string(), value: serde_json::Value::String(req.value) },
+                JsonEip712FieldValue { name: "validAfter".to_string(), value: serde_json::Value::String(req.valid_after) },
+                JsonEip712FieldValue { name: "validBefore".to_string(), value: serde_json::Value::String(req.valid_before) },
+                JsonEip712FieldValue { name: "nonce".to_string(), value: serde_json::Value::String(req.nonce) },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
     }
 
-    pub async fn sign_x402_payment(&self, req: SignX402PaymentRequest) -> Result<SignTypedDataResponse> {
-        let wallet_id = Self::validate_key_id(&req.key_id)?;
-        let passkey_assertion = Self::parse_passkey_assertion(req.passkey_assertion.as_ref())?;
-
-        let verifying_contract = parse_hex_address(&req.verifying_contract)?;
-        let payment_id_bytes = parse_hex_bytes32(&req.payment_id)?;
-        let amount_bytes = parse_uint_str(&req.amount)?;
-        let recipient_bytes = parse_hex_address(&req.recipient)?;
-        let deadline_bytes = parse_uint_str(&req.deadline)?;
-
-        let domain = proto::Eip712Domain {
-            name: Some("SuperPaymaster".to_string()),
-            version: Some("1".to_string()),
-            chain_id: Some(req.chain_id),
-            verifying_contract: Some(verifying_contract),
-        };
-        let types = vec![proto::Eip712TypeDef {
-            name: "PaymentPayload".to_string(),
-            fields: vec![
-                proto::Eip712TypeField { name: "paymentId".to_string(), field_type: "bytes32".to_string() },
-                proto::Eip712TypeField { name: "amount".to_string(), field_type: "uint256".to_string() },
-                proto::Eip712TypeField { name: "recipient".to_string(), field_type: "address".to_string() },
-                proto::Eip712TypeField { name: "deadline".to_string(), field_type: "uint256".to_string() },
-            ],
-        }];
-        let message = vec![
-            proto::Eip712FieldValue { name: "paymentId".to_string(), value: proto::Eip712Value::Bytes32(payment_id_bytes) },
-            proto::Eip712FieldValue { name: "amount".to_string(), value: proto::Eip712Value::Uint(amount_bytes) },
-            proto::Eip712FieldValue { name: "recipient".to_string(), value: proto::Eip712Value::Address(recipient_bytes) },
-            proto::Eip712FieldValue { name: "deadline".to_string(), value: proto::Eip712Value::Uint(deadline_bytes) },
-        ];
-
-        let output = self.tee.sign_typed_data(proto::SignTypedDataInput {
-            wallet_id,
-            hd_path: req.hd_path.clone(),
-            domain,
-            primary_type: "PaymentPayload".to_string(),
-            types,
-            message,
-            passkey_assertion,
-            jwt_kid: None,
-            jwt_signing_input: None,
-            jwt_hmac: None,
-        }).await?;
-
-        println!("✅ SignX402Payment: keyId={}", req.key_id);
-        Ok(SignTypedDataResponse {
+    pub async fn sign_x402_payment(&self, bearer: Option<String>, req: SignX402PaymentRequest) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
             key_id: req.key_id,
-            signature: format!("0x{}", hex::encode(&output.signature)),
-        })
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("SuperPaymaster".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.verifying_contract),
+            },
+            primary_type: "PaymentPayload".to_string(),
+            types: vec![JsonEip712TypeDef {
+                name: "PaymentPayload".to_string(),
+                fields: vec![
+                    JsonEip712TypeField { name: "paymentId".to_string(), field_type: "bytes32".to_string() },
+                    JsonEip712TypeField { name: "amount".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField { name: "recipient".to_string(), field_type: "address".to_string() },
+                    JsonEip712TypeField { name: "deadline".to_string(), field_type: "uint256".to_string() },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue { name: "paymentId".to_string(), value: serde_json::Value::String(req.payment_id) },
+                JsonEip712FieldValue { name: "amount".to_string(), value: serde_json::Value::String(req.amount) },
+                JsonEip712FieldValue { name: "recipient".to_string(), value: serde_json::Value::String(req.recipient) },
+                JsonEip712FieldValue { name: "deadline".to_string(), value: serde_json::Value::String(req.deadline) },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
     }
 
     pub async fn sign_grant_session(
@@ -4204,34 +4097,41 @@ async fn handle_sign_typed_data(
     }
 }
 
+fn strip_bearer(auth_header: Option<String>) -> Option<String> {
+    auth_header.and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string()))
+}
+
 async fn handle_sign_micropayment_voucher(
+    auth_header: Option<String>,
     body: SignMicropaymentVoucherRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_micropayment_voucher(body).await {
+    match server.sign_micropayment_voucher(strip_bearer(auth_header), body).await {
         Ok(r) => { println!("✅ SignMicropaymentVoucher OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
         Err(e) => { eprintln!("SignMicropaymentVoucher error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
     }
 }
 
 async fn handle_sign_gtoken_authorization(
+    auth_header: Option<String>,
     body: SignGTokenAuthorizationRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_gtoken_authorization(body).await {
+    match server.sign_gtoken_authorization(strip_bearer(auth_header), body).await {
         Ok(r) => { println!("✅ SignGTokenAuthorization OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
         Err(e) => { eprintln!("SignGTokenAuthorization error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
     }
 }
 
 async fn handle_sign_x402_payment(
+    auth_header: Option<String>,
     body: SignX402PaymentRequest,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_x402_payment(body).await {
+    match server.sign_x402_payment(strip_bearer(auth_header), body).await {
         Ok(r) => { println!("✅ SignX402Payment OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
         Err(e) => { eprintln!("SignX402Payment error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
     }
@@ -4834,6 +4734,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server_smv.clone()))
         .and_then(handle_sign_micropayment_voucher);
@@ -4844,6 +4745,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server_sga.clone()))
         .and_then(handle_sign_gtoken_authorization);
@@ -4854,6 +4756,7 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
         .and(aws_kms_body())
         .and(warp::any().map(move || server_sx4.clone()))
         .and_then(handle_sign_x402_payment);
