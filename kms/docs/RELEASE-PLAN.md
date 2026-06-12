@@ -27,7 +27,19 @@
 | MX93 部署基线（TRNG/超时/部署文档） | PR #35 | 待合并 |
 | Apache 2.0 license / CLA | PR #33 / #2 | 待合并 |
 
-**PR 处置**：#43/#44/#45/#46/#47 关闭（内容已在 fix/review-bugfix），由 fix/review-bugfix 开**一个统一 PR** 取代；#35 合并；#33/#2 合并。
+### 评估后**提前到 Beta2**（避免发布后返工）
+
+| 内容 | 来源 | 为什么提前 |
+|------|------|-----------|
+| **#41 ForceRemoveWallet**（孤儿清理） | **已在 #35**（commit b74b5f1, `ForceRemoveWallet=23`） | 随 #35 自动进 Beta2 ✓ 无额外成本 |
+| **#6 P2 便利签名器**（SignMicropaymentVoucher / X402 / Authorization） | `feat/p2-sp-signers`（已实现，待 rebase + 测试） | SuperPaymaster v5.3.3 已 landed；不带则 app 集成新 SDK 缺端点 → 被迫发 Beta2.x。已实现只需 rebase，低成本 |
+| **#21 EIP-712 domain = aastar.io** | 随 P2 signers 顺便对齐 | 域名一步到位，避免后续再改 |
+
+注：#6 **P1 `SignTypedData` 已在 main**，Beta2 自带通用 EIP-712 能力（可签任意 typed-data，包括 voucher/x402/GToken，caller 自拼）。P2 只是便利封装（KMS 内部构造），是 DX 优化非功能缺失，但提前可省一次发布。
+
+**待开发/测试**（Beta2 发布前完成）：rebase `feat/p2-sp-signers` → fix/review-bugfix（注意命令 ID 不与现有冲突），补 P2 端点的真机 E2E。
+
+**PR 处置**：#43/#44/#45/#46/#47 关闭（内容已在 fix/review-bugfix），由 fix/review-bugfix 开**一个统一 PR** 取代；#35 合并；#33/#2 合并；P2 signers rebase 进同分支。
 
 ---
 
@@ -35,11 +47,9 @@
 
 | Issue | 内容 | 优先级 |
 |-------|------|--------|
-| **#49** | WebAuthn challenge binding（H-2 重放攻击）— 若 Beta2 来得及则提前 | **High** |
+| **#49** | WebAuthn challenge binding（H-2 重放攻击）— 协议改动大（GetChallenge+nonce），若 Beta2 来得及则提前，否则 Beta3，**主网前必须** | **High** |
+| **#6 P3** | SuperPaymaster UserOp v0.7 paymaster Sepolia E2E（需外部测试环境，不阻塞核心） | P1 生态 |
 | #15 | TA 侧 JWT exp 检查（相对 TTL + TEE 时间） | P1 |
-| #41 | ForceRemoveWallet — 清理 gap key TEE 孤儿 | P1 |
-| #6 | SuperPaymaster v5.3.3 对齐（P3 Sepolia E2E） | P1 生态 |
-| #21 | EIP-712 domain 对齐 aastar.io（依赖 p2-sp-signers 落 main） | P2 |
 | #42 | 密钥生命周期管理 Phase 1（last_used_at + 状态字段） | P2 |
 
 ---
