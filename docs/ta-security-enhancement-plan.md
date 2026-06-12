@@ -1,6 +1,293 @@
 # TA安全增强计划
 
-*创建时间: 2025-09-29*
+*创建时间: 2025-09-29 | 最后更新: 2026-06-07*
+
+---
+
+## 2026-06-07 — MX93 实机测试报告 & 预装 TA 分析
+
+### E2E 测试结果（两次独立运行，结果一致）
+
+**目标**: https://kms.aastar.io（NXP FRDM-IMX93, OP-TEE 4.8, ta_mode=real）
+
+| 分类 | 通过 | 失败 |
+|------|------|------|
+| api | 25 | 1 |
+| consistency | 4 | 0 |
+| crypto | 7 | 0 |
+| security | 16 | 0 |
+| **合计** | **52** | **1** |
+
+唯一失败：`GET /stats` 路由缺失（已在 2026-06-07 同日修复，见下方 GET /stats 设计节）。
+
+**本次修复部署**：`POST /DeleteKey` warp 路由之前要求 header `TrentService.ScheduleKeyDeletion`，
+而所有客户端发送的是 `TrentService.DeleteKey`，导致 HTTP 500 无日志。
+已修复为同时接受两个值，并在板子上原生编译（aarch64, 3m27s）、systemd 重启，修复生效。
+
+### MX93 预装 TA（27 个 + 我们自己 = 28 个）
+
+板子路径：`/lib/optee_armtz/`（OP-TEE 4.8 Yocto 镜像随附）
+
+#### 可借鉴（7 个，与 AirAccount 直接相关）
+
+| UUID（前8位） | TA 名称 | 对 AirAccount 的价值 |
+|-------------|--------|-------------------|
+| `528938ce` | **PKCS#11 TA** | 将 KMS 密钥操作暴露为标准 PKCS#11 接口，使 OpenSSL/Nginx/各类 SDK 可直接调用 TEE 私钥签名 |
+| `a4c04d50` | PKCS#11 Token TA | PKCS#11 token slot 管理 |
+| `11b5c4aa` | **FIDO/WebAuthn TA** | 把 WebAuthn P256 验签从 CA（host）移进 TEE，彻底消除 host 侧信任依赖 |
+| `b3091a65` | **Trusted Keys TA** | Linux kernel Trusted Keys：用 TEE seal/unseal 密钥，只有特定固件状态下才能解封 |
+| `5ce0c432` | **RPMB TA** | 防回滚存储。`ChangePasskey` 撤销状态存 RPMB，物理攻击无法回滚。**→ 见 [RPMB 防回滚计划](rpmb-anti-rollback-plan.md)** |
+| `731e279e` | **Attestation TA** | TEE 远程证明，客户端可验证"签名真的来自合法 TEE"。**→ 见 [远程证明计划](attestation-plan.md)** |
+| `fd02c9da` | Provisioning TA | 生产密钥注入，批量出厂时把根密钥安全写入每块板子 TEE |
+
+#### 平台能力（6 个，NXP 专属）
+
+| UUID（前8位） | TA 名称 | 说明 |
+|-------------|--------|-----|
+| `5c206987` | EdgeLock ELE TA | TRNG、OTP fuse、设备生命周期。我们的 CreateKey 已在用 |
+| `b689f2a7` | ELE Crypto TA | NXP CAAM 硬件加速（AES/SHA/ECDSA，比纯软快 10-100×） |
+| `380231ac` | IMX Crypto TA | i.MX CAAM 第二通道 |
+| `a720ccbb` | SE05x TA | NXP SE050/SE051 Secure Element i2c 桥接 |
+| `80a4c275` | Secure Boot TA | 安全启动固件完整性校验 |
+| `ffd2bded` | Firmware Verification TA | NXP 固件签名校验 |
+
+#### OP-TEE 测试/示例（11 个）
+
+随 OP-TEE 4.8 发行版附带，主要用于验证 TEE 环境和 crypto 原语是否正常。
+包括：Hello World、AES Test、Crypt、Storage、OTP、Secure Storage v2、Benchmark/SHA、
+OPTEE Test Supp、GP TEE Internal Core API、TrEE Measurement、Secure Channel。
+
+#### 其他
+
+| UUID | TA 名称 |
+|------|--------|
+| `25497083` | SDP/DRM TA（Secure Data Path，媒体 DRM） |
+| `873bcd08` | eCryptfs/IMA TA（文件系统加密密钥管理） |
+
+### 预装 TA 深度分析——每个可借鉴 TA 的技术细节
+
+#### 1. PKCS#11 TA（`528938ce` + `a4c04d50`）
+
+**是什么**：GlobalPlatform 标准密钥库接口，OP-TEE 官方实现（`optee_os/ta/pkcs11/`）。
+支持 RSA、AES、ECDSA、HMAC、SHA 等几十种算法，通过标准 PKCS#11 C API 调用。
+
+**AirAccount 可以做什么**：
+```
+当前：外部系统必须用我们的私有 KMS HTTP API 才能调用 TEE 签名
+改后：外部系统用标准 PKCS#11 调用
+  → OpenSSL：PKCS11_load_key() + SSL_CTX_use_PrivateKey()
+  → Nginx/Apache TLS：engine 自动调用 TEE 私钥完成 TLS 握手
+  → Java PKCS11Provider、Python python-pkcs11
+  → HSM 替代：把 AirAccount 作为软件 HSM 接入企业 PKI
+```
+
+**实现路径**（难度：中）：
+1. Host 侧用 `libckteec.so`（NXP Yocto 已有）与 PKCS#11 TA 通信
+2. 在 PKCS#11 slot 里注册 KMS 的 secp256k1 私钥（通过 OP-TEE 安全存储桥接）
+3. 外部应用通过 `p11-kit` 或直接 `dlopen` 调用
+
+**优先级**：中（v0.23.0，Issue #38）
+
+---
+
+#### 2. FIDO/WebAuthn TA（`11b5c4aa`）
+
+**是什么**：FIDO Alliance 的 UAF（User Authentication Framework）TA。
+OP-TEE 侧的 FIDO authenticator 实现，可生成和存储 FIDO credential，处理 FIDO assertion 验证。
+
+**AirAccount 当前的 WebAuthn 信任点问题**：
+```
+当前流程：
+  Client → HTTP POST {authenticatorData, clientDataJSON, signature}
+  → CA (host) → 验证 P256 ECDSA（在普通进程里！）
+  → TEE → 执行 sign/change_passkey
+
+弱点：CA 侧的 P256 验签在普通进程中执行。
+攻击者若能攻破 CA 进程（RCE），可以绕过 passkey 验证直接调用 TEE。
+```
+
+**有了 FIDO TA 后**：
+```
+改进流程：
+  Client → assertion
+  → CA 直接将 assertion 转发到 FIDO TA
+  → FIDO TA 在 TEE Secure World 内验证
+  → 验证通过 → KMS TA 执行操作
+
+TEE 内验证：即使 CA 被完全攻破，攻击者也无法伪造 passkey 验证
+```
+
+**实现路径**（难度：高）：
+- 需要研究 FIDO TA 的 `TEE_InvokeCommand` 接口（未公开文档，需逆向或联系 NXP）
+- `kms/ta/src/passkey.rs` 的验签逻辑迁移进 FIDO TA inter-TA invoke
+- 这是 AirAccount 从"TEE 保护私钥"升级到"TEE 保护整个认证链"的关键步骤
+
+**优先级**：高（v0.23.0，Issue #39，与 PKCS#11 并行）
+
+---
+
+#### 3. RPMB TA（`5ce0c432`）
+
+详见 [docs/rpmb-anti-rollback-plan.md](rpmb-anti-rollback-plan.md) — GitHub Issue #36，目标版本 v0.21.0。
+
+**核心价值**：eMMC 硬件单调计数器，物理回滚攻击无效。
+当前 OP-TEE Secure Storage 可被物理回滚（备份 eMMC → ChangePasskey → 恢复 eMMC = 旧 passkey 复活）。
+
+---
+
+#### 4. Attestation TA（`731e279e`）
+
+详见 [docs/attestation-plan.md](attestation-plan.md) — GitHub Issue #37，目标版本 v0.22.0。
+
+**核心价值**：让用户可以密码学验证"签名来自合法 OP-TEE 环境"，而不需要信任部署方。
+基于 OP-TEE 4.8 DICE（Device Identifier Composition Engine）机制。
+
+---
+
+#### 5. Trusted Keys TA（`b3091a65`）
+
+**是什么**：Linux kernel 的 Trusted Keys 子系统（`Documentation/security/keys/trusted-encrypted.rst`）。
+密钥由 TPM 或 TEE seal/unseal，只有在特定 Platform Configuration Register（PCR）状态下才能解封。
+
+**AirAccount 可以做什么**：
+```
+场景：KMS 服务启动时，需要加载数据库密钥（SQLite 加密密钥）。
+当前：密钥存在配置文件或环境变量里（明文，可被 root 读取）
+
+改进：把 SQLite 加密密钥用 Trusted Keys seal 到 TEE + 特定固件哈希
+→ 只有在 Secure Boot 验证通过 + 固件未被篡改时才能解封
+→ 攻击者即使有 root 权限、即使修改了用户空间，也无法解密数据库
+```
+
+**实现路径**（难度：低，直接用 Linux keyctl API）：
+```bash
+# 在 MX93 上
+keyctl add trusted kmsdisk "new 32 keyhandle=<TEE_handle>" @u
+keyctl pipe <keyid> > /etc/kms-db.key.enc
+
+# 启动时
+keyctl add trusted kmsdisk "load $(cat /etc/kms-db.key.enc)" @u
+# 解封失败 → 服务拒绝启动，数据库保持加密
+```
+
+**优先级**：中（v0.21.0 附加项，与 RPMB 一起做）
+
+---
+
+#### 6. Provisioning TA（`fd02c9da`）
+
+**是什么**：设备预置 TA，工厂生产流程中把根密钥/证书安全注入每块板子。
+NXP EdgeLock 2GO 云服务的板端实现。
+
+**AirAccount 可以做什么**：
+```
+当前问题：新板子上线时，如何安全地分发 Cloudflare Tunnel 凭证、API key？
+  - 现在通过串口 base64 传输（不够安全，需人工操作）
+
+改进：工厂出厂时通过 Provisioning TA 把初始凭证注入 TEE
+→ 设备开机自动从 ELE TA 解封凭证（无需人工操作）
+→ 凭证加密存在 TEE，root 权限也无法提取
+```
+
+**实现路径**（Issue #39，难度：高，需要 NXP EdgeLock 2GO 云服务账号）
+
+---
+
+#### 7. EdgeLock ELE TA（`5c206987`）— 已在用
+
+**是什么**：NXX EdgeLock Enclave，i.MX93 的独立安全处理器（与 Cortex-A55 分离的 Arm Cortex-M33）。
+提供：TRNG（真随机数）、OTP fuse 编程、设备生命周期管理（open/closed/locked）、密钥派生。
+
+**AirAccount 当前已用**：`CreateKey` 调用 OP-TEE TRNG（底层走 ELE）生成随机种子。
+
+**可以进一步用**：
+- 读取设备唯一 ID（`fuse`）作为钱包 namespace，防止跨设备混用
+- 调用 ELE ECDSA 加速（走 CAAM，比软件快 50×）
+- 设备生命周期锁定：生产后锁定为 `closed` 状态，防止 JTAG 调试器附着
+
+---
+
+#### 8. NXP CAAM TA（`b689f2a7` + `380231ac`）
+
+**是什么**：CAAM = Cryptographic Acceleration and Assurance Module，i.MX93 上的专用硬件密码引擎。
+支持：AES-256-GCM、SHA-512、ECDSA（secp256k1 + P256）、RSA-4096、TRNG、DES。
+
+**AirAccount 可以做什么**：
+```
+当前：kms/ta/src/ 的 ECDSA 签名用纯软件实现（k256 crate）
+改进：通过 CAAM TA 把签名操作卸载到硬件
+
+性能对比（预估）：
+  软件 ECDSA-secp256k1 sign：~2ms（Cortex-A55 @ 1.7GHz）
+  CAAM ECDSA sign：~0.1ms（专用硬件）
+
+高频签名场景（SuperRelay bundler）20× 性能提升
+```
+
+**实现路径**（难度：中）：
+- OP-TEE 侧通过 `TEE_AllocateOperation(TEE_ALG_ECDSA_P256, ...)` 自动走 CAAM（OP-TEE 已集成）
+- 需要确认 secp256k1（非标准曲线）是否有 CAAM 硬件支持，否则只有 P256 能加速
+
+---
+
+#### 9. SE05x TA（`a720ccbb`）
+
+**是什么**：NXP SE050/SE051 Secure Element 的 i2c 桥接 TA。
+SE05x 是独立的硬件安全芯片（类似银行卡芯片），提供：ECC、RSA、AES 存储和运算，抗物理攻击。
+
+**如果接了 SE050 硬件**（目前 MX93 开发板上没有默认接）：
+```
+升级路线：
+  当前：TEE（软件保护，抗软件攻击）
+  升级：SE05x（独立芯片，抗物理攻击）
+
+SE050 成本约 $3/片，能把 AirAccount 升级到银行卡级别的物理安全
+适合：金融机构、托管服务、高净值用户资产管理
+```
+
+---
+
+### GET /stats 设计（2026-06-07 修复）
+
+**问题**：`GET /stats` 返回 500（路由缺失），`GET /` 已有 HTML dashboard，CLAUDE.md 文档写的是 `GET /stats`。
+
+**设计决策**：
+- `GET /` — 继续返回 HTML dashboard（人工查看）
+- `GET /stats` — 新增，返回**机器可读 JSON**（无需 auth，和 `/health` 同级）
+
+**服务对象**：
+- **内部**（主要）：Cloudflare Workers 健康检查、Prometheus scrape、SuperPaymaster/SuperRelay 集成前检查
+- **外部**（次要）：运维监控、状态页面（如 `status.aastar.io`）
+
+**不暴露 key_id 列表**（安全）：只暴露聚合计数，防止钱包枚举攻击。
+
+**响应结构**：
+```json
+{
+  "service": "kms-api",
+  "version": "0.19.0",
+  "ta_mode": "real",
+  "keys": { "total": 22, "active": 18, "with_address": 20, "with_passkey": 20 },
+  "operations": {
+    "total_signs": 1234, "daily_signs": 56,
+    "avg_sign_ms": 45.3, "avg_derive_ms": 23.1,
+    "errors": 0, "panics": 0, "webauthn": 100
+  },
+  "queue": { "circuit_breaker": "closed", "consecutive_failures": 0 },
+  "api_keys": 3
+}
+```
+
+**已实现**：`kms/host/src/api_server.rs` `handle_get_stats()` + `GET /stats` 路由，v0.19.1 发布。
+
+---
+
+### 两个高优先级后续工作
+
+1. **RPMB 防回滚**（安全关键）→ 计划文档：[docs/rpmb-anti-rollback-plan.md](rpmb-anti-rollback-plan.md)，GitHub Issue #36
+2. **Attestation 远程证明**（信任升级）→ 计划文档：[docs/attestation-plan.md](attestation-plan.md)，GitHub Issue #37
+
+---
 
 ## 当前安全状况评估
 

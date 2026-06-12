@@ -82,6 +82,7 @@ impl TaClient {
     pub fn create_wallet(&mut self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
         let input = proto::CreateWalletInput {
             passkey_pubkey: passkey_pubkey.to_vec(),
+            entropy_seed: None,
         };
         let serialized_input =
             bincode::serialize(&input).context("Failed to serialize CreateWalletInput")?;
@@ -454,6 +455,11 @@ impl TeeHandle {
 
     // ---- async wrappers (mirror TaClient API) ----
 
+    // Maximum seconds to wait for the TEE worker to respond.
+    // If the TA freezes (e.g. CAAM RNG hang), the caller receives a 503 instead
+    // of blocking forever.  After CB_THRESHOLD timeouts the circuit breaker opens.
+    const TEE_CALL_TIMEOUT_SECS: u64 = 30;
+
     async fn call(&self, command: proto::Command, input: Vec<u8>) -> Result<Vec<u8>> {
         // Circuit breaker: reject immediately if TA is repeatedly failing
         self.cb.check()?;
@@ -516,8 +522,16 @@ impl TeeHandle {
     }
 
     pub async fn create_wallet(&self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
+        // Generate 48 bytes of entropy from the OS CSPRNG (/dev/urandom-backed OsRng).
+        // Passed to the TA so it can skip TEE_GenerateRandom() and avoid CAAM TRNG hangs.
+        // This is safe: OsRng is cryptographically secure.  The entropy never leaves the TA.
+        let mut seed = vec![0u8; 48];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+
         let input = bincode::serialize(&proto::CreateWalletInput {
             passkey_pubkey: passkey_pubkey.to_vec(),
+            entropy_seed: Some(seed),
         })
         .context("Failed to serialize CreateWalletInput")?;
         let out = self.call(proto::Command::CreateWallet, input).await?;
@@ -537,6 +551,17 @@ impl TeeHandle {
         })
         .context("Failed to serialize RemoveWalletInput")?;
         self.call(proto::Command::RemoveWallet, input).await?;
+        Ok(())
+    }
+
+    /// Force-remove a gap key from TEE secure storage.
+    /// Only called when `api_server` has confirmed the wallet's passkey_pubkey
+    /// is not a valid P-256 curve point. Requires TA v0.20.0+ (ForceRemoveWallet = 23).
+    /// On older TAs returns an error which the caller handles gracefully.
+    pub async fn force_remove_wallet(&self, wallet_id: uuid::Uuid) -> Result<()> {
+        let input = bincode::serialize(&proto::ForceRemoveWalletInput { wallet_id })
+            .context("Failed to serialize ForceRemoveWalletInput")?;
+        self.call(proto::Command::ForceRemoveWallet, input).await?;
         Ok(())
     }
 
