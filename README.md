@@ -145,6 +145,22 @@ graph TB
 - **One-Click Deployment**: Automated deployment scripts
 - **Rich Documentation**: API docs with real examples and responses
 
+## 🔐 Security Architecture & Hardware Background
+
+The KMS runs on OP-TEE TrustZone with the NXP i.MX93 **ELE (EdgeLock Enclave)** as hardware root of trust. The key crypto-hardware decisions and concepts are documented:
+
+- **[secp256k1 Hardware Analysis](kms/docs/secp256k1-hardware-analysis.md)** — why Ethereum's secp256k1 signing stays in software, the SE05x external secure-element option, and a glossary.
+- **[Build & Deploy on MX93](kms/docs/BUILD-MX93.md)** — cross-compile pitfalls + TA signing-key requirement.
+- **[Release Plan](kms/docs/RELEASE-PLAN.md)** — Beta2/Beta3/mainnet feature gating.
+
+**Key facts**
+
+- **Ethereum private keys (secp256k1)** are managed in software (`k256`) inside the TEE secure world, protected by RPMB anti-rollback. The i.MX93 ELE hardware does **not** support secp256k1 — only NIST P-256/384/521, Ed25519, AES, HMAC, SM4 (实测确认). Hardware secp256k1 would need an external **SE05x** secure element over I2C.
+- **ELE's role** = hardware root of trust: TRNG (wallet entropy), HUK (derives the secure-storage encryption key), P-256 (WebAuthn passkey verification), attestation. It is **not** the home of secp256k1 wallet keys.
+- **Glossary**:
+  - **I2C** (Inter-Integrated Circuit, 读作 "I方C") — a 2-wire chip-to-chip serial bus (SDA data + SCL clock); how external chips like SE05x attach to the SoC. Low bandwidth (≤3.4 Mbit/s).
+  - **EAL6+** (Evaluation Assurance Level 6+) — a **Common Criteria** (ISO/IEC 15408) security-certification level (EAL1 lowest → EAL7 highest; higher = stricter third-party evaluation). Secure-element chips like SE05x are EAL6+. It measures *how rigorously security was evaluated*, not performance.
+
 ## 🚀 Quick Start
 
 ### 1. Test the Live Service

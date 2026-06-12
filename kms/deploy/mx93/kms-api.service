@@ -1,0 +1,25 @@
+[Unit]
+Description=AirAccount KMS API Server
+# dirf-repair.service must run first: it stops/starts tee-supplicant to repair
+# a corrupt dirf.db. Running that logic in ExecStartPre here would deadlock because
+# systemd holds the tee-supplicant unit lock while starting kms-api.service, and
+# restarting tee-supplicant from ExecStartPre blocks on a transaction that never
+# resolves. The separate oneshot unit avoids this dependency cycle entirely.
+After=network.target tee-supplicant@teepriv0.service dirf-repair.service
+Requires=tee-supplicant@teepriv0.service dirf-repair.service
+
+[Service]
+Environment=KMS_ENABLE_CREATEKEY=1
+Type=simple
+User=root
+WorkingDirectory=/root/AirAccount
+ExecStart=/root/AirAccount/target/release/kms-api-server
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/kms-api.log
+StandardError=append:/var/log/kms-api.log
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+[Install]
+WantedBy=multi-user.target
