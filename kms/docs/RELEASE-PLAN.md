@@ -12,7 +12,7 @@
 
 | 层 | 命令 | 结果 |
 |----|------|------|
-| **E2E（真机 MX93，100% 端点）** | `kms/test/run-full-e2e.sh`（上板跑） | **30/30 通过** |
+| **E2E（真机 MX93，100% 端点）** | `kms/test/run-full-e2e.sh`（上板跑） | **33/33 通过**（30 核心 + 3 P2 便利签名器） |
 | 单元测试 · proto | `cargo test --manifest-path kms/proto/Cargo.toml` | **39 通过** |
 | 单元测试 · host（CA） | `kms/test/run-host-unit-tests.sh`（交叉编译 → 上板跑） | **56 通过** |
 | 单元测试 · TA | 不适用 | 见下 |
@@ -45,7 +45,7 @@
 | 内容 | 来源 | 为什么提前 |
 |------|------|-----------|
 | **#41 ForceRemoveWallet**（孤儿清理） | **已在 #35**（commit b74b5f1, `ForceRemoveWallet=23`） | 随 #35 自动进 Beta2 ✓ 无额外成本 |
-| **#6 P2 便利签名器**（SignMicropaymentVoucher / X402 / Authorization） | `feat/p2-sp-signers`（已实现，待 rebase + 测试） | SuperPaymaster v5.3.3 已 landed；不带则 app 集成新 SDK 缺端点 → 被迫发 Beta2.x。已实现只需 rebase，低成本 |
+| **#6 P2 便利签名器**（SignMicropaymentVoucher / X402 / Authorization） | `feat/p2-sp-signers` → **已集成进 fix/review-bugfix（commit f3244d5），真机 33/33 通过** ✅ | SuperPaymaster v5.3.3 已 landed；不带则 app 集成新 SDK 缺端点 → 被迫发 Beta2.x |
 | **#21 EIP-712 domain = aastar.io** | 随 P2 signers 顺便对齐 | 域名一步到位，避免后续再改 |
 
 注：#6 **P1 `SignTypedData` 已在 main**，Beta2 自带通用 EIP-712 能力（可签任意 typed-data，包括 voucher/x402/GToken，caller 自拼）。P2 只是便利封装（KMS 内部构造），是 DX 优化非功能缺失，但提前可省一次发布。
@@ -80,7 +80,7 @@
 
 ## 当前未解决问题（主网前必须解决）
 
-1. **#49 WebAuthn 重放攻击（最高优先）**：需新增 `GetChallenge` TA 命令 + nonce 机制 + CA 透传完整 clientDataJSON，TA 内比对 challenge。是 #39 信任链的最后一块。
+1. **#49 WebAuthn 重放攻击（最高优先）**：需新增 `GetChallenge` TA 命令 + nonce 机制 + CA 透传完整 clientDataJSON，TA 内比对 challenge。是 #39 信任链的最后一块。**同时**：P2 便利签名器（SignMicropaymentVoucher / X402 / GTokenAuthorization，commit f3244d5）目前走 **legacy passkey 路径（无 ceremony / 无 challenge 重放保护）**，须随 #49 一起迁移到 `webAuthnAssertion`，主网前闭环。
 2. **#50 RPMB 生产编程**：当前 REE-FS fallback 让基础工作（不阻塞 Beta2），但主网要硬件防回滚需编程 RPMB key（不可逆，硬件定版后做）。
 3. **secp256k1 硬件**：已调研定论 —— i.MX ELE 不支持，软件 k256（~60ms）够用；#40 缩小为 P-256/SHA 加速；硬件 secp256k1 需外接 SE051（可选，非必须）。详见 `secp256k1-hardware-analysis.md`。
 
