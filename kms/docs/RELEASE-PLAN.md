@@ -8,6 +8,19 @@
 - **Beta1 / v0.19.0**：生产中，基础功能 + MX93 真机部署
 - **`fix/review-bugfix` 分支**：已整合 PR #43/#44/#45/#46/#47 全部代码 + 审计 P0/High 修复 + 真机修复（M-4 TLS 污染、REE-FS fallback、4096 签名、build 流程）。2026-06-12 真机全链 E2E 通过（CreateKey/derive/SignHash/Sign/DeleteKey/WebAuthn）。
 
+## 测试覆盖（2026-06-12 真机验证）
+
+| 层 | 命令 | 结果 |
+|----|------|------|
+| **E2E（真机 MX93，100% 端点）** | `kms/test/run-full-e2e.sh`（上板跑） | **30/30 通过** |
+| 单元测试 · proto | `cargo test --manifest-path kms/proto/Cargo.toml` | **39 通过** |
+| 单元测试 · host（CA） | `kms/test/run-host-unit-tests.sh`（交叉编译 → 上板跑） | **56 通过** |
+| 单元测试 · TA | 不适用 | 见下 |
+
+- **E2E 30/30** 用真实 WebAuthn ceremony（无 legacy passkey 捷径），覆盖每个功能端点：注册（Begin/Complete/BeginAuth + begin-grant-session-auth）、密钥生命周期、派生/签名、ChangePasskey、agent key（create/sign/refresh/revoke）、EIP-712 SignTypedData、grant session（secp256k1 + p256，purpose 绑定 challenge）、p256 session（create/sign-user-op/revoke）、负向 auth-gate 拒绝。
+- **host 单元测试**因链接 optee-teec（需 libteec，容器仅 ARM 库）必须交叉编译成 aarch64 上板跑 —— `run-host-unit-tests.sh` 封装了这一流程。
+- **TA 单元测试**：`aarch64-unknown-optee` target 无 std test harness，`cargo/xargo test` 不可行。TA 命令逻辑由真机 E2E 全路径覆盖；grant-session ABI 编码另经 codex 逐字节对照合约审计。未来如需隔离 KAT，可把纯逻辑（eip191_hash / build_grant_session_inner / agent_derivation_path）抽到 no_std 共享 crate 在 host 测。
+
 ---
 
 ## Beta2（下一个发布）— 核心安全 + 稳定性
