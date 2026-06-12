@@ -22,9 +22,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, Prehashed
 
 
-def gen_keypair():
-    """Generate P-256 keypair, return dict with hex pubkey and PEM privkey."""
-    private_key = ec.generate_private_key(ec.SECP256R1())
+def gen_keypair(d_hex: str = None):
+    """P-256 keypair. If d_hex (32-byte scalar) is given, derive deterministically;
+    otherwise generate a fresh random key. Returns hex pubkey, PEM privkey, and the
+    private scalar (hex) so callers can persist it outside git (.env.kms-test)."""
+    if d_hex:
+        private_key = ec.derive_private_key(int(d_hex, 16), ec.SECP256R1())
+    else:
+        private_key = ec.generate_private_key(ec.SECP256R1())
     pub_bytes = private_key.public_key().public_bytes(
         serialization.Encoding.X962,
         serialization.PublicFormat.UncompressedPoint
@@ -37,6 +42,7 @@ def gen_keypair():
     return {
         "public_key_hex": "0x" + pub_bytes.hex(),
         "private_key_pem": pem,
+        "priv_d_hex": format(private_key.private_numbers().private_value, "064x"),
     }
 
 
@@ -221,9 +227,9 @@ def make_registration_response(privkey_pem: str, challenge_b64url: str, credenti
     }
 
 
-def generate_fixture(output_path: str, label: str = "test-user"):
-    """Generate a complete test user fixture file."""
-    kp = gen_keypair()
+def generate_fixture(output_path: str, label: str = "test-user", d_hex: str = None):
+    """Generate a complete test user fixture file (optionally from a fixed scalar)."""
+    kp = gen_keypair(d_hex)
     assertion = make_assertion(kp["private_key_pem"])
 
     fixture = {
@@ -236,7 +242,7 @@ def generate_fixture(output_path: str, label: str = "test-user"):
     with open(output_path, 'w') as f:
         json.dump(fixture, f, indent=2)
     print(f"Generated: {output_path} ({label})")
-    return fixture
+    return kp
 
 
 def generate_transactions():
@@ -272,17 +278,72 @@ def generate_transactions():
     ]
 
 
+def _env_path():
+    """Path to the git-ignored keystore that holds the test private scalars."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "..", ".env.kms-test")
+
+
+def _load_env_scalars():
+    """Read TEST_P256_<n>_PRIV_D_HEX from .env.kms-test (returns {n: scalar_hex})."""
+    path = _env_path()
+    scalars = {}
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            m = k.strip()
+            if m.startswith("TEST_P256_") and m.endswith("_PRIV_D_HEX"):
+                n = m[len("TEST_P256_"):-len("_PRIV_D_HEX")]
+                d = v.strip().strip('"').removeprefix("0x")
+                if len(d) == 64:
+                    scalars[n] = d
+    return scalars
+
+
+def _save_env_scalars(keys: dict):
+    """Persist scalars+pubkeys to the git-ignored .env.kms-test (single source of truth)."""
+    path = _env_path()
+    lines = [
+        "# AirAccount KMS test keypairs — P-256 WebAuthn passkeys for E2E.",
+        "# WARNING: contains EC private key scalars. Git-ignored; NEVER commit.",
+        "# Regenerate fixtures from here:  python3 kms/test/p256_helper.py gen-all",
+        "",
+    ]
+    for n in sorted(keys):
+        kp = keys[n]
+        lines += [
+            f"# Key {n} — P256 (WebAuthn passkey for test account {n})",
+            f"TEST_P256_{n}_PRIV_D_HEX={kp['priv_d_hex']}",
+            f"TEST_P256_{n}_PUB_HEX={kp['public_key_hex']}",
+            "",
+        ]
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"Wrote keystore: {os.path.normpath(path)} ({len(keys)} keys)")
+
+
 def gen_all():
-    """Generate all test fixtures in test-fixtures/ directory."""
+    """Materialize test fixtures in test-fixtures/ from .env.kms-test (the git-ignored
+    keystore). Reuses existing scalars when present (reproducible); generates fresh keys
+    and writes them back when absent. Private keys live ONLY in .env.kms-test, never git."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     fixtures_dir = os.path.join(script_dir, "test-fixtures")
     os.makedirs(fixtures_dir, exist_ok=True)
 
+    env_scalars = _load_env_scalars()
+    keys = {}
     for i in range(1, 4):
-        generate_fixture(
+        n = str(i)
+        kp = generate_fixture(
             os.path.join(fixtures_dir, f"user{i}.json"),
-            f"test-user-{i}"
+            f"test-user-{i}",
+            d_hex=env_scalars.get(n),  # None → fresh random
         )
+        keys[n] = kp
+    _save_env_scalars(keys)  # persist (back-fill any freshly generated)
 
     txs = generate_transactions()
     tx_path = os.path.join(fixtures_dir, "transactions.json")
