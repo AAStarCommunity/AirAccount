@@ -25,7 +25,7 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random};
+use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random, Time};
 use proto::Command;
 use secure_db::{SecureStorageClient, Storable};
 
@@ -1029,6 +1029,21 @@ fn agent_derivation_path(agent_index: u32) -> String {
 /// Maximum allowed JWT lifetime: 7 days.
 const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
 
+/// Current wall-clock time (UNIX epoch seconds) read from the REE clock via TEE_GetREETime.
+///
+/// `std::time::SystemTime::now()` is NOT wired into the OP-TEE TA runtime — calling it panics
+/// the TA (observed on real i.MX93 hardware: create-agent-key / refresh-agent-credential aborted
+/// with a TA panic). The TA must obtain time through the optee-utee `Time` API instead.
+///
+/// REE time is "as trusted as the REE itself" (the host can shift the system clock), but the host
+/// still cannot inject `iat`/`exp` into the HMAC-signed JWT payload directly — the TA computes and
+/// signs them, so H-3 (TA owns iat; host only supplies the capped ttl_secs) still holds.
+fn tee_unix_secs() -> i64 {
+    let mut t = Time::new();
+    t.ree_time();
+    t.seconds as i64
+}
+
 fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
     dbg_println!(
         "[+] Create agent key for wallet: {:?}, agent_index: {}",
@@ -1052,13 +1067,10 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
 
-    // Build JWT payload entirely inside TEE — iat computed from TA system clock so
+    // Build JWT payload entirely inside TEE — iat computed from the TA's view of the clock so
     // a compromised host cannot supply iat=0 or iat=far_future to shift the TTL window.
     // H-3: TA owns iat; host only supplies ttl_secs (capped above).
-    let iat = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let iat = tee_unix_secs();
     let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
     let wallet_id_str = input.wallet_id.to_string();
     let exp = iat.checked_add(input.ttl_secs)
@@ -1292,10 +1304,7 @@ fn create_p256_session_key(
 
     // Issue JWT credential for this session key (TEE-HMAC'd, same mechanism as agent keys).
     // agent_index is repurposed as session_index so verify_credential on the host works unchanged.
-    let iat = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let iat = tee_unix_secs();
     let exp = iat.checked_add(input.ttl_secs)
         .ok_or_else(|| anyhow!("JWT exp overflow"))?;
     let wallet_id_str = input.wallet_id.to_string();
