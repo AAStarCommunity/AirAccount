@@ -121,10 +121,7 @@ mod tests {
         // 23 reserved for ForceRemoveWallet (PR #35) — must NOT map to
         // ReadRollbackCounter; until #35 merges it maps to Unknown.
         assert!(matches!(Command::from(23u32), Command::Unknown));
-        assert!(matches!(
-            Command::from(24u32),
-            Command::ReadRollbackCounter
-        ));
+        assert!(matches!(Command::from(24u32), Command::ReadRollbackCounter));
     }
 
     #[test]
@@ -768,8 +765,6 @@ mod tests {
         bincode_roundtrip(&ReadRollbackCounterInput {});
         bincode_roundtrip(&ReadRollbackCounterOutput { counter: 0 });
         bincode_roundtrip(&ReadRollbackCounterOutput { counter: 42 });
-        bincode_roundtrip(&ReadRollbackCounterOutput {
-            counter: u64::MAX,
-        });
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: u64::MAX });
     }
 }
