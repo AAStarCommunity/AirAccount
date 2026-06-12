@@ -82,6 +82,7 @@ impl TaClient {
     pub fn create_wallet(&mut self, passkey_pubkey: &[u8]) -> Result<uuid::Uuid> {
         let input = proto::CreateWalletInput {
             passkey_pubkey: passkey_pubkey.to_vec(),
+            entropy_seed: None,
         };
         let serialized_input =
             bincode::serialize(&input).context("Failed to serialize CreateWalletInput")?;
@@ -333,6 +334,19 @@ struct TeeCommand {
 const CB_THRESHOLD: usize = 3;
 const CB_RECOVERY_SECS: u64 = 30;
 
+/// P0-1: hard upper bound for a single TEE call. The worker thread invokes
+/// the TA synchronously and CANNOT be cancelled — if the TA hangs, the worker
+/// stays blocked. Without this timeout the caller's `reply_rx.await` would
+/// block forever and every subsequent request would queue behind it: a single
+/// poisoned request = global denial of service.
+///
+/// On timeout we return 503 upstream and count a circuit-breaker failure so
+/// that repeated hangs open the circuit. NOTE: the in-flight TA command may
+/// still complete in the background — TEE calls are NOT cancellable. Handlers
+/// with side effects (ChangePasskey, CreateWallet…) must treat a timeout as
+/// "outcome unknown", not "failed".
+const TEE_CALL_TIMEOUT_SECS: u64 = 30;
+
 struct CircuitBreaker {
     consecutive_failures: AtomicUsize,
     open_until: Mutex<Option<Instant>>,
@@ -452,46 +466,39 @@ impl TeeHandle {
 
         self.pending.fetch_add(1, Ordering::SeqCst);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if self
-            .tx
+        self.tx
             .send(TeeCommand {
                 command,
                 input,
                 reply: reply_tx,
             })
-            .is_err()
-        {
-            self.pending.fetch_sub(1, Ordering::SeqCst);
-            return Err(anyhow::anyhow!("TEE worker thread has exited"));
-        }
-
-        // Race the reply against a hard timeout.  If the TA hangs the worker
-        // thread blocks in invoke_on_session(), but we return immediately here.
-        // When the TA eventually wakes up the worker sends to the dropped oneshot
-        // (harmless Err(SendError)) and resumes processing the queue.
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_secs(Self::TEE_CALL_TIMEOUT_SECS),
+            .map_err(|_| anyhow::anyhow!("TEE worker thread has exited"))?;
+        // P0-1: bound the wait. The worker itself cannot be interrupted (the
+        // TA invoke is a blocking syscall), but the HTTP caller must not hang
+        // forever — and a hung TA must eventually open the circuit breaker.
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(TEE_CALL_TIMEOUT_SECS),
             reply_rx,
         )
-        .await;
-
-        self.pending.fetch_sub(1, Ordering::SeqCst);
-
-        let result = match timed {
+        .await
+        {
+            Ok(inner) => {
+                self.pending.fetch_sub(1, Ordering::SeqCst);
+                inner.map_err(|_| anyhow::anyhow!("TEE worker dropped reply channel"))?
+            }
             Err(_elapsed) => {
-                // TA frozen: circuit breaker records a failure so repeated
-                // timeouts trip the breaker and callers get fast 503s.
+                // The command may still be executing in the worker; we only
+                // stop waiting. Decrement pending so the counter doesn't leak
+                // (the worker's eventual reply_tx.send() fails silently).
+                self.pending.fetch_sub(1, Ordering::SeqCst);
                 self.cb.record_failure();
                 return Err(anyhow::anyhow!(
-                    "TEE call timed out after {}s — TA may be frozen (CAAM/RNG hang?)",
-                    Self::TEE_CALL_TIMEOUT_SECS
+                    "TEE call timeout: {:?} did not complete within {}s — outcome unknown, \
+                     TA may still be processing (circuit breaker failure recorded)",
+                    command,
+                    TEE_CALL_TIMEOUT_SECS
                 ));
             }
-            Ok(Err(_recv_err)) => {
-                self.cb.record_failure();
-                return Err(anyhow::anyhow!("TEE worker dropped reply channel"));
-            }
-            Ok(Ok(inner)) => inner,
         };
 
         // Update circuit breaker based on result
@@ -837,6 +844,18 @@ impl TeeHandle {
         let output: proto::SignP256GrantSessionOutput = bincode::deserialize(&out)
             .context("Failed to deserialize SignP256GrantSessionOutput")?;
         Ok(output)
+    }
+
+    /// Read the current RPMB anti-rollback counter value (diagnostic endpoint).
+    pub async fn read_rollback_counter(&self) -> Result<u64> {
+        let input = bincode::serialize(&proto::ReadRollbackCounterInput {})
+            .context("Failed to serialize ReadRollbackCounterInput")?;
+        let out = self
+            .call(proto::Command::ReadRollbackCounter, input)
+            .await?;
+        let output: proto::ReadRollbackCounterOutput = bincode::deserialize(&out)
+            .context("Failed to deserialize ReadRollbackCounterOutput")?;
+        Ok(output.counter)
     }
 
     pub async fn create_p256_session_key(

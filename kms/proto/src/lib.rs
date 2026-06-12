@@ -49,6 +49,7 @@ pub enum Command {
     /// NOT exposed as a public API endpoint — only called internally by DeleteKey
     /// when a gap key is detected. Requires TA rebuild to activate.
     ForceRemoveWallet = 23,
+    ReadRollbackCounter = 24,
     #[default]
     Unknown,
 }
@@ -97,6 +98,7 @@ mod tests {
         assert_eq!(u32::from(Command::SignGrantSession), 21);
         assert_eq!(u32::from(Command::SignP256GrantSession), 22);
         assert_eq!(u32::from(Command::ForceRemoveWallet), 23);
+        assert_eq!(u32::from(Command::ReadRollbackCounter), 24);
     }
 
     #[test]
@@ -119,6 +121,10 @@ mod tests {
             Command::from(22u32),
             Command::SignP256GrantSession
         ));
+        // 23 reserved for ForceRemoveWallet (PR #35) — must NOT map to
+        // ReadRollbackCounter; until #35 merges it maps to Unknown.
+        assert!(matches!(Command::from(23u32), Command::Unknown));
+        assert!(matches!(Command::from(24u32), Command::ReadRollbackCounter));
     }
 
     #[test]
@@ -130,8 +136,9 @@ mod tests {
     #[test]
     fn command_roundtrip() {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
+        // 23 reserved for ForceRemoveWallet (PR #35, production v0.19.0)
         let valid_ids: &[u32] = &[
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 24,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -140,6 +147,30 @@ mod tests {
         // Removed command IDs must map to Unknown (prevent silent ID reuse regression)
         assert_eq!(Command::from(13), Command::Unknown);
         assert_eq!(Command::from(16), Command::Unknown);
+        // Reserved (not yet merged here) IDs must also map to Unknown
+        assert_eq!(Command::from(23), Command::Unknown);
+    }
+
+    /// P0-3 regression guard: every assigned command ID must be unique.
+    /// A duplicate discriminant is a compile error in Rust, but this test
+    /// additionally documents the full ID map and catches accidental
+    /// reuse of RESERVED ids (23 = ForceRemoveWallet on feat/mx93-deployment).
+    #[test]
+    fn command_ids_unique_and_reserved_respected() {
+        let all: Vec<u32> = (0u32..=30)
+            .filter(|&i| !matches!(Command::from(i), Command::Unknown))
+            .collect();
+        let mut dedup = all.clone();
+        dedup.dedup();
+        assert_eq!(all, dedup, "duplicate command IDs detected");
+        // Reserved/removed IDs must NOT be assigned
+        for reserved in [13u32, 16, 23] {
+            assert!(
+                matches!(Command::from(reserved), Command::Unknown),
+                "reserved command ID {} must not be assigned",
+                reserved
+            );
+        }
     }
 
     // ── UUID constant ──
@@ -730,5 +761,13 @@ mod tests {
         });
         bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: true });
         bincode_roundtrip(&DeleteP256SessionKeyOutput { deleted: false });
+    }
+
+    #[test]
+    fn read_rollback_counter_roundtrip() {
+        bincode_roundtrip(&ReadRollbackCounterInput {});
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: 0 });
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: 42 });
+        bincode_roundtrip(&ReadRollbackCounterOutput { counter: u64::MAX });
     }
 }

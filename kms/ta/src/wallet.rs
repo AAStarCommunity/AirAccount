@@ -42,6 +42,10 @@ pub struct Wallet {
     cached_account_root: Option<Vec<u8>>,
     /// P-256 passkey public key (65 bytes uncompressed: 0x04 || x || y)
     passkey_pubkey: Option<Vec<u8>>,
+    /// RPMB anti-rollback epoch captured at creation/passkey-registration time.
+    /// 0 = wallet pre-dates anti-rollback feature. Must be last for bincode compat.
+    #[serde(default)]
+    pub rollback_epoch: u64,
 }
 
 impl Storable for Wallet {
@@ -74,6 +78,7 @@ impl Wallet {
             cached_seed: None,
             cached_account_root: None,
             passkey_pubkey: None,
+            rollback_epoch: 0,
         })
     }
 
@@ -98,6 +103,7 @@ impl Wallet {
             cached_seed: None,
             cached_account_root: None,
             passkey_pubkey: None,
+            rollback_epoch: 0,
         })
     }
 
@@ -284,12 +290,45 @@ impl TryFrom<Wallet> for Vec<u8> {
     }
 }
 
+/// Legacy wallet format serialized before the RPMB anti-rollback feature.
+/// Used as a fallback in TryFrom to maintain backward compatibility.
+/// bincode does not support serde's `#[serde(default)]` for missing trailing fields —
+/// deserialization fails with an EOF error rather than using the default. We handle
+/// this by trying the current format first, then falling back to this legacy struct.
+#[derive(Serialize, Deserialize)]
+struct WalletLegacy {
+    id: Uuid,
+    entropy: Vec<u8>,
+    next_address_index: u32,
+    next_account_index: u32,
+    cached_seed: Option<Vec<u8>>,
+    cached_account_root: Option<Vec<u8>>,
+    passkey_pubkey: Option<Vec<u8>>,
+}
+
 impl TryFrom<Vec<u8>> for Wallet {
     type Error = anyhow::Error;
 
     fn try_from(data: Vec<u8>) -> Result<Wallet> {
-        bincode::deserialize::<Wallet>(&data)
-            .map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))
+        // Try current format (with rollback_epoch) first.
+        if let Ok(w) = bincode::deserialize::<Wallet>(&data) {
+            return Ok(w);
+        }
+        // Fall back: wallet was serialized before rollback_epoch was added.
+        // bincode encodes structs as ordered fields without names, so adding a new
+        // field at the end breaks deserialization of old data — it hits unexpected EOF.
+        let legacy = bincode::deserialize::<WalletLegacy>(&data)
+            .map_err(|e| anyhow!("[-] Wallet::try_from(): {:?}", e))?;
+        Ok(Wallet {
+            id: legacy.id,
+            entropy: legacy.entropy,
+            next_address_index: legacy.next_address_index,
+            next_account_index: legacy.next_account_index,
+            cached_seed: legacy.cached_seed,
+            cached_account_root: legacy.cached_account_root,
+            passkey_pubkey: legacy.passkey_pubkey,
+            rollback_epoch: 0,
+        })
     }
 }
 
@@ -305,5 +344,89 @@ impl Drop for Wallet {
         if let Some(ref mut pk) = self.passkey_pubkey {
             pk.iter_mut().for_each(|x| *x = 0);
         }
+        self.rollback_epoch = 0;
+    }
+}
+
+// H-D: bincode backward-compat regression tests. bincode has no field names —
+// adding a trailing field breaks old data with an EOF error, which is why
+// Wallet::try_from falls back to WalletLegacy. If the field order or the
+// fallback ever silently changes, EVERY pre-anti-rollback wallet bricks.
+// These tests pin that contract with fixed-shape vectors.
+// (TA-crate tests follow the eip712.rs convention: compiled under cfg(test),
+// executed when a TA test runner is available.)
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    fn legacy_fixture() -> WalletLegacy {
+        WalletLegacy {
+            id: Uuid::from_bytes([0x11; 16]),
+            entropy: vec![0xAA; 32],
+            next_address_index: 7,
+            next_account_index: 2,
+            cached_seed: Some(vec![0xBB; 64]),
+            cached_account_root: None,
+            passkey_pubkey: Some(vec![0x04; 65]),
+        }
+    }
+
+    #[test]
+    fn wallet_legacy_bytes_deserialize_to_epoch_zero() {
+        // Old-format bytes (no rollback_epoch trailing field)
+        let bytes = bincode::serialize(&legacy_fixture()).unwrap();
+        let w = Wallet::try_from(bytes).expect("legacy fallback must succeed");
+        assert_eq!(w.rollback_epoch, 0, "legacy wallets must map to epoch 0");
+        assert_eq!(w.id, Uuid::from_bytes([0x11; 16]));
+        assert_eq!(w.entropy, vec![0xAA; 32]);
+        assert_eq!(w.next_address_index, 7);
+        assert_eq!(w.next_account_index, 2);
+        assert_eq!(w.cached_seed.as_deref(), Some(&[0xBB; 64][..]));
+        assert_eq!(w.passkey_pubkey.as_deref(), Some(&[0x04; 65][..]));
+    }
+
+    #[test]
+    fn wallet_current_roundtrip_preserves_rollback_epoch() {
+        let legacy = legacy_fixture();
+        let w = Wallet {
+            id: legacy.id,
+            entropy: legacy.entropy,
+            next_address_index: legacy.next_address_index,
+            next_account_index: legacy.next_account_index,
+            cached_seed: legacy.cached_seed,
+            cached_account_root: legacy.cached_account_root,
+            passkey_pubkey: legacy.passkey_pubkey,
+            rollback_epoch: 42,
+        };
+        let bytes: Vec<u8> = w.clone().try_into().unwrap();
+        let back = Wallet::try_from(bytes).unwrap();
+        assert_eq!(back.rollback_epoch, 42, "current format must keep epoch");
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn wallet_corrupt_bytes_rejected() {
+        assert!(Wallet::try_from(vec![0xFFu8; 8]).is_err());
+        assert!(Wallet::try_from(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn legacy_fallback_not_triggered_by_truncated_current_bytes() {
+        // A truncated CURRENT-format blob must fail outright, not be
+        // misinterpreted as legacy (bincode rejects trailing/missing bytes).
+        let legacy = legacy_fixture();
+        let w = Wallet {
+            id: legacy.id,
+            entropy: legacy.entropy,
+            next_address_index: legacy.next_address_index,
+            next_account_index: legacy.next_account_index,
+            cached_seed: legacy.cached_seed,
+            cached_account_root: legacy.cached_account_root,
+            passkey_pubkey: legacy.passkey_pubkey,
+            rollback_epoch: 9,
+        };
+        let mut bytes: Vec<u8> = w.try_into().unwrap();
+        bytes.truncate(bytes.len() - 4); // chop mid-epoch
+        assert!(Wallet::try_from(bytes).is_err());
     }
 }

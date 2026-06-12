@@ -25,7 +25,7 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{Error, ErrorKind, Parameters, Random};
+use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random, Time};
 use proto::Command;
 use secure_db::{SecureStorageClient, Storable};
 
@@ -41,6 +41,10 @@ use wallet::Wallet;
 
 const DB_NAME: &str = "eth_wallet_db";
 const JWT_SECRET_STORE_ID: &str = "jwt_hmac";
+
+// RPMB anti-rollback counter object ID (≤64 bytes per GP spec).
+// Written to TEE_STORAGE_PRIVATE_RPMB, NOT the REE-FS filesystem.
+const RPMB_COUNTER_ID: &[u8] = b"kms_arc_v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -114,7 +118,6 @@ impl WalletLruCache {
         });
     }
 
-    #[allow(dead_code)]
     fn remove(&mut self, id: &Uuid) {
         self.entries.retain(|e| &e.id != id);
     }
@@ -239,9 +242,14 @@ fn cache_put(wallet: &Wallet) {
     WALLET_CACHE.with(|c| c.borrow_mut().put(wallet));
 }
 
-// cache_remove disabled: OP-TEE secure storage writes corrupt TLS,
-// and remove_wallet does db.delete before this would be called.
-// Let cache entries expire naturally via LRU eviction.
+// H-3: cache_remove MUST be called BEFORE any secure-storage write syscall
+// (db.delete_entry / db.put), because those syscalls corrupt the TLS register
+// and any thread_local (WALLET_CACHE) access afterwards would panic. Calling it
+// before the write is safe and is required so a deleted wallet does not remain
+// signable from a stale cache entry.
+fn cache_remove(wallet_id: &Uuid) {
+    WALLET_CACHE.with(|c| c.borrow_mut().remove(wallet_id));
+}
 
 fn cache_len() -> usize {
     WALLET_CACHE.with(|c| c.borrow().len())
@@ -263,6 +271,15 @@ impl Storable for P256SessionKey {
     }
 }
 
+// M-1: zeroize the raw P-256 private scalar on drop. zeroize is not a TA
+// dependency (pinned nightly toolchain), so we replicate the manual-wipe
+// pattern already used by `Wallet::drop` instead of adding a crate.
+impl Drop for P256SessionKey {
+    fn drop(&mut self) {
+        self.private_key.iter_mut().for_each(|b| *b = 0);
+    }
+}
+
 impl P256SessionKey {
     fn store_id_for(wallet_id: &Uuid, session_index: u32) -> String {
         format!("p256sk_{}_{}", wallet_id, session_index)
@@ -279,6 +296,157 @@ impl P256SessionKey {
     }
 }
 
+// ── RPMB Anti-Rollback Counter ──
+//
+// The counter is stored in TEE_STORAGE_PRIVATE_RPMB (0x80000003), backed by the
+// eMMC RPMB partition. This provides hardware-enforced monotonicity: unlike REE-FS,
+// RPMB objects cannot be silently rolled back by restoring the filesystem.
+//
+// TLS safety: TEE_OpenPersistentObject (read) does NOT corrupt TLS; only write
+// syscalls do. Read counter BEFORE any thread_local access; write AFTER save_wallet().
+//
+// M-8 (known architectural limitation — tracked in Issue #48, future ELE/HSM
+// migration): this is a SINGLE GLOBAL monotonic counter, not a per-wallet one.
+// It detects a full storage rollback (all wallets reverted) but NOT a *targeted*
+// rollback of one wallet to an older state whose epoch is still <= the current
+// global counter (e.g. revert wallet A to epoch=5 while the global counter is 50;
+// 5 <= 50 passes the check). Closing this fully requires per-wallet monotonic
+// counters, which the current RPMB object model does not provide cheaply. The
+// global counter is the strongest defense available without ELE/HSM hardware.
+
+/// Open wallet storage. With the `ree-fs-only` feature this is plain REE-FS
+/// (TEE_STORAGE_PRIVATE) and never touches RPMB; by default it is RPMB with
+/// transparent REE-FS migration. Every storage call in the TA goes through here.
+fn open_storage() -> Result<SecureStorageClient> {
+    #[cfg(feature = "ree-fs-only")]
+    {
+        SecureStorageClient::open(DB_NAME)
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
+    {
+        SecureStorageClient::open_rpmb_migrating(DB_NAME)
+    }
+}
+
+fn rpmb_read_counter() -> Result<u64> {
+    let (counter, _present) = rpmb_read_counter_ex()?;
+    Ok(counter)
+}
+
+/// Like rpmb_read_counter but also reports whether the counter object actually
+/// exists in RPMB. `present == false` means the counter object is absent
+/// (ItemNotFound) — which happens on a fresh device OR after an eMMC reflash /
+/// RPMB key reset. Callers can use this to distinguish "counter legitimately 0"
+/// from "counter never initialized", which matters for C-2 (legitimate wallets
+/// with epoch > 0 must not be bricked just because the counter object is gone).
+fn rpmb_read_counter_ex() -> Result<(u64, bool)> {
+    // REE-FS mode: never issue an RPMB syscall (the eMMC RPMB key is not
+    // programmed on this hardware; touching RPMB faults/kills the TA).
+    // Report "counter absent" so epoch_check's C-2 path applies.
+    #[cfg(feature = "ree-fs-only")]
+    {
+        return Ok((0, false));
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
+    match PersistentObject::open(
+        ObjectStorageConstants::Rpmb,
+        RPMB_COUNTER_ID,
+        DataFlag::ACCESS_READ | DataFlag::SHARE_READ,
+    ) {
+        Ok(obj) => {
+            let mut buf = [0u8; 8];
+            let n = obj.read(&mut buf)?;
+            if n != 8 {
+                return Err(anyhow!("RPMB counter: short read ({} bytes)", n));
+            }
+            Ok((u64::from_be_bytes(buf), true))
+        }
+        Err(e) => match e.kind() {
+            ErrorKind::ItemNotFound => Ok((0, false)),
+            _ => {
+                // REE-FS fallback: RPMB unavailable (e.g. eMMC RPMB key never
+                // programmed — NXP FRDM-IMX93 out of the box). Degrade to
+                // "counter absent" rather than failing every operation;
+                // epoch_check's C-2 path handles counter==absent gracefully.
+                // Anti-rollback is inactive in REE-FS mode (tracked in #50).
+                trace_println!(
+                    "[!] RPMB counter unreadable ({:?}) — RPMB unavailable, anti-rollback degraded to REE-FS mode",
+                    e
+                );
+                Ok((0, false))
+            }
+        },
+    }
+}
+
+// Write counter to RPMB. OVERWRITES any existing counter object atomically.
+// Caller MUST ensure no thread_local access follows this call in the same frame.
+//
+// C-3 (monotonic guard, defense-in-depth): before overwriting, read the current
+// counter. If a counter object already exists and the new value would DECREASE
+// it, reject the write. In correct code paths `value` is always current+1 (via
+// rpmb_next_epoch) or an exact recovery to current+1, so this never fires in
+// practice — but it hard-stops any future bug or tampered-wallet path from
+// silently rolling the hardware counter backwards. When the counter object is
+// absent (fresh device / reflash / C-2 re-init) there is no baseline to
+// violate, so any initial value is accepted.
+fn rpmb_write_counter(value: u64) -> Result<()> {
+    // REE-FS mode: no RPMB anti-rollback counter — skip the write entirely so
+    // the TA never issues an RPMB syscall on hardware without a programmed key.
+    #[cfg(feature = "ree-fs-only")]
+    {
+        let _ = value;
+        return Ok(());
+    }
+    #[cfg(not(feature = "ree-fs-only"))]
+    {
+    let (current, present) = rpmb_read_counter_ex()?;
+    if present && value < current {
+        return Err(anyhow!(
+            "RPMB monotonic violation: refusing to write counter {} < current {}",
+            value, current
+        ));
+    }
+
+    let flags = DataFlag::ACCESS_READ
+        | DataFlag::ACCESS_WRITE
+        | DataFlag::ACCESS_WRITE_META
+        | DataFlag::OVERWRITE;
+    match PersistentObject::create(
+        ObjectStorageConstants::Rpmb,
+        RPMB_COUNTER_ID,
+        flags,
+        None,
+        &value.to_be_bytes(),
+    ) {
+        Ok(_) => {
+            trace_println!("[+] RPMB anti-rollback counter written: {}", value);
+            Ok(())
+        }
+        Err(e) => {
+            // REE-FS fallback: RPMB not writable (key not programmed). Skip the
+            // counter write instead of failing the whole mutation. Anti-rollback
+            // is inactive in REE-FS mode — acceptable degradation, tracked in
+            // #50; the wallet itself is still persisted via REE-FS.
+            trace_println!(
+                "[!] RPMB counter write skipped ({:?}) — RPMB unavailable, anti-rollback degraded to REE-FS mode",
+                e
+            );
+            Ok(())
+        }
+    }
+    }
+}
+
+// Increment RPMB counter and return the new value.
+// Safe ordering: call rpmb_read_counter() before thread_local access;
+// call rpmb_write_counter() only after save_wallet() (all thread_local done).
+fn rpmb_next_epoch() -> Result<u64> {
+    let current = rpmb_read_counter()?;
+    current.checked_add(1)
+        .ok_or_else(|| anyhow!("RPMB anti-rollback counter overflow"))
+}
+
 /// Save wallet to secure storage AND update cache.
 fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
     // Cache MUST come before db.put: OP-TEE secure storage syscall corrupts TLS,
@@ -286,6 +454,56 @@ fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
     cache_put(wallet);
     db.put(wallet)?;
     Ok(())
+}
+
+/// Anti-rollback epoch validation (pure function — unit-testable, H-D):
+///
+///   Normal state:    wallet.rollback_epoch <= rpmb_now        → Ok(false)
+///   Recovery state:  wallet.rollback_epoch == rpmb_now + 1    → Ok(true)
+///     → previous mutation saved wallet (epoch=N+1) but crashed before
+///       rpmb_write_counter(N+1). Caller completes the interrupted write.
+///   Tampered state:  wallet.rollback_epoch > rpmb_now + 1     → Err
+///     → impossible in normal operation; reject hard.
+///
+/// C-2 (counter object absent): if the RPMB counter object does not exist
+/// (eMMC reflash, RPMB key reset, replaced storage) we read 0 with
+/// counter_present=false. A legitimate wallet may still carry epoch=N>1.
+/// Treating that as "tampered" would brick a real wallet. Instead, when the
+/// counter is absent we self-heal: re-initialize the RPMB counter to the
+/// wallet's own epoch (return Ok(true)). Safe because an absent counter means
+/// there is no monotonic baseline to violate — we are establishing one.
+///
+/// TLS ordering contract for the CALLER: a returned `true` means an RPMB
+/// write (rpmb_write_counter, a TEE write that corrupts tpidr_el0) is due —
+/// it must be performed AFTER all thread_local access (cache_put).
+fn epoch_check(
+    epoch: u64,
+    rpmb_now: u64,
+    counter_present: bool,
+    wallet_id: &uuid::Uuid,
+) -> Result<bool> {
+    if epoch == 0 {
+        return Ok(false); // legacy wallet, skip check
+    }
+    if !counter_present {
+        // C-2: counter object missing → no baseline exists. Re-establish it
+        // from this wallet's epoch rather than rejecting a legitimate wallet.
+        trace_println!(
+            "[!] anti-rollback: RPMB counter absent, re-initializing to epoch {} for {:?}",
+            epoch, wallet_id
+        );
+        return Ok(true); // needs RPMB (re-)init write
+    }
+    // saturating_add: rpmb_now == u64::MAX would otherwise overflow-panic in
+    // debug builds (unreachable in practice, but free to harden).
+    let recovery_epoch = rpmb_now.saturating_add(1);
+    if epoch > recovery_epoch {
+        return Err(anyhow!(
+            "anti-rollback: wallet epoch {} > RPMB {}+1 for {:?} — tampered or corrupt",
+            epoch, rpmb_now, wallet_id
+        ));
+    }
+    Ok(epoch == recovery_epoch) // true = needs RPMB recovery write
 }
 
 /// Load wallet + ensure seed cached.
@@ -297,9 +515,20 @@ fn save_wallet(db: &SecureStorageClient, wallet: &Wallet) -> Result<()> {
 /// Since load_wallet_cached is always followed by verify_passkey_for_wallet
 /// (which may use TLS-backed allocators), we must never call db.put in this path.
 /// Seed persistence is handled exclusively by derive_address_auto.
+///
+/// Anti-rollback: reads RPMB counter first (read-only, TLS-safe) to detect
+/// wallets whose epoch is ahead of RPMB — which is impossible in normal operation
+/// and indicates either an atomicity failure (RPMB write failed after wallet save)
+/// or tampered wallet bytes with a forged future epoch.
 fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
+    // Read RPMB before any TLS access. rpmb_read_counter uses open+read (safe).
+    // `counter_present == false` means the RPMB counter object is absent
+    // (fresh device or post-reflash) — see C-2 handling in epoch_check.
+    let (rpmb_now, counter_present) = rpmb_read_counter_ex()?;
+
     // Fast path: cache hit
     if let Some(mut w) = cache_get(wallet_id) {
+        let needs_recovery = epoch_check(w.rollback_epoch, rpmb_now, counter_present, wallet_id)?;
         let changed = w.ensure_seed_cached()?;
         if changed {
             // Update in-memory cache only — NO db.put (would corrupt TLS)
@@ -309,14 +538,25 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
             );
             cache_put(&w);
         }
+        // Recovery: complete interrupted RPMB write — AFTER all TLS (cache_put above)
+        if needs_recovery {
+            trace_println!(
+                "[!] load_wallet_cached: recovering RPMB counter to {} for {:?}",
+                w.rollback_epoch, wallet_id
+            );
+            rpmb_write_counter(w.rollback_epoch)?;
+        }
         return Ok(w);
     }
 
     // Slow path: cache miss — read from storage
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let mut w = db
         .get::<Wallet>(wallet_id)
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
+
+    let needs_recovery = epoch_check(w.rollback_epoch, rpmb_now, counter_present, wallet_id)?;
+
     let changed = w.ensure_seed_cached()?;
     if changed {
         trace_println!(
@@ -326,6 +566,14 @@ fn load_wallet_cached(wallet_id: &Uuid) -> Result<Wallet> {
     }
     // Always cache in memory (NO db.put — avoids TLS corruption in signing path)
     cache_put(&w);
+    // Recovery: complete interrupted RPMB write — AFTER cache_put (last TLS access)
+    if needs_recovery {
+        trace_println!(
+            "[!] load_wallet_cached: recovering RPMB counter to {} for {:?}",
+            w.rollback_epoch, wallet_id
+        );
+        rpmb_write_counter(w.rollback_epoch)?;
+    }
     Ok(w)
 }
 
@@ -338,6 +586,17 @@ fn create() -> optee_utee::Result<()> {
 #[ta_open_session]
 fn open_session(_params: &mut Parameters) -> optee_utee::Result<()> {
     trace_println!("[+] TA open session");
+    // H-A NOTE (reverted after on-hardware testing 2026-06-11):
+    // We deliberately do NOT run the REE-FS→RPMB migration here. Doing so was
+    // tried and triggers a TEE security fault (0xffff000f, origin TEE) on real
+    // i.MX93 hardware: at open_session time the RPMB / secure-storage path via
+    // tee-supplicant is not yet usable, so any PersistentObject access faults
+    // and kills every session (the whole TA becomes unusable, not just one
+    // command). Migration therefore stays in the handlers (load_wallet_cached /
+    // create_wallet / derive_address_auto), which is crash-safe and idempotent.
+    // Residual cost (accepted): on the very first command after an upgrade that
+    // actually performs migration, the in-handler migration writes corrupt TLS,
+    // so that one command may fail once and self-heals on retry.
     Ok(())
 }
 
@@ -381,6 +640,18 @@ pub extern "C" fn p256_generate_random(output: *mut u8, output_size: u32) -> i32
     0 // P256_SUCCESS
 }
 
+/// SHA-256("aastar.io") — the relying party ID for this KMS deployment.
+/// Hardcoded in TA so a compromised CA cannot substitute a different rpId.
+/// To change for a different deployment: recompute SHA-256 of the new rpId
+/// and update this constant; then rebuild and re-flash the TA.
+/// Computed: echo -n "aastar.io" | sha256sum
+const EXPECTED_RP_ID_HASH: [u8; 32] = [
+    0xd9, 0x44, 0xd2, 0xad, 0xbd, 0x65, 0x6d, 0x76,
+    0x9a, 0x81, 0x15, 0x28, 0xd2, 0xac, 0xa5, 0x14,
+    0x71, 0xd5, 0xfc, 0x5c, 0x7f, 0xca, 0xd4, 0x1d,
+    0x86, 0x31, 0x08, 0x3b, 0x20, 0x9a, 0xa6, 0x3a,
+];
+
 /// Verify passkey assertion against the passkey bound to this wallet.
 /// All wallets MUST have a passkey bound — rejects if missing.
 ///
@@ -398,6 +669,44 @@ fn verify_passkey_for_wallet(
 
     let _assertion =
         assertion.ok_or_else(|| anyhow!("Wallet has PassKey bound. Provide PassKey assertion."))?;
+
+    // Verify authenticatorData structure (WebAuthn Level 2 §6.1):
+    //   [0..32]  rpIdHash  (32 bytes, SHA-256 of rpId)
+    //   [32]     flags     (1 byte: bit0=UP, bit2=UV, bit6=AT, bit7=ED)
+    //   [33..37] signCount (4 bytes, big-endian uint32)
+    if _assertion.authenticator_data.len() < 37 {
+        return Err(anyhow!(
+            "authenticatorData too short: {} bytes (minimum 37)",
+            _assertion.authenticator_data.len()
+        ));
+    }
+
+    // Verify rpId hash — MANDATORY, hardcoded in TA (not CA-controlled).
+    // Prevents credential-substitution attack: attacker cannot use a valid
+    // credential from evil.com because its rpId hash will not match aastar.io's.
+    // Constant-time XOR comparison prevents timing side-channel.
+    let actual_rp_id_hash = &_assertion.authenticator_data[0..32];
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= EXPECTED_RP_ID_HASH[i] ^ actual_rp_id_hash[i];
+    }
+    if diff != 0 {
+        return Err(anyhow!(
+            "WebAuthn rpId hash mismatch: expected SHA-256(\"aastar.io\"), got different value"
+        ));
+    }
+    trace_println!("[+] rpId hash verified in TA (constant-time)");
+
+    // Verify User Presence (UP) flag — bit 0 of flags byte (offset 32).
+    // Ensures the user physically interacted with the authenticator.
+    // Checked after rpId to fail fast on wrong-RP assertions.
+    let flags = _assertion.authenticator_data[32];
+    if flags & 0x01 == 0 {
+        return Err(anyhow!(
+            "WebAuthn User Presence flag not set (flags=0x{:02x})",
+            flags
+        ));
+    }
 
     // signature = r(32) || s(32) = 64 bytes
     let mut sig_bytes = [0u8; 64];
@@ -459,6 +768,9 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
         ));
     }
 
+    // Read RPMB counter before any thread_local access (reads don't corrupt TLS).
+    let epoch = rpmb_next_epoch()?;
+
     // If the CA supplied pre-generated entropy (CAAM-bypass mode), use it directly.
     // Otherwise fall back to TEE_GenerateRandom() — which can hang if CAAM TRNG is stuck.
     let mut wallet = match &input.entropy_seed {
@@ -472,6 +784,7 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
         }
     };
     wallet.set_passkey(input.passkey_pubkey.clone());
+    wallet.rollback_epoch = epoch;
     let wallet_id = wallet.get_id();
 
     // Mnemonic never crosses TEE boundary in production.
@@ -483,9 +796,30 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
 
     dbg_println!("[+] Wallet ID: {:?}", wallet_id);
 
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    // Open storage once (a single key-list read does not corrupt TLS); reused
+    // for both the count check and the save below.
+    let db_client = open_storage()?;
+
+    // M-4: bound total wallet count to prevent storage exhaustion (DoS).
+    // count_entries reads ONLY the in-memory key list — no per-entry object
+    // reads — so it issues no extra storage syscalls and cannot corrupt the TLS
+    // register before the cache_put inside save_wallet. (The previous
+    // implementation read every wallet object here, which corrupted TLS on real
+    // i.MX93 hardware and panicked the subsequent thread_local cache access.)
+    const MAX_WALLETS: usize = 100;
+    let existing = db_client.count_entries::<Wallet>()?;
+    if existing >= MAX_WALLETS {
+        return Err(anyhow!(
+            "wallet limit reached ({}/{}) — cannot create more wallets",
+            existing, MAX_WALLETS
+        ));
+    }
+
+    // save_wallet does cache_put (TLS) then db.put (corrupts TLS). After this,
+    // no more thread_local access — safe to call rpmb_write_counter.
     save_wallet(&db_client, &wallet)?;
-    dbg_println!("[+] Wallet saved in secure storage (passkey bound)");
+    rpmb_write_counter(epoch)?;
+    dbg_println!("[+] Wallet saved (passkey bound, RPMB epoch={})", epoch);
 
     Ok(proto::CreateWalletOutput {
         wallet_id,
@@ -496,7 +830,10 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
 fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWalletOutput> {
     trace_println!("[+] Removing wallet: {:?}", input.wallet_id);
 
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    // Read RPMB epoch before any thread_local access (read doesn't corrupt TLS).
+    let next_epoch = rpmb_next_epoch()?;
+
+    let db_client = open_storage()?;
 
     // Load from DB (not cache) — read op doesn't corrupt TLS
     let wallet = db_client
@@ -506,9 +843,19 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
     // Mandatory passkey verification
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
 
+    // H-3: invalidate the LRU cache entry BEFORE the delete syscall. The deleted
+    // wallet must not remain signable from a stale cache hit. cache_remove
+    // touches thread_local, so it must run before delete_entry (a TEE write that
+    // corrupts TLS).
+    cache_remove(&input.wallet_id);
+
+    // delete_entry corrupts TLS; write RPMB counter after.
     db_client.delete_entry::<Wallet>(&input.wallet_id)?;
-    // No cache_remove — borrow_mut panic risk after secure storage write
-    trace_println!("[+] Wallet removed from secure storage (passkey verified)");
+    rpmb_write_counter(next_epoch)?;
+    trace_println!(
+        "[+] Wallet removed (passkey verified, RPMB epoch={})",
+        next_epoch
+    );
 
     Ok(proto::RemoveWalletOutput {})
 }
@@ -577,10 +924,29 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     Ok(proto::SignHashOutput { signature })
 }
 
+// H-1 (DOWNGRADED to Medium — tracked as an accepted limitation / follow-up issue):
+// DeriveAddressAuto carries no passkey assertion and mutates+persists wallet state
+// (next_address_index). It is invoked by the CA immediately after wallet creation,
+// before any passkey-gated flow exists for the new wallet, so requiring a passkey
+// here would break the legitimate creation path (no user assertion is available at
+// that instant). A *compromised CA* could call it directly to advance the address
+// index up to the per-wallet cap (100, enforced in Wallet::increment_address_index),
+// but it cannot exfiltrate keys, sign, or affect other wallets, and the index is now
+// anti-rollback protected (M-5). Net effect of abuse is bounded address churn for a
+// single wallet. A proper fix (bind to a just-created-this-session token, or move the
+// call inline into create_wallet) is deferred to a dedicated issue to avoid breaking
+// the creation flow in this bugfix pass.
 fn derive_address_auto(
     input: &proto::DeriveAddressAutoInput,
 ) -> Result<proto::DeriveAddressAutoOutput> {
-    let db_client = SecureStorageClient::open(DB_NAME)?;
+    // M-5: this mutation bumps next_address_index and persists it. Bump the RPMB
+    // anti-rollback epoch too, otherwise the address index could be silently
+    // rolled back to re-derive (reuse) a previously issued address. Read the next
+    // epoch before any thread_local (cache) access; write the counter only after
+    // save_wallet (last TLS access), matching create_wallet's ordering.
+    let epoch = rpmb_next_epoch()?;
+
+    let db_client = open_storage()?;
 
     dbg_println!("[+] DeriveAddressAuto for wallet: {:?}", input.wallet_id);
     let mut wallet = match cache_get(&input.wallet_id) {
@@ -592,11 +958,15 @@ fn derive_address_auto(
 
     let address_index = wallet.increment_address_index()?;
     wallet.ensure_seed_cached()?;
+    wallet.rollback_epoch = epoch;
 
     let derivation_path = format!("m/44'/60'/0'/0/{}", address_index);
     let (address, public_key) = wallet.derive_address(&derivation_path)?;
 
+    // save_wallet does cache_put (TLS) then db.put (corrupts TLS). After this,
+    // no more thread_local access — safe to call rpmb_write_counter.
     save_wallet(&db_client, &wallet)?;
+    rpmb_write_counter(epoch)?;
 
     Ok(proto::DeriveAddressAutoOutput {
         wallet_id: input.wallet_id,
@@ -638,6 +1008,9 @@ fn export_private_key(
     Ok(proto::ExportPrivateKeyOutput { private_key })
 }
 
+// M-3: no longer wired into handle_invoke (removed from dispatch to avoid being
+// used as an auth oracle). Kept (allow-dead-code) only as a documentation stub.
+#[allow(dead_code)]
 fn verify_passkey(_input: &proto::VerifyPasskeyInput) -> Result<proto::VerifyPasskeyOutput> {
     dbg_println!("[+] Verify passkey for wallet: {:?}", _input.wallet_id);
 
@@ -659,14 +1032,20 @@ fn register_passkey_ta(
         );
     }
 
+    // Read RPMB epoch before load_wallet_cached (which touches thread_local cache).
+    let epoch = rpmb_next_epoch()?;
+
     let mut wallet = load_wallet_cached(&input.wallet_id)?;
     // Verify current passkey before allowing change
     verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
     wallet.set_passkey(input.passkey_pubkey.clone());
+    wallet.rollback_epoch = epoch;
 
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
+    // save_wallet does cache_put (TLS) then db.put (corrupts TLS).
     save_wallet(&db, &wallet)?;
-    trace_println!("[+] PassKey registered and wallet saved");
+    rpmb_write_counter(epoch)?;
+    trace_println!("[+] PassKey registered, wallet saved (RPMB epoch={})", epoch);
 
     Ok(proto::RegisterPasskeyTaOutput { registered: true })
 }
@@ -680,12 +1059,34 @@ fn warmup_cache(input: &proto::WarmupCacheInput) -> Result<proto::WarmupCacheOut
     })
 }
 
+fn read_rollback_counter(
+    _input: &proto::ReadRollbackCounterInput,
+) -> Result<proto::ReadRollbackCounterOutput> {
+    let counter = rpmb_read_counter()?;
+    Ok(proto::ReadRollbackCounterOutput { counter })
+}
+
 fn agent_derivation_path(agent_index: u32) -> String {
     format!("m/44'/60'/0'/1/{}", agent_index)
 }
 
 /// Maximum allowed JWT lifetime: 7 days.
 const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
+
+/// Current wall-clock time (UNIX epoch seconds) read from the REE clock via TEE_GetREETime.
+///
+/// `std::time::SystemTime::now()` is NOT wired into the OP-TEE TA runtime — calling it panics
+/// the TA (observed on real i.MX93 hardware: create-agent-key / refresh-agent-credential aborted
+/// with a TA panic). The TA must obtain time through the optee-utee `Time` API instead.
+///
+/// REE time is "as trusted as the REE itself" (the host can shift the system clock), but the host
+/// still cannot inject `iat`/`exp` into the HMAC-signed JWT payload directly — the TA computes and
+/// signs them, so H-3 (TA owns iat; host only supplies the capped ttl_secs) still holds.
+fn tee_unix_secs() -> i64 {
+    let mut t = Time::new();
+    t.ree_time();
+    t.seconds as i64
+}
 
 fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateAgentKeyOutput> {
     dbg_println!(
@@ -710,13 +1111,10 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
     let derivation_path = agent_derivation_path(input.agent_index);
     let (agent_address, public_key_compressed) = wallet.derive_address(&derivation_path)?;
 
-    // Build JWT payload entirely inside TEE — iat computed from TA system clock so
+    // Build JWT payload entirely inside TEE — iat computed from the TA's view of the clock so
     // a compromised host cannot supply iat=0 or iat=far_future to shift the TTL window.
     // H-3: TA owns iat; host only supplies ttl_secs (capped above).
-    let iat = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let iat = tee_unix_secs();
     let agent_addr_hex = format!("0x{}", hex::encode(agent_address));
     let wallet_id_str = input.wallet_id.to_string();
     let exp = iat.checked_add(input.ttl_secs)
@@ -819,7 +1217,7 @@ struct JwtSignedMaterial {
 fn jwt_sign_payload_internal(payload_json: &str) -> Result<JwtSignedMaterial> {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let mut store = JwtSecretStore::load(&db);
     let current = store.ensure_current()?.clone();
     store.save(&db)?;
@@ -935,7 +1333,7 @@ fn create_p256_session_key(
     // Persist both private key and public key in TEE secure storage.
     // Public key is stored so sign_p256_user_op can embed it in the 149-byte output
     // without needing to re-derive it from the private key.
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let sk = P256SessionKey {
         store_id: P256SessionKey::store_id_for(&input.wallet_id, input.session_index),
         private_key: priv_bytes.to_vec(),
@@ -950,10 +1348,7 @@ fn create_p256_session_key(
 
     // Issue JWT credential for this session key (TEE-HMAC'd, same mechanism as agent keys).
     // agent_index is repurposed as session_index so verify_credential on the host works unchanged.
-    let iat = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let iat = tee_unix_secs();
     let exp = iat.checked_add(input.ttl_secs)
         .ok_or_else(|| anyhow!("JWT exp overflow"))?;
     let wallet_id_str = input.wallet_id.to_string();
@@ -999,7 +1394,7 @@ fn sign_p256_user_op(
     }
 
     // Load P-256 key pair from TEE secure storage
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let sk = P256SessionKey::load(&db, &input.wallet_id, input.session_index)?;
     if sk.private_key.len() != 32 {
         return Err(anyhow!(
@@ -1151,7 +1546,7 @@ fn delete_p256_session_key(
         input.wallet_id,
         input.session_index
     );
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let store_id = P256SessionKey::store_id_for(&input.wallet_id, input.session_index);
     match db.delete_entry::<P256SessionKey>(&store_id) {
         Ok(()) => Ok(proto::DeleteP256SessionKeyOutput { deleted: true }),
@@ -1459,7 +1854,7 @@ fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<p
 }
 
 fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVerifyOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let store = JwtSecretStore::load(&db);
     let valid = match store.find(&input.kid) {
         Some(entry) => {
@@ -1475,7 +1870,7 @@ fn jwt_hmac_verify(input: &proto::JwtHmacVerifyInput) -> Result<proto::JwtHmacVe
 }
 
 fn jwt_rotate_secret(input: &proto::JwtRotateSecretInput) -> Result<proto::JwtRotateSecretOutput> {
-    let db = SecureStorageClient::open(DB_NAME)?;
+    let db = open_storage()?;
     let mut store = JwtSecretStore::load(&db);
     let had_current = store.current().is_some();
 
@@ -1520,7 +1915,10 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignHash => process(serialized_input, sign_hash),
         Command::DeriveAddressAuto => process(serialized_input, derive_address_auto),
         Command::ExportPrivateKey => process(serialized_input, export_private_key),
-        Command::VerifyPasskey => process(serialized_input, verify_passkey),
+        // M-3: VerifyPasskey was an unconditional `valid:true` stub. Removing it
+        // from dispatch prevents it from ever being used as a fake auth oracle.
+        // Real authorization always goes through verify_passkey_for_wallet (p256-m).
+        Command::VerifyPasskey => bail!("VerifyPasskey is not supported (use a signing command which verifies the passkey)"),
         Command::WarmupCache => process(serialized_input, warmup_cache),
         Command::RegisterPasskeyTa => process(serialized_input, register_passkey_ta),
         Command::CreateAgentKey => process(serialized_input, create_agent_key),
@@ -1534,9 +1932,17 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignGrantSession => process(serialized_input, sign_grant_session),
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         Command::ForceRemoveWallet => process(serialized_input, force_remove_wallet),
+        Command::ReadRollbackCounter => process(serialized_input, read_rollback_counter),
         _ => bail!("Unsupported command"),
     }
 }
+
+// Output buffer size the host allocates for p1 (see ta_client.rs OUTPUT_MAX_SIZE).
+// C-4: the TA must never report an output length larger than the host buffer.
+// If it did, a host that trusts p2.a() (the returned length) and slices its
+// 4096-byte buffer with it would panic / read OOB. We bound both the success
+// payload and error messages to this size and signal SHORT_BUFFER explicitly.
+const OUTPUT_BUF_SIZE: usize = 4096;
 
 #[ta_invoke_command]
 fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()> {
@@ -1548,7 +1954,13 @@ fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()
     let output_vec = match handle_invoke(Command::from(cmd_id), p0.buffer()) {
         Ok(output) => output,
         Err(e) => {
-            let err_message = format!("{:?}", e).as_bytes().to_vec();
+            // C-4: cap the error message so it can never exceed the host buffer.
+            let mut err_message = format!("{:?}", e).into_bytes();
+            err_message.truncate(OUTPUT_BUF_SIZE);
+            // Defensive: only write if it fits the actual provided buffer.
+            if err_message.len() > p1.buffer().len() {
+                err_message.truncate(p1.buffer().len());
+            }
             p1.buffer()
                 .write(&err_message)
                 .map_err(|_| Error::new(ErrorKind::BadState))?;
@@ -1556,12 +1968,82 @@ fn invoke_command(cmd_id: u32, params: &mut Parameters) -> optee_utee::Result<()
             return Err(Error::new(ErrorKind::BadParameters));
         }
     };
+
+    // C-4: reject oversized output instead of letting the host slice past its
+    // 4096-byte buffer with a length it cannot satisfy. Return SHORT_BUFFER and
+    // set p2 to 0 so the host does not slice with a bogus length.
+    if output_vec.len() > OUTPUT_BUF_SIZE || output_vec.len() > p1.buffer().len() {
+        p2.set_a(0);
+        return Err(Error::new(ErrorKind::ShortBuffer));
+    }
+
     p1.buffer()
         .write(&output_vec)
         .map_err(|_| Error::new(ErrorKind::BadState))?;
     p2.set_a(output_vec.len() as u32);
 
     Ok(())
+}
+
+// H-D: anti-rollback epoch_check boundary tests. This is the core security
+// decision function for RPMB anti-rollback — pure logic, pinned here against
+// regression. (TA-crate tests follow the eip712.rs convention: compiled under
+// cfg(test), executed when a TA test runner is available.)
+#[cfg(test)]
+mod rollback_tests {
+    use super::epoch_check;
+
+    fn wid() -> uuid::Uuid {
+        uuid::Uuid::from_bytes([0x22; 16])
+    }
+
+    #[test]
+    fn epoch_zero_skips_check() {
+        // legacy wallets (epoch 0) bypass anti-rollback entirely
+        assert!(!epoch_check(0, 0, true, &wid()).unwrap());
+        assert!(!epoch_check(0, 100, true, &wid()).unwrap());
+        assert!(!epoch_check(0, 0, false, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_equal_passes_no_recovery() {
+        assert!(!epoch_check(5, 5, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_behind_counter_passes() {
+        // wallet not mutated recently; counter moved on via other wallets (M-8)
+        assert!(!epoch_check(3, 5, true, &wid()).unwrap());
+        assert!(!epoch_check(1, u64::MAX, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_plus_one_triggers_recovery() {
+        // crash window: wallet saved with N+1 but counter write was interrupted
+        assert!(epoch_check(6, 5, true, &wid()).unwrap());
+        assert!(epoch_check(1, 0, true, &wid()).unwrap());
+    }
+
+    #[test]
+    fn epoch_plus_two_rejected_as_tampered() {
+        assert!(epoch_check(7, 5, true, &wid()).is_err());
+        assert!(epoch_check(u64::MAX, 5, true, &wid()).is_err());
+    }
+
+    #[test]
+    fn counter_absent_reinitializes_from_wallet_epoch() {
+        // C-2: post-reflash the RPMB counter object is gone; a legitimate
+        // wallet with epoch N must NOT brick — it re-establishes the baseline
+        assert!(epoch_check(5, 0, false, &wid()).unwrap());
+        assert!(epoch_check(u64::MAX, 0, false, &wid()).unwrap());
+    }
+
+    #[test]
+    fn counter_at_max_does_not_overflow() {
+        // saturating_add guard: must not panic in debug builds
+        assert!(!epoch_check(5, u64::MAX, true, &wid()).unwrap());
+        assert!(epoch_check(u64::MAX, u64::MAX - 1, true, &wid()).unwrap());
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/user_ta_header.rs"));

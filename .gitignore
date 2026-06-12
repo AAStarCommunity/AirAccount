@@ -59,10 +59,16 @@ out/
 
 # Environment variables
 .env
+.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+# Test keypairs (contain EC private key scalars — must never be committed)
+.env.kms-test
+# Generated test passkey fixtures (private keys) — rebuilt from .env.kms-test by
+# `python3 kms/test/p256_helper.py gen-all`. transactions.json has no secrets, stays tracked.
+kms/test/test-fixtures/user*.json
 
 # Local development
 .local/

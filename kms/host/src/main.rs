@@ -24,11 +24,15 @@ fn main() -> Result<()> {
     let args = cli::Opt::from_args();
     match args.command {
         cli::Command::CreateWallet(_opt) => {
-            let wallet_id = create_wallet()?;
-            println!("Wallet ID: {}", wallet_id);
+            // Dev CLI: a syntactically valid (uncompressed P-256 layout) but
+            // throwaway passkey pubkey — wallets created here are for local
+            // TA debugging only and cannot pass passkey verification.
+            let dev_pubkey = [0x04u8; 65];
+            let wallet_id = create_wallet(&dev_pubkey)?;
+            println!("Wallet ID: {} (dev passkey — debugging only)", wallet_id);
         }
         cli::Command::DeriveAddress(opt) => {
-            let address = derive_address(opt.wallet_id, &opt.hd_path)?;
+            let address = derive_address(opt.wallet_id, &opt.hd_path, None)?;
             println!("Address: 0x{}", hex::encode(&address));
         }
         cli::Command::SignTransaction(opt) => {
