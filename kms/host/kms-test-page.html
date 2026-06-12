@@ -403,13 +403,21 @@
         const API_BASE = 'https://kms.aastar.io';
         let outputHistory = [];
 
+        // 生成随机 P-256 测试公钥（04 + 32字节X + 32字节Y）
+        function genTestP256Pubkey() {
+            const bytes = new Uint8Array(64);
+            crypto.getRandomValues(bytes);
+            return '04' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
         // 初始化默认值
         window.addEventListener('DOMContentLoaded', () => {
             document.getElementById('createKeyInput').value = JSON.stringify({
                 "Description": "test-wallet",
                 "KeyUsage": "SIGN_VERIFY",
                 "KeySpec": "ECC_SECG_P256K1",
-                "Origin": "AWS_KMS"
+                "Origin": "EXTERNAL",
+                "PasskeyPublicKey": genTestP256Pubkey()
             }, null, 2);
 
             document.getElementById('describeKeyInput').value = JSON.stringify({

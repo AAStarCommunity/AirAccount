@@ -64,11 +64,13 @@ echo ""
 # 2. CreateKey
 # ─────────────────────────────────────────────
 echo "${YELLOW}[Phase 2] Wallet Lifecycle${NC}"
+# Generate a random P-256 test public key (04 + 32 bytes X + 32 bytes Y)
+TEST_PASSKEY_PK="04$(openssl rand -hex 32)$(openssl rand -hex 32)"
 timed_curl "POST /CreateKey" \
     -X POST "$BASE/CreateKey" \
     -H "$HDR_JSON" \
     -H "x-amz-target: TrentService.CreateKey" \
-    -d '{"Description":"api-bench-test","KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
+    -d "{\"Description\":\"api-bench-test\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"EXTERNAL\",\"PasskeyPublicKey\":\"$TEST_PASSKEY_PK\"}"
 
 KEY_ID=$(echo "$LAST_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['KeyMetadata']['KeyId'])" 2>/dev/null || echo "")
 if [ -z "$KEY_ID" ]; then
@@ -180,23 +182,14 @@ timed_curl "POST /ChangePasskey" \
 echo ""
 
 # ─────────────────────────────────────────────
-# 7. Cleanup test wallet via CLI
+# 7. Cleanup test wallet via REST API
 # ─────────────────────────────────────────────
 echo "${YELLOW}[Phase 7] Cleanup${NC}"
-DEL_START=$(now_ms)
-DEL_RESULT=$(ssh -o ConnectTimeout=5 root@192.168.7.2 "/usr/local/bin/kms remove-wallet -w $KEY_ID" 2>&1 || echo "FAIL")
-DEL_END=$(now_ms)
-DEL_TIME=$((DEL_END - DEL_START))
-
-API_NAMES+=("CLI remove-wallet")
-API_TIMES+=("$DEL_TIME")
-if echo "$DEL_RESULT" | grep -qi "fail\|error"; then
-    API_STATUS+=("FAIL")
-    printf "${RED}FAIL${NC} %-28s %6d ms  %s\n" "CLI remove-wallet" "$DEL_TIME" "$DEL_RESULT"
-else
-    API_STATUS+=("OK")
-    printf "${GREEN} OK ${NC} %-28s %6d ms  %s\n" "CLI remove-wallet" "$DEL_TIME" "$(echo "$DEL_RESULT" | head -c 80)"
-fi
+timed_curl "POST /DeleteKey" \
+    -X POST "$BASE/DeleteKey" \
+    -H "$HDR_JSON" \
+    -H "x-amz-target: TrentService.DeleteKey" \
+    -d "{\"KeyId\":\"$KEY_ID\",\"PendingWindowInDays\":0}"
 echo ""
 
 # ─────────────────────────────────────────────

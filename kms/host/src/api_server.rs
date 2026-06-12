@@ -241,6 +241,24 @@ pub struct DeleteKeyResponse {
     pub deletion_date: DateTime<Utc>,
 }
 
+/// Admin force-purge request — bypasses passkey, deletes from TEE + SQLite.
+/// Requires Authorization: Bearer $KMS_ADMIN_TOKEN header.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdminPurgeKeyRequest {
+    pub key_id: String,
+    /// Human-readable reason for audit log (e.g. "orphan cleanup", "test key")
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdminPurgeKeyResponse {
+    pub key_id: String,
+    pub tee_purged: bool,
+    pub sqlite_deleted: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetPublicKeyRequest {
     #[serde(rename = "KeyId")]
@@ -1112,6 +1130,12 @@ impl KmsApiServer {
                 passkey_pubkey.len()
             ));
         }
+        // Validate the point is actually on the P-256 curve (prevents gap keys)
+        if p256::PublicKey::from_sec1_bytes(&passkey_pubkey).is_err() {
+            return Err(anyhow!(
+                "PasskeyPublicKey is not a valid point on the P-256 curve"
+            ));
+        }
 
         let wallet_id = self.tee.create_wallet(&passkey_pubkey).await?;
         let now = Utc::now();
@@ -1871,16 +1895,50 @@ impl KmsApiServer {
         println!("📝 KMS DeleteKey API called for key: {}", req.key_id);
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
-        let passkey_assertion = self
-            .resolve_passkey_assertion_strict(
-                &req.key_id,
-                req.passkey.as_ref(),
-                req.webauthn.as_ref(),
-            )
-            .await?;
-        self.tee
-            .remove_wallet(wallet_uuid, passkey_assertion)
-            .await?;
+        // Check whether the stored passkey is a valid P-256 curve point.
+        // If it isn't (a "gap key" created before the CreateKey validation was
+        // tightened), skip passkey verification and TEE removal — the TEE has
+        // no valid key material to protect, so the DB record is all that remains.
+        let is_gap_key = self
+            .db
+            .get_wallet(&req.key_id)?
+            .and_then(|w| w.passkey_pubkey)
+            .and_then(|hex| hex::decode(hex.trim_start_matches("0x")).ok())
+            .map(|bytes| p256::PublicKey::from_sec1_bytes(&bytes).is_err())
+            .unwrap_or(false);
+
+        if is_gap_key {
+            // Gap key: passkey_pubkey is not a valid P-256 curve point.
+            // Attempt TEE force-removal (ForceRemoveWallet = cmd 23, added in TA v0.20.0).
+            // On older TA binaries this call returns "Unsupported command" — we log and
+            // continue so the SQLite row is still cleaned up regardless.
+            match self.tee.force_remove_wallet(wallet_uuid).await {
+                Ok(()) => {
+                    println!("✅ Gap key TEE entry purged (ForceRemoveWallet succeeded)");
+                }
+                Err(e) => {
+                    // TA older than v0.20.0 — TEE orphan remains (~1-2 KB, inaccessible).
+                    // SQLite cleanup still proceeds. Rebuild TA to fully resolve.
+                    eprintln!(
+                        "⚠️  Gap key TEE purge failed (TA may need rebuild): {}. \
+                        SQLite row will still be deleted. TEE orphan is inaccessible.",
+                        e
+                    );
+                }
+            }
+        } else {
+            // Normal key: strict passkey/WebAuthn verification (audit-hardened) before removal.
+            let passkey_assertion = self
+                .resolve_passkey_assertion_strict(
+                    &req.key_id,
+                    req.passkey.as_ref(),
+                    req.webauthn.as_ref(),
+                )
+                .await?;
+            self.tee
+                .remove_wallet(wallet_uuid, passkey_assertion)
+                .await?;
+        }
 
         // Remove from DB (CASCADE deletes address_index entries).
         // H-C: the TA wallet is already gone. If this DB delete is lost the
@@ -1921,6 +1979,43 @@ impl KmsApiServer {
             key_id: req.key_id,
             deletion_date,
         })
+    }
+
+    /// Admin force-purge: removes a key from TEE + SQLite without passkey verification.
+    /// Used for: TEE orphans (SQLite row gone), test keys, gap keys.
+    /// Requires KMS_ADMIN_TOKEN to be set in the environment.
+    /// Returns (tee_purged, sqlite_deleted).
+    pub async fn admin_purge_key(&self, key_id: &str, reason: &str) -> Result<(bool, bool)> {
+        let wallet_uuid = Uuid::parse_str(key_id)?;
+
+        println!("🔑 AdminPurgeKey: {} reason={}", key_id, reason);
+
+        // Try TEE removal (ForceRemoveWallet = cmd 23).
+        // Succeeds only if the entry exists in TEE and TA supports cmd 23.
+        let tee_ok = match self.tee.force_remove_wallet(wallet_uuid).await {
+            Ok(()) => {
+                println!("  ✅ TEE entry purged");
+                true
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  TEE purge failed (orphan or old TA): {}", e);
+                false
+            }
+        };
+
+        // Delete from SQLite (ignore if already gone).
+        let sqlite_ok = match self.db.delete_wallet(key_id) {
+            Ok(()) => {
+                println!("  ✅ SQLite row deleted");
+                true
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  SQLite delete failed (row may not exist): {}", e);
+                false
+            }
+        };
+
+        Ok((tee_ok, sqlite_ok))
     }
 
     // ── WebAuthn ceremonies ──
@@ -3643,7 +3738,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "ta_mode": "real",
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
-            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus"]
+            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats"]
         }
     })))
 }
@@ -3912,6 +4007,48 @@ async fn handle_delete_key(
     }
 }
 
+/// POST /admin/purge-key — admin force-delete from TEE + SQLite (no passkey needed).
+/// Requires Authorization: Bearer $KMS_ADMIN_TOKEN.
+/// Used for: TEE orphans, test keys, gap keys whose SQLite row is already deleted.
+async fn handle_admin_purge_key(
+    body: AdminPurgeKeyRequest,
+    admin_token: String,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    // Validate admin token
+    let expected = std::env::var("KMS_ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        return Err(warp::reject::custom(ApiError(
+            "KMS_ADMIN_TOKEN not configured — admin endpoints disabled".into(),
+        )));
+    }
+    if admin_token != expected {
+        return Err(warp::reject::custom(ApiError("Invalid admin token".into())));
+    }
+
+    let reason = if body.reason.is_empty() {
+        "unspecified".to_string()
+    } else {
+        body.reason.clone()
+    };
+    match server.admin_purge_key(&body.key_id, &reason).await {
+        Ok((tee_ok, sqlite_ok)) => {
+            let msg = format!(
+                "tee_purged={} sqlite_deleted={} reason={}",
+                tee_ok, sqlite_ok, reason
+            );
+            println!("✅ AdminPurgeKey OK key={} {}", body.key_id, msg);
+            Ok(warp::reply::json(&AdminPurgeKeyResponse {
+                key_id: body.key_id,
+                tee_purged: tee_ok,
+                sqlite_deleted: sqlite_ok,
+                message: msg,
+            }))
+        }
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_change_passkey(
     body: ChangePasskeyRequest,
     server: Arc<KmsApiServer>,
@@ -4063,6 +4200,117 @@ async fn handle_queue_status(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     Ok(warp::reply::json(&server.queue_status()))
+}
+
+/// Query params for /stats
+#[derive(serde::Deserialize, Default)]
+struct StatsQuery {
+    /// ?pretty=1 or ?pretty=true → human-readable indented JSON
+    #[serde(default)]
+    pretty: Option<String>,
+}
+
+/// GET /stats — JSON stats for internal monitoring / health dashboards.
+/// Add ?pretty=1 for human-readable indented output.
+async fn handle_get_stats(
+    query: StatsQuery,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let pretty = query
+        .pretty
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let wallets = server.db.list_wallets().unwrap_or_default();
+    let qs = server.queue_status();
+    let tx = server.db.get_tx_stats().unwrap_or_default();
+    let api_keys = server.db.list_api_keys().map(|v| v.len()).unwrap_or(0);
+
+    let mut warnings: Vec<serde_json::Value> = Vec::new();
+    if api_keys == 0 {
+        warnings.push(serde_json::json!({
+            "code": "NO_API_KEYS",
+            "en": "No API keys registered — server is in open mode, all requests allowed. Add an API key before production.",
+            "zh": "未注册 API Key，服务处于开放模式，所有请求均放行。生产上线前必须添加 API Key。"
+        }));
+    }
+    if qs.circuit_breaker_open.unwrap_or(false) {
+        warnings.push(serde_json::json!({
+            "code": "CIRCUIT_BREAKER_OPEN",
+            "en": "TEE call queue circuit breaker is OPEN — TA may be unresponsive.",
+            "zh": "TEE 调用队列熔断器已断开，TA 可能无响应。"
+        }));
+    }
+
+    let resp = serde_json::json!({
+        "service": "kms-api",
+        "version": env!("CARGO_PKG_VERSION"),
+        "ta_mode": "real",
+        "keys": {
+            "total": wallets.len(),
+            "active": wallets.iter().filter(|w| w.status == "ready").count(),
+            "with_address": wallets.iter().filter(|w| w.address.is_some()).count(),
+            "with_passkey": wallets.iter().filter(|w| w.passkey_pubkey.is_some()).count()
+        },
+        "operations": {
+            "total_signs": tx.total_sign,
+            "daily_signs": tx.daily_sign,
+            "total_ops": tx.total_ops,
+            "daily_ops": tx.daily_ops,
+            "avg_sign_ms": tx.avg_sign_ms,
+            "avg_derive_ms": tx.avg_derive_ms,
+            "errors": tx.error_count,
+            "panics": tx.panic_count,
+            "webauthn": tx.webauthn_count
+        },
+        "queue": {
+            "circuit_breaker": if qs.circuit_breaker_open.unwrap_or(false) { "open" } else { "closed" },
+            "consecutive_failures": qs.consecutive_failures.unwrap_or(0)
+        },
+        "api_keys": api_keys,
+        "warnings": warnings,
+        "_explain": {
+            "service":    { "en": "Service name",                                          "zh": "服务名称" },
+            "version":    { "en": "Binary version (semver)",                               "zh": "二进制版本号" },
+            "ta_mode":    { "en": "'real' = real OP-TEE hardware; 'mock' = software-only", "zh": "'real'=真实 OP-TEE 硬件；'mock'=纯软件模拟" },
+            "api_keys":   { "en": "Registered API keys count. 0 = open mode (dev only!)", "zh": "已注册 API Key 数量。0 = 开放模式（仅限开发！）" },
+            "warnings":   { "en": "Active configuration warnings",                        "zh": "当前配置警告列表" },
+            "keys": {
+                "_":             { "en": "TEE-protected wallet summary",                          "zh": "TEE 保护的钱包汇总" },
+                "total":         { "en": "All wallet records in DB (including test keys)",        "zh": "数据库中钱包总数（含测试 key）" },
+                "active":        { "en": "Wallets with status='ready' (key derived)",            "zh": "status='ready'（已完成密钥派生）的钱包数" },
+                "with_address":  { "en": "Wallets that have an Ethereum address derived",        "zh": "已派生以太坊地址的钱包数" },
+                "with_passkey":  { "en": "Wallets bound to a P-256 passkey public key",          "zh": "已绑定 P-256 passkey 公钥的钱包数" }
+            },
+            "operations": {
+                "_":             { "en": "Cumulative operation counters (since service start)",  "zh": "累计操作计数（服务启动以来）" },
+                "total_ops":     { "en": "All operations (CreateKey, Sign, etc.)",               "zh": "所有操作总次数（含 CreateKey/Sign 等）" },
+                "daily_ops":     { "en": "Operations today (UTC day boundary)",                  "zh": "今日操作次数（UTC 日边界）" },
+                "total_signs":   { "en": "Total secp256k1 signing operations",                   "zh": "累计 secp256k1 签名次数" },
+                "daily_signs":   { "en": "Signing operations today",                             "zh": "今日签名次数" },
+                "avg_sign_ms":   { "en": "Average TEE signing latency (ms). ~39ms = pure-SW k256; target <1ms with CAAM (Issue #40)", "zh": "平均 TEE 签名耗时(ms)。~39ms=纯软件 k256；接 CAAM 后目标 <1ms（Issue #40）" },
+                "avg_derive_ms": { "en": "Average BIP-32 key derivation latency (ms)",          "zh": "平均 BIP-32 密钥派生耗时(ms)" },
+                "errors":        { "en": "Total error count (includes intentional security-test rejections)", "zh": "累计错误次数（含安全测试的主动拒绝，非生产故障）" },
+                "panics":        { "en": "TA panic count. Non-zero = critical, investigate immediately", "zh": "TA panic 次数。非零 = 严重问题，立即排查" },
+                "webauthn":      { "en": "WebAuthn authentication operations count",             "zh": "WebAuthn 认证操作次数" }
+            },
+            "queue": {
+                "_":                    { "en": "TEE call queue health",           "zh": "TEE 调用队列健康状态" },
+                "circuit_breaker":      { "en": "'closed'=normal; 'open'=TA unresponsive, calls failing", "zh": "'closed'=正常；'open'=TA 无响应，调用失败" },
+                "consecutive_failures": { "en": "Consecutive TEE failures before circuit opens", "zh": "熔断前连续失败次数" }
+            }
+        }
+    });
+    let body = if pretty {
+        serde_json::to_string_pretty(&resp)
+    } else {
+        serde_json::to_string(&resp)
+    }
+    .unwrap_or_else(|_| "{}".to_string());
+    Ok(warp::reply::with_header(
+        warp::reply::Response::new(body.into()),
+        "content-type",
+        "application/json; charset=utf-8",
+    ))
 }
 
 async fn handle_rollback_counter(
@@ -4611,10 +4859,16 @@ pub async fn start_kms_server() -> Result<()> {
     let test_ui = warp::path("test")
         .and(warp::get())
         .map(|| {
-            match std::fs::read_to_string("/root/shared/kms-test-page.html") {
-                Ok(html) => warp::reply::html(html),
-                Err(_) => warp::reply::html("<html><body><h1>Test UI not available</h1><p>Please deploy kms-test-page.html to /root/shared/</p></body></html>".to_string())
-            }
+            // Search in priority order: working dir, MX93 deployment path, legacy QEMU path
+            let candidates = [
+                "kms-test-page.html",
+                "/root/AirAccount/kms-test-page.html",
+                "/root/shared/kms-test-page.html",
+            ];
+            let html = candidates.iter()
+                .find_map(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_else(|| "<html><body><h1>Test UI not available</h1><p>Deploy kms-test-page.html to the working directory or /root/AirAccount/</p></body></html>".to_string());
+            warp::reply::html(html)
         });
 
     // Health check
@@ -4651,6 +4905,13 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
 
+    // Stats JSON - GET /stats[?pretty=1] (machine-readable, no auth required)
+    let server_stats = server.clone();
+    let stats_json = warp::path("stats")
+        .and(warp::get())
+        .and(warp::query::<StatsQuery>())
+        .and(warp::any().map(move || server_stats.clone()))
+        .and_then(handle_get_stats);
     // RollbackCounter - GET /RollbackCounter
     let server_rc = server.clone();
     let rollback_counter = warp::path("RollbackCounter")
@@ -4758,15 +5019,23 @@ pub async fn start_kms_server() -> Result<()> {
         .and_then(handle_get_public_key);
 
     // DeleteKey API (TEE)
+    // Accepts both "TrentService.DeleteKey" (canonical) and
+    // "TrentService.ScheduleKeyDeletion" (AWS KMS compat alias).
     let server7 = Arc::clone(&server);
+    let delete_key_target = warp::header::<String>("x-amz-target")
+        .and_then(|t: String| async move {
+            if t == "TrentService.DeleteKey" || t == "TrentService.ScheduleKeyDeletion" {
+                Ok(())
+            } else {
+                Err(warp::reject::not_found())
+            }
+        })
+        .untuple_one();
     let delete_key = warp::path("DeleteKey")
         .and(warp::post())
         .and(api_key_filter.clone())
         .and(rl_filter.clone())
-        .and(warp::header::exact(
-            "x-amz-target",
-            "TrentService.ScheduleKeyDeletion",
-        ))
+        .and(delete_key_target)
         .and(aws_kms_body())
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
@@ -5007,6 +5276,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(version)
         .or(key_status)
         .or(queue_status)
+        .or(stats_json)
         .or(rollback_counter)
         .or(change_passkey)
         .boxed();
@@ -5038,10 +5308,26 @@ pub async fn start_kms_server() -> Result<()> {
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
         .boxed();
+    // POST /admin/purge-key — admin force-delete (no passkey). Requires KMS_ADMIN_TOKEN.
+    let server_admin = server.clone();
+    let admin_purge = warp::path!("admin" / "purge-key")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(
+            warp::header::optional::<String>("authorization").map(|h: Option<String>| {
+                h.unwrap_or_default()
+                    .trim_start_matches("Bearer ")
+                    .to_string()
+            }),
+        )
+        .and(warp::any().map(move || server_admin.clone()))
+        .and_then(handle_admin_purge_key);
+
     let routes = group1
         .or(group2)
         .or(group3)
         .or(group4)
+        .or(admin_purge)
         .recover(handle_rejection);
 
     println!(
