@@ -134,6 +134,93 @@ def make_ceremony_assertion(privkey_pem: str, challenge_b64url: str, credential_
     }
 
 
+def _cbor_uint(n: int) -> bytes:
+    """CBOR encode a small unsigned/negative int (sufficient for COSE labels)."""
+    if n >= 0:
+        if n < 24:
+            return bytes([n])
+        if n < 256:
+            return bytes([0x18, n])
+        raise ValueError("uint too large for minimal encoder")
+    # negative: major type 1, value = -1-n
+    v = -1 - n
+    if v < 24:
+        return bytes([0x20 | v])
+    if v < 256:
+        return bytes([0x38, v])
+    raise ValueError("neg too large for minimal encoder")
+
+
+def _cbor_bytes(b: bytes) -> bytes:
+    n = len(b)
+    if n < 24:
+        return bytes([0x40 | n]) + b
+    if n < 256:
+        return bytes([0x58, n]) + b
+    return bytes([0x59, n >> 8, n & 0xFF]) + b
+
+
+def _cbor_text(s: str) -> bytes:
+    b = s.encode()
+    n = len(b)
+    if n < 24:
+        return bytes([0x60 | n]) + b
+    return bytes([0x78, n]) + b
+
+
+def make_registration_response(privkey_pem: str, challenge_b64url: str, credential_id: str = "dGVzdC1jcmVkZW50aWFs"):
+    """Build a WebAuthn RegistrationResponseJSON with 'none' attestation.
+
+    CompleteRegistration does NOT verify the attestation statement signature — it
+    only checks clientDataJSON (type/challenge/origin), rpIdHash, UP+AT flags, and
+    parses the COSE P-256 public key out of authData. So a hand-built 'none'
+    attestation with a real P-256 key (matching the fixture) registers cleanly.
+    """
+    private_key = serialization.load_pem_private_key(privkey_pem.encode(), password=None)
+    nums = private_key.public_key().public_numbers()
+    x = nums.x.to_bytes(32, "big")
+    y = nums.y.to_bytes(32, "big")
+
+    client_data_json = json.dumps({
+        "type": "webauthn.create",
+        "challenge": challenge_b64url,
+        "origin": "https://aastar.io",
+    }, separators=(",", ":")).encode()
+
+    # COSE_Key: {1:2(EC2), 3:-7(ES256), -1:1(P-256), -2:x, -3:y}
+    cose = (bytes([0xA5])
+            + _cbor_uint(1) + _cbor_uint(2)
+            + _cbor_uint(3) + _cbor_uint(-7)
+            + _cbor_uint(-1) + _cbor_uint(1)
+            + _cbor_uint(-2) + _cbor_bytes(x)
+            + _cbor_uint(-3) + _cbor_bytes(y))
+
+    cred_id = base64.urlsafe_b64decode(credential_id + "=" * (-len(credential_id) % 4))
+    rp_id_hash = hashlib.sha256(b"aastar.io").digest()
+    flags = bytes([0x41])           # UP(0x01) | AT(0x40)
+    sign_count = struct.pack(">I", 0)
+    aaguid = b"\x00" * 16
+    cred_id_len = struct.pack(">H", len(cred_id))
+    auth_data = rp_id_hash + flags + sign_count + aaguid + cred_id_len + cred_id + cose
+
+    # attestationObject: {"fmt":"none","attStmt":{},"authData":bytes}  (CBOR map, 3 keys)
+    att_obj = (bytes([0xA3])
+               + _cbor_text("fmt") + _cbor_text("none")
+               + _cbor_text("attStmt") + bytes([0xA0])
+               + _cbor_text("authData") + _cbor_bytes(auth_data))
+
+    return {
+        "id": credential_id,
+        "rawId": credential_id,
+        "type": "public-key",
+        "response": {
+            "clientDataJSON": _b64url(client_data_json),
+            "attestationObject": _b64url(att_obj),
+        },
+        "clientExtensionResults": {},
+    }
+
+
 def generate_fixture(output_path: str, label: str = "test-user"):
     """Generate a complete test user fixture file."""
     kp = gen_keypair()
@@ -226,6 +313,16 @@ if __name__ == "__main__":
         cred_id = sys.argv[4] if len(sys.argv) > 4 else "dGVzdC1jcmVkZW50aWFs"
         sc = int(sys.argv[5]) if len(sys.argv) > 5 else 1
         print(json.dumps(make_ceremony_assertion(pem, challenge, cred_id, sc)))
+    elif cmd == "registration":
+        # registration <pem> <challenge_b64url> [credential_id]
+        # → WebAuthn RegistrationResponseJSON ('none' attestation) for CompleteRegistration
+        if len(sys.argv) < 4:
+            print("Usage: p256_helper.py registration <privkey_pem> <challenge_b64url> [credential_id]", file=sys.stderr)
+            sys.exit(1)
+        pem = sys.argv[2]
+        challenge = sys.argv[3]
+        cred_id = sys.argv[4] if len(sys.argv) > 4 else "dGVzdC1jcmVkZW50aWFs"
+        print(json.dumps(make_registration_response(pem, challenge, cred_id)))
     elif cmd == "fixture":
         path = sys.argv[2] if len(sys.argv) > 2 else "/dev/stdout"
         label = sys.argv[3] if len(sys.argv) > 3 else "test-user"
