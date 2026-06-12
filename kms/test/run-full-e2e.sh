@@ -90,6 +90,18 @@ echo -e "${YEL}[7] Negative — auth gates reject correctly${NC}"
 chk "SignTypedData no-auth → reject"      "$(post_path_code /kms/SignTypedData SignTypedData '{"domain":{},"types":{},"primaryType":"X","message":{}}')" 400
 chk "sign-grant-session no-auth → reject" "$(post_path_code /kms/sign-grant-session SignGrantSession '{}')" 400
 
+echo -e "${YEL}[7b] Agent key flow (ceremony → Bearer JWT)${NC}"
+post_code CreateKey "{\"Description\":\"ak\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
+HKID=$(jbody "['KeyMetadata']['KeyId']"); sleep 2
+WA=$(ceremony "$HKID")
+chk "POST /kms/create-agent-key" "$(post_path_code /kms/create-agent-key CreateAgentKey "{\"humanKeyId\":\"$HKID\",\"label\":\"e2e\",\"webAuthnAssertion\":$WA}")" 200
+ACRED=$(jbody "['agentCredential']"); AKID=$(jbody "['keyId']")
+chk "POST /kms/sign-agent (Bearer JWT)" "$(post_path_code /kms/sign-agent SignAgent "{\"keyId\":\"$AKID\",\"payload\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"accountAddress\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\"}" "Authorization: Bearer $ACRED")" 200
+WA=$(ceremony "$HKID")
+chk "POST /kms/refresh-agent-credential" "$(post_path_code /kms/refresh-agent-credential RefreshAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}" "Authorization: Bearer $ACRED")" 200
+WA=$(ceremony "$HKID")
+chk "POST /kms/revoke-agent-credential" "$(post_path_code /kms/revoke-agent-credential RevokeAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}")" 200
+
 echo -e "${YEL}[8] Cleanup${NC}"
 WA=$(ceremony "$KEYID")
 chk "POST /DeleteKey (ScheduleKeyDeletion)" "$(del_code "{\"KeyId\":\"$KEYID\",\"WebAuthn\":$WA}")" 200
