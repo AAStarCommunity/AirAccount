@@ -506,6 +506,95 @@ pub struct SignTypedDataResponse {
     pub signature: String,
 }
 
+// ── P2 SuperPaymaster convenience signers (v0.18.1) ──
+// Each builds a fixed EIP-712 domain+type in the host and signs via the existing
+// SignTypedData TA command — no new TA command/Command-ID is introduced.
+
+/// `POST /kms/SignMicropaymentVoucher`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignMicropaymentVoucherRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    /// MicroPaymentChannel contract address (0x…, 20 bytes)
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    /// Payment channel ID (0x…, 32 bytes)
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    /// Cumulative amount (decimal or 0x… hex, up to uint256)
+    #[serde(rename = "cumulativeAmount")]
+    pub cumulative_amount: String,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+/// `POST /kms/SignGTokenAuthorization`
+/// Builds GToken EIP-3009 TransferWithAuthorization domain + type and signs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignGTokenAuthorizationRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    /// GToken ERC-20 contract address (0x…, 20 bytes)
+    #[serde(rename = "gTokenAddress")]
+    pub gtoken_address: String,
+    /// Transfer sender — MUST equal the Ethereum address derived from keyId+hdPath.
+    /// On-chain EIP-3009 verifies ecrecover(hash,sig) == from; a mismatch causes revert.
+    pub from: String,
+    pub to: String,
+    /// Token amount (decimal or 0x… hex)
+    pub value: String,
+    #[serde(rename = "validAfter")]
+    pub valid_after: String,
+    #[serde(rename = "validBefore")]
+    pub valid_before: String,
+    /// 32-byte random nonce (0x…)
+    pub nonce: String,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+/// `POST /kms/SignX402Payment`
+/// Builds SuperPaymaster x402 PaymentPayload EIP-712 struct and signs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignX402PaymentRequest {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    #[serde(rename = "hdPath", default = "default_hd_path")]
+    pub hd_path: String,
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    /// SuperPaymaster contract address (0x…, 20 bytes)
+    #[serde(rename = "verifyingContract")]
+    pub verifying_contract: String,
+    /// Unique payment ID (0x…, 32 bytes)
+    #[serde(rename = "paymentId")]
+    pub payment_id: String,
+    /// Amount to settle (decimal or 0x… hex)
+    pub amount: String,
+    /// Recipient address (0x…)
+    pub recipient: String,
+    /// Deadline Unix timestamp (decimal or 0x… hex)
+    pub deadline: String,
+    /// WebAuthn ceremony assertion (challenge-bound, replay-protected). Required if no Bearer JWT.
+    #[serde(rename = "webAuthnAssertion", default)]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+// P2 responses share the same shape as SignTypedDataResponse
+pub type SignMicropaymentVoucherResponse = SignTypedDataResponse;
+pub type SignGTokenAuthorizationResponse = SignTypedDataResponse;
+pub type SignX402PaymentResponse = SignTypedDataResponse;
+
 // ── Grant Session Signing ──
 
 /// Parse bytes4 hex string ("0x..." or bare 8 hex chars) into [u8; 4].
@@ -1042,8 +1131,14 @@ impl KmsApiServer {
             passkey_public_key: Some(req.passkey_public_key.clone()),
         };
 
-        // Persist to DB
-        self.db.insert_wallet(&WalletRow {
+        // Persist to DB.
+        // H-C: if this insert fails the TA wallet becomes an invisible orphan
+        // (occupies an RPMB slot, unreachable via API). A host-side
+        // compensating delete is impossible — the TA mandates passkey
+        // verification for removal. So: retry the (usually transient) SQLite
+        // failure, and if it still fails, log CRITICAL with the orphan id for
+        // ForceRemoveWallet cleanup (admin command, PR #35).
+        let row = WalletRow {
             key_id: wallet_id.to_string(),
             address: None,
             public_key: None,
@@ -1058,7 +1153,33 @@ impl KmsApiServer {
             status: "deriving".to_string(),
             error_msg: None,
             created_at: now.to_rfc3339(),
-        })?;
+        };
+        let mut insert_result = self.db.insert_wallet(&row);
+        for attempt in 1..=3u64 {
+            if insert_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  CreateKey: DB insert attempt {}/4 failed for {}: {:?}",
+                attempt, wallet_id, insert_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            insert_result = self.db.insert_wallet(&row);
+        }
+        if let Err(e) = insert_result {
+            eprintln!(
+                "🔴 CRITICAL: TA wallet {} created but DB insert failed after retries — \
+                 ORPHAN in TEE storage (no DB row). Clean up via ForceRemoveWallet. \
+                 Error: {:?}",
+                wallet_id, e
+            );
+            return Err(anyhow!(
+                "CreateKey: metadata persistence failed (TEE wallet {} orphaned, \
+                 operator notified): {}",
+                wallet_id,
+                e
+            ));
+        }
 
         // Spawn background address derivation
         let db = self.db.clone();
@@ -1166,6 +1287,10 @@ impl KmsApiServer {
         }
     }
 
+    pub async fn read_rollback_counter(&self) -> Result<u64> {
+        self.tee.read_rollback_counter().await
+    }
+
     pub async fn change_passkey(&self, req: ChangePasskeyRequest) -> Result<ChangePasskeyResponse> {
         println!("📝 KMS ChangePasskey API called for key: {}", req.key_id);
 
@@ -1187,7 +1312,11 @@ impl KmsApiServer {
 
         // Resolve current passkey assertion (WebAuthn or legacy hex)
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         // Change passkey in TEE secure storage (TA verifies current passkey first)
@@ -1196,9 +1325,41 @@ impl KmsApiServer {
             .register_passkey_ta(wallet_uuid, &pubkey_bytes, passkey_assertion)
             .await?;
 
-        // Update DB
+        // H-B: the TA has now committed the NEW passkey. If the DB update
+        // below is lost, the DB keeps the OLD pubkey and every subsequent
+        // WebAuthn verification for this wallet fails against the wrong key —
+        // the wallet is effectively locked out. Retry with backoff and log
+        // CRITICAL with the exact recovery SQL if all retries fail.
         let new_pk = format!("0x{}", pubkey_hex);
-        self.db.update_wallet_passkey(&req.key_id, &new_pk, None)?;
+        let mut db_result = Ok(());
+        for attempt in 1..=3 {
+            db_result = self
+                .db
+                .update_wallet_passkey(&req.key_id, &new_pk, None)
+                .map(|_| ());
+            if db_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  ChangePasskey: DB update attempt {}/3 failed for key {}: {:?}",
+                attempt, req.key_id, db_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+        }
+        if let Err(e) = db_result {
+            eprintln!(
+                "🔴 CRITICAL: TA passkey changed but DB update FAILED for key {} — \
+                 WebAuthn for this wallet will verify against a STALE pubkey. \
+                 Manual recovery: UPDATE wallets SET passkey_pubkey='{}' WHERE key_id='{}'; \
+                 error: {:?}",
+                req.key_id, new_pk, req.key_id, e
+            );
+            return Err(anyhow!(
+                "Passkey changed in TEE but metadata update failed — contact operator \
+                 (wallet may not authenticate until DB is repaired): {}",
+                e
+            ));
+        }
 
         Ok(ChangePasskeyResponse {
             key_id: req.key_id,
@@ -1367,6 +1528,68 @@ impl KmsApiServer {
         }
     }
 
+    /// P0-2: strict resolver for the signing / mutating endpoints
+    /// (Sign, SignHash, DeriveAddress, DeleteKey, ChangePasskey).
+    ///
+    /// Two hardenings over `resolve_passkey_assertion`:
+    /// 1. The legacy raw-hex path carries NO challenge binding — a captured
+    ///    assertion is replayable forever. It is rejected here unless
+    ///    `KMS_ALLOW_LEGACY_PASSKEY=1` is set (test environments only).
+    /// 2. If the wallet has a passkey bound, an assertion is REQUIRED at the
+    ///    CA layer (defence in depth). Previously we passed `None` through
+    ///    and relied on the TA alone; every agent/p256/grant endpoint already
+    ///    enforces presence host-side — the core KMS paths now match.
+    ///
+    /// Wallets with no passkey bound (legacy/pre-passkey wallets) still pass
+    /// `None` through; the TA applies its own policy for those.
+    async fn resolve_passkey_assertion_strict(
+        &self,
+        key_id: &str,
+        raw: Option<&PasskeyAssertion>,
+        wa: Option<&WebAuthnAssertion>,
+    ) -> Result<Option<proto::PasskeyAssertion>> {
+        if raw.is_some() && wa.is_none() {
+            let legacy_allowed =
+                std::env::var("KMS_ALLOW_LEGACY_PASSKEY").ok().as_deref() == Some("1");
+            if !legacy_allowed {
+                return Err(anyhow!(
+                    "Legacy raw passkey assertions are not accepted for signing/mutating \
+                     operations (no challenge binding — replayable). Use the WebAuthn \
+                     ceremony via /webauthn/begin-authentication. \
+                     (KMS_ALLOW_LEGACY_PASSKEY=1 re-enables it for test environments only.)"
+                ));
+            }
+            eprintln!(
+                "⚠️  KMS_ALLOW_LEGACY_PASSKEY=1: accepting replayable legacy assertion \
+                 for key_id={} — NEVER enable this in production",
+                key_id
+            );
+        }
+
+        let resolved = self.resolve_passkey_assertion(key_id, raw, wa).await?;
+
+        if resolved.is_none() {
+            // No assertion supplied at all. Only acceptable when the wallet
+            // genuinely has no passkey bound.
+            if let Some(w) = self.db.get_wallet(key_id)? {
+                let has_passkey = w
+                    .passkey_pubkey
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if has_passkey {
+                    return Err(anyhow!(
+                        "Passkey authorization required: key {} has a passkey bound. \
+                         Provide a WebAuthn assertion (begin-authentication ceremony).",
+                        key_id
+                    ));
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
     /// WebAuthn assertion resolver with operation-specific purpose check.
     /// Ensures the challenge was created specifically for the given purpose
     /// (e.g., "grant-session"), preventing cross-operation challenge replay.
@@ -1431,7 +1654,11 @@ impl KmsApiServer {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
         let address_bytes = self
             .tee
@@ -1484,7 +1711,11 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &key_id_str,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         // Prepare sign payload
@@ -1596,7 +1827,11 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &key_id_str,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         let signature = self
@@ -1637,14 +1872,47 @@ impl KmsApiServer {
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
         let passkey_assertion = self
-            .resolve_passkey_assertion(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
         self.tee
             .remove_wallet(wallet_uuid, passkey_assertion)
             .await?;
 
-        // Remove from DB (CASCADE deletes address_index entries)
-        self.db.delete_wallet(&req.key_id)?;
+        // Remove from DB (CASCADE deletes address_index entries).
+        // H-C: the TA wallet is already gone. If this DB delete is lost the
+        // row becomes a "ghost" — later operations on it fail with confusing
+        // TEE errors. Retry, and on persistent failure mark the row instead
+        // of leaving it looking alive.
+        let mut del_result = self.db.delete_wallet(&req.key_id).map(|_| ());
+        for attempt in 1..=3u64 {
+            if del_result.is_ok() {
+                break;
+            }
+            eprintln!(
+                "⚠️  DeleteKey: DB delete attempt {}/4 failed for {}: {:?}",
+                attempt, req.key_id, del_result
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            del_result = self.db.delete_wallet(&req.key_id).map(|_| ());
+        }
+        if let Err(e) = del_result {
+            // Best effort: flag the ghost row so it doesn't pose as a live key.
+            let _ = self.db.update_wallet_status(
+                &req.key_id,
+                "error",
+                Some("TEE wallet deleted but DB row could not be removed — ghost row"),
+            );
+            eprintln!(
+                "🔴 CRITICAL: TEE wallet {} deleted but DB row removal failed — \
+                 ghost row flagged as 'error'. Manual cleanup: \
+                 DELETE FROM wallets WHERE key_id='{}'; Error: {:?}",
+                req.key_id, req.key_id, e
+            );
+        }
 
         let days = req.pending_window_in_days.unwrap_or(7);
         let deletion_date = Utc::now() + chrono::Duration::days(days as i64);
@@ -2306,6 +2574,190 @@ impl KmsApiServer {
             key_id: req.key_id,
             signature: format!("0x{}", hex::encode(&output.signature)),
         })
+    }
+
+    // P2 convenience signers build a fixed EIP-712 struct in the host and delegate to
+    // sign_typed_data(), inheriting its auth gate (Bearer agent-JWT OR replay-protected
+    // WebAuthn ceremony; legacy raw passkey is rejected). They add no new TA command.
+
+    pub async fn sign_micropayment_voucher(
+        &self,
+        bearer: Option<String>,
+        req: SignMicropaymentVoucherRequest,
+    ) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
+            key_id: req.key_id,
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("MicroPaymentChannel".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.verifying_contract),
+            },
+            primary_type: "Voucher".to_string(),
+            types: vec![JsonEip712TypeDef {
+                name: "Voucher".to_string(),
+                fields: vec![
+                    JsonEip712TypeField {
+                        name: "channelId".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "cumulativeAmount".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue {
+                    name: "channelId".to_string(),
+                    value: serde_json::Value::String(req.channel_id),
+                },
+                JsonEip712FieldValue {
+                    name: "cumulativeAmount".to_string(),
+                    value: serde_json::Value::String(req.cumulative_amount),
+                },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
+    }
+
+    pub async fn sign_gtoken_authorization(
+        &self,
+        bearer: Option<String>,
+        req: SignGTokenAuthorizationRequest,
+    ) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
+            key_id: req.key_id,
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("GToken".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.gtoken_address),
+            },
+            primary_type: "TransferWithAuthorization".to_string(),
+            types: vec![JsonEip712TypeDef {
+                name: "TransferWithAuthorization".to_string(),
+                fields: vec![
+                    JsonEip712TypeField {
+                        name: "from".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "to".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "value".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "validAfter".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "validBefore".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "nonce".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue {
+                    name: "from".to_string(),
+                    value: serde_json::Value::String(req.from),
+                },
+                JsonEip712FieldValue {
+                    name: "to".to_string(),
+                    value: serde_json::Value::String(req.to),
+                },
+                JsonEip712FieldValue {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String(req.value),
+                },
+                JsonEip712FieldValue {
+                    name: "validAfter".to_string(),
+                    value: serde_json::Value::String(req.valid_after),
+                },
+                JsonEip712FieldValue {
+                    name: "validBefore".to_string(),
+                    value: serde_json::Value::String(req.valid_before),
+                },
+                JsonEip712FieldValue {
+                    name: "nonce".to_string(),
+                    value: serde_json::Value::String(req.nonce),
+                },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
+    }
+
+    pub async fn sign_x402_payment(
+        &self,
+        bearer: Option<String>,
+        req: SignX402PaymentRequest,
+    ) -> Result<SignTypedDataResponse> {
+        let std_req = SignTypedDataRequest {
+            key_id: req.key_id,
+            hd_path: req.hd_path,
+            domain: JsonEip712Domain {
+                name: Some("SuperPaymaster".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(req.chain_id),
+                verifying_contract: Some(req.verifying_contract),
+            },
+            primary_type: "PaymentPayload".to_string(),
+            types: vec![JsonEip712TypeDef {
+                name: "PaymentPayload".to_string(),
+                fields: vec![
+                    JsonEip712TypeField {
+                        name: "paymentId".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "amount".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "recipient".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "deadline".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                ],
+            }],
+            message: vec![
+                JsonEip712FieldValue {
+                    name: "paymentId".to_string(),
+                    value: serde_json::Value::String(req.payment_id),
+                },
+                JsonEip712FieldValue {
+                    name: "amount".to_string(),
+                    value: serde_json::Value::String(req.amount),
+                },
+                JsonEip712FieldValue {
+                    name: "recipient".to_string(),
+                    value: serde_json::Value::String(req.recipient),
+                },
+                JsonEip712FieldValue {
+                    name: "deadline".to_string(),
+                    value: serde_json::Value::String(req.deadline),
+                },
+            ],
+            webauthn_assertion: req.webauthn_assertion,
+            passkey_assertion: None,
+        };
+        self.sign_typed_data(bearer, std_req).await
     }
 
     pub async fn sign_grant_session(
@@ -3613,6 +4065,19 @@ async fn handle_queue_status(
     Ok(warp::reply::json(&server.queue_status()))
 }
 
+async fn handle_rollback_counter(
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    #[derive(serde::Serialize)]
+    struct RollbackCounterResponse {
+        counter: u64,
+    }
+    match server.read_rollback_counter().await {
+        Ok(counter) => Ok(warp::reply::json(&RollbackCounterResponse { counter })),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_create_agent_key(
     body: CreateAgentKeyRequest,
     server: Arc<KmsApiServer>,
@@ -3731,6 +4196,91 @@ async fn handle_sign_typed_data(
         Err(e) => {
             let elapsed = t0.elapsed().as_millis();
             eprintln!("SignTypedData error: {} {}ms", e, elapsed);
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+fn strip_bearer(auth_header: Option<String>) -> Option<String> {
+    auth_header.and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string()))
+}
+
+async fn handle_sign_micropayment_voucher(
+    auth_header: Option<String>,
+    body: SignMicropaymentVoucherRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server
+        .sign_micropayment_voucher(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!(
+                "✅ SignMicropaymentVoucher OK {}ms",
+                t0.elapsed().as_millis()
+            );
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignMicropaymentVoucher error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_gtoken_authorization(
+    auth_header: Option<String>,
+    body: SignGTokenAuthorizationRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server
+        .sign_gtoken_authorization(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!(
+                "✅ SignGTokenAuthorization OK {}ms",
+                t0.elapsed().as_millis()
+            );
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignGTokenAuthorization error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
+    }
+}
+
+async fn handle_sign_x402_payment(
+    auth_header: Option<String>,
+    body: SignX402PaymentRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let t0 = std::time::Instant::now();
+    match server
+        .sign_x402_payment(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!("✅ SignX402Payment OK {}ms", t0.elapsed().as_millis());
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignX402Payment error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
             Err(warp::reject::custom(ApiError(e.to_string())))
         }
     }
@@ -3859,6 +4409,9 @@ async fn handle_rejection(
             warp::http::StatusCode::UNAUTHORIZED
         } else if api_error.0.contains("circuit breaker") {
             warp::http::StatusCode::SERVICE_UNAVAILABLE
+        } else if api_error.0.contains("TEE call timeout") {
+            // P0-1: hung TA call — outcome unknown, server-side fault
+            warp::http::StatusCode::GATEWAY_TIMEOUT
         } else if api_error.0.contains("0xffff")
             || api_error.0.contains("panicked")
             || api_error.0.contains("TEE error")
@@ -3998,6 +4551,26 @@ pub async fn start_kms_server() -> Result<()> {
     let db = KmsDb::open(&db_path)?;
     println!("💾 SQLite DB: {}", db_path);
 
+    // M-c: periodic challenge GC. consume_challenge only deletes the consumed
+    // row; unconsumed expired challenges otherwise accumulate forever — the
+    // unauthenticated Begin* endpoints write 1-2 rows each, so without this
+    // the challenges table is an unbounded-growth DoS vector.
+    {
+        let gc_db = db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                tick.tick().await;
+                match gc_db.cleanup_expired_challenges() {
+                    Ok(n) if n > 0 => println!("🧹 Challenge GC: removed {} expired rows", n),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("⚠️  Challenge GC failed: {:?}", e),
+                }
+            }
+        });
+        println!("🧹 Challenge GC: every 600s");
+    }
+
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
     // API Key guard.
@@ -4077,6 +4650,13 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::get())
         .and(warp::any().map(move || server_qs.clone()))
         .and_then(handle_queue_status);
+
+    // RollbackCounter - GET /RollbackCounter
+    let server_rc = server.clone();
+    let rollback_counter = warp::path("RollbackCounter")
+        .and(warp::get())
+        .and(warp::any().map(move || server_rc.clone()))
+        .and_then(handle_rollback_counter);
 
     // ChangePasskey API (TEE)
     let server_cp = server.clone();
@@ -4297,6 +4877,39 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::any().map(move || server_std.clone()))
         .and_then(handle_sign_typed_data);
 
+    let server_smv = server.clone();
+    let sign_micropayment_voucher = warp::path("kms")
+        .and(warp::path("SignMicropaymentVoucher"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_smv.clone()))
+        .and_then(handle_sign_micropayment_voucher);
+
+    let server_sga = server.clone();
+    let sign_gtoken_authorization = warp::path("kms")
+        .and(warp::path("SignGTokenAuthorization"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sga.clone()))
+        .and_then(handle_sign_gtoken_authorization);
+
+    let server_sx4 = server.clone();
+    let sign_x402_payment = warp::path("kms")
+        .and(warp::path("SignX402Payment"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_sx4.clone()))
+        .and_then(handle_sign_x402_payment);
+
     let server_sgs = server.clone();
     let sign_grant_session = warp::path("kms")
         .and(warp::path("sign-grant-session"))
@@ -4394,6 +5007,7 @@ pub async fn start_kms_server() -> Result<()> {
         .or(version)
         .or(key_status)
         .or(queue_status)
+        .or(rollback_counter)
         .or(change_passkey)
         .boxed();
     let group2 = create_key
@@ -4414,6 +5028,9 @@ pub async fn start_kms_server() -> Result<()> {
         .boxed();
     let group4 = revoke_agent_credential
         .or(sign_typed_data)
+        .or(sign_micropayment_voucher)
+        .or(sign_gtoken_authorization)
+        .or(sign_x402_payment)
         .or(begin_grant_session_auth)
         .or(sign_grant_session)
         .or(sign_p256_grant_session)
@@ -4448,6 +5065,7 @@ pub async fn start_kms_server() -> Result<()> {
     println!("   POST /BeginAuthentication   - WebAuthn authentication challenge");
     println!("   GET  /KeyStatus             - Key derivation status (polling)");
     println!("   GET  /QueueStatus           - TEE queue depth");
+    println!("   GET  /RollbackCounter       - RPMB anti-rollback counter (diagnostic)");
     println!("   GET  /health                - Health check");
     println!("   POST /kms/create-agent-key       - Create AI agent key (WebAuthn)");
     println!("   POST /kms/sign-agent             - Agent sign userOpHash (Bearer JWT)");
@@ -4473,4 +5091,32 @@ pub async fn start_kms_server() -> Result<()> {
 async fn main() -> Result<()> {
     env_logger::init();
     start_kms_server().await
+}
+
+#[cfg(test)]
+mod request_deser_tests {
+    use super::*;
+
+    const WA: &str = r#"{"ChallengeId":"c","Credential":{"id":"i","rawId":"r","type":"public-key","response":{"clientDataJSON":"a","authenticatorData":"b","signature":"s"}}}"#;
+
+    #[test]
+    fn delete_key_request_minimal_webauthn() {
+        let body = format!(r#"{{"KeyId":"abc","WebAuthn":{}}}"#, WA);
+        let r: Result<DeleteKeyRequest, _> = serde_json::from_str(&body);
+        assert!(r.is_ok(), "DeleteKeyRequest deser failed: {:?}", r.err());
+    }
+
+    #[test]
+    fn derive_address_request_webauthn() {
+        let body = format!(
+            r#"{{"KeyId":"abc","DerivationPath":"m/44","WebAuthn":{}}}"#,
+            WA
+        );
+        let r: Result<DeriveAddressRequest, _> = serde_json::from_str(&body);
+        assert!(
+            r.is_ok(),
+            "DeriveAddressRequest deser failed: {:?}",
+            r.err()
+        );
+    }
 }

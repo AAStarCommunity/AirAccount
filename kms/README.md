@@ -405,6 +405,7 @@ fn create_wallet(...) -> Result<...> {
 ### 部署和运维
 - [Deploy.md](../docs/Deploy.md) - 部署指南（英文）
 - [Deploy_zh.md](../docs/Deploy_zh.md) - 部署指南（中文）
+- [BACKUP-GUIDE.md](docs/BACKUP-GUIDE.md) - 备份与恢复指南（全量/增量机制、备份内容、安装定时器、恢复步骤）
 
 ### 架构设计
 - [Plan.md](../docs/Plan.md) - 技术方案和架构设计
