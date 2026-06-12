@@ -49,6 +49,19 @@ ceremony() {
   echo "{\"ChallengeId\":\"$cid\",\"Credential\":$cred}"
 }
 
+# ceremony_grant <keyid> → assertion bound to a purpose="grant-session" challenge
+# (sign-grant-session rejects the plain 'authentication' purpose to prevent cross-op replay)
+ceremony_grant() {
+  local kid="$1" ba cid chal cred sc
+  sc=$(cat "$SCF"); sc=$((sc+1)); echo "$sc" > "$SCF"
+  ba=$(curl -s --max-time 15 "$BASE/kms/begin-grant-session-auth?keyId=$kid")
+  cid=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['ChallengeId'])" 2>/dev/null)
+  chal=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['Options']['challenge'])" 2>/dev/null)
+  [ -z "$cid" ] && { echo "{}"; return 1; }
+  cred=$(python3 "$HELPER" ceremony "$PEM" "$chal" "dGVzdC1jcmVkZW50aWFs" "$sc")
+  echo "{\"ChallengeId\":\"$cid\",\"Credential\":$cred}"
+}
+
 echo "════════ Full E2E Coverage @ $BASE ════════"
 
 echo -e "${YEL}[1] Infra${NC}"
@@ -82,9 +95,13 @@ TMPKEY=$(jbody "['KeyMetadata']['KeyId']"); sleep 2
 WA=$(ceremony "$TMPKEY")
 chk "POST /ChangePasskey" "$(post_code ChangePasskey "{\"KeyId\":\"$TMPKEY\",\"PasskeyPublicKey\":\"$PK2\",\"WebAuthn\":$WA}")" 200
 
-echo -e "${YEL}[6] WebAuthn ceremony endpoints${NC}"
+echo -e "${YEL}[6] WebAuthn registration + auth ceremony${NC}"
 chk "POST /BeginRegistration"   "$(post_code BeginRegistration '{"UserName":"e2e","UserDisplayName":"E2E"}')" 200
+RCID=$(jbody "['ChallengeId']"); RCHAL=$(jbody "['Options']['challenge']")
+REGCRED=$(python3 "$HELPER" registration "$PEM" "$RCHAL" "cmVnY3JlZA")
+chk "POST /CompleteRegistration" "$(post_code CompleteRegistration "{\"ChallengeId\":\"$RCID\",\"Credential\":$REGCRED,\"KeySpec\":\"ECC_SECG_P256K1\"}")" 200
 chk "POST /BeginAuthentication" "$(post_code BeginAuthentication "{\"KeyId\":\"$KEYID\"}")" 200
+chk "GET /kms/begin-grant-session-auth" "$(get_code "/kms/begin-grant-session-auth?keyId=$KEYID")" 200
 
 echo -e "${YEL}[7] Negative — auth gates reject correctly${NC}"
 chk "SignTypedData no-auth → reject"      "$(post_path_code /kms/SignTypedData SignTypedData '{"domain":{},"types":{},"primaryType":"X","message":{}}')" 400
@@ -101,6 +118,27 @@ WA=$(ceremony "$HKID")
 chk "POST /kms/refresh-agent-credential" "$(post_path_code /kms/refresh-agent-credential RefreshAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}" "Authorization: Bearer $ACRED")" 200
 WA=$(ceremony "$HKID")
 chk "POST /kms/revoke-agent-credential" "$(post_path_code /kms/revoke-agent-credential RevokeAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}")" 200
+
+echo -e "${YEL}[7c] EIP-712 / grant-session / p256-session signing (ceremony)${NC}"
+ADDR="0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+ZERO="0x0000000000000000000000000000000000000000"
+WA=$(ceremony "$KEYID")
+chk "POST /kms/SignTypedData" "$(post_path_code /kms/SignTypedData SignTypedData "{\"keyId\":\"$KEYID\",\"domain\":{\"name\":\"Test\",\"version\":\"1\",\"chainId\":1,\"verifyingContract\":\"$ADDR\"},\"primaryType\":\"Mail\",\"types\":[{\"name\":\"Mail\",\"fields\":[{\"name\":\"contents\",\"type\":\"string\"}]}],\"message\":[{\"name\":\"contents\",\"value\":\"hello\"}],\"webAuthnAssertion\":$WA}")" 200
+WA=$(ceremony_grant "$KEYID")
+chk "POST /kms/sign-grant-session" "$(post_path_code /kms/sign-grant-session SignGrantSession "{\"keyId\":\"$KEYID\",\"chainId\":1,\"verifyingContract\":\"$ADDR\",\"account\":\"$ADDR\",\"sessionKey\":\"$ADDR\",\"expiry\":9999999999,\"contractScope\":\"$ZERO\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":10,\"velocityWindow\":3600,\"nonce\":0,\"webAuthnAssertion\":$WA}")" 200
+KX="1111111111111111111111111111111111111111111111111111111111111111"
+KY="2222222222222222222222222222222222222222222222222222222222222222"
+WA=$(ceremony_grant "$KEYID")
+chk "POST /kms/sign-p256-grant-session" "$(post_path_code /kms/sign-p256-grant-session SignP256GrantSession "{\"keyId\":\"$KEYID\",\"chainId\":1,\"verifyingContract\":\"$ADDR\",\"account\":\"$ADDR\",\"keyX\":\"0x$KX\",\"keyY\":\"0x$KY\",\"expiry\":9999999999,\"contractScope\":\"$ZERO\",\"selectorScope\":\"0x00000000\",\"velocityLimit\":10,\"velocityWindow\":3600,\"nonce\":0,\"webAuthnAssertion\":$WA}")" 200
+# P256 session key: create (ceremony) → returns agentCredential → sign-p256-user-op (Bearer)
+post_code CreateKey "{\"Description\":\"p256s\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
+PHKID=$(jbody "['KeyMetadata']['KeyId']"); sleep 2
+WA=$(ceremony "$PHKID")
+chk "POST /kms/create-p256-session-key" "$(post_path_code /kms/create-p256-session-key CreateP256SessionKey "{\"humanKeyId\":\"$PHKID\",\"label\":\"e2e\",\"webAuthnAssertion\":$WA}")" 200
+PCRED=$(jbody "['agentCredential']"); PKID=$(jbody "['keyId']")
+chk "POST /kms/sign-p256-user-op (Bearer JWT)" "$(post_path_code /kms/sign-p256-user-op SignP256UserOp "{\"keyId\":\"$PKID\",\"payload\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"accountAddress\":\"$ADDR\"}" "Authorization: Bearer $PCRED")" 200
+WA=$(ceremony "$PHKID")
+chk "POST /kms/revoke-p256-session-key" "$(post_path_code /kms/revoke-p256-session-key RevokeP256SessionKey "{\"keyId\":\"$PKID\",\"webAuthnAssertion\":$WA}")" 200
 
 echo -e "${YEL}[8] Cleanup${NC}"
 WA=$(ceremony "$KEYID")
