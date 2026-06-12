@@ -4678,3 +4678,24 @@ async fn main() -> Result<()> {
     env_logger::init();
     start_kms_server().await
 }
+
+#[cfg(test)]
+mod request_deser_tests {
+    use super::*;
+
+    const WA: &str = r#"{"ChallengeId":"c","Credential":{"id":"i","rawId":"r","type":"public-key","response":{"clientDataJSON":"a","authenticatorData":"b","signature":"s"}}}"#;
+
+    #[test]
+    fn delete_key_request_minimal_webauthn() {
+        let body = format!(r#"{{"KeyId":"abc","WebAuthn":{}}}"#, WA);
+        let r: Result<DeleteKeyRequest, _> = serde_json::from_str(&body);
+        assert!(r.is_ok(), "DeleteKeyRequest deser failed: {:?}", r.err());
+    }
+
+    #[test]
+    fn derive_address_request_webauthn() {
+        let body = format!(r#"{{"KeyId":"abc","DerivationPath":"m/44","WebAuthn":{}}}"#, WA);
+        let r: Result<DeriveAddressRequest, _> = serde_json::from_str(&body);
+        assert!(r.is_ok(), "DeriveAddressRequest deser failed: {:?}", r.err());
+    }
+}

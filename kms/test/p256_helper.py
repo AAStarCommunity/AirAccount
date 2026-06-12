@@ -15,6 +15,7 @@ import json
 import hashlib
 import os
 import struct
+import base64
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes, serialization
@@ -81,6 +82,55 @@ def make_assertion(privkey_pem: str):
         "client_data_hash": client_data_hash.hex(),
         "signature_r": r.to_bytes(32, 'big').hex(),
         "signature_s": s.to_bytes(32, 'big').hex(),
+    }
+
+
+def _b64url(b: bytes) -> str:
+    """base64url without padding (WebAuthn wire format)."""
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def make_ceremony_assertion(privkey_pem: str, challenge_b64url: str, credential_id: str = "dGVzdC1jcmVkZW50aWFs", sign_count: int = 1):
+    """Create a WebAuthn AuthenticationResponseJSON for a DYNAMIC challenge.
+
+    Used to test ceremony-based endpoints (agent key / grant session / p256
+    session / SignTypedData) which require a real begin-authentication challenge,
+    unlike the legacy fixed-challenge path of make_assertion().
+
+    The challenge MUST be the exact base64url string returned by
+    BeginAuthentication. clientDataJSON embeds it; the CA decodes clientDataJSON,
+    checks challenge == stored, verifies rpIdHash, then ECDSA-verifies
+    signature over (authenticatorData || SHA256(clientDataJSON)).
+    """
+    private_key = serialization.load_pem_private_key(privkey_pem.encode(), password=None)
+
+    # clientDataJSON with the dynamic challenge (compact, no spaces)
+    client_data_json = json.dumps({
+        "type": "webauthn.get",
+        "challenge": challenge_b64url,
+        "origin": "https://aastar.io",
+    }, separators=(",", ":")).encode()
+    client_data_hash = hashlib.sha256(client_data_json).digest()
+
+    # authenticatorData: rpIdHash("aastar.io") + flags(UP|UV) + signCount
+    # signCount must strictly increase across ceremonies for the same wallet
+    # (anti-clone check), so callers pass an incrementing value.
+    rp_id_hash = hashlib.sha256(b"aastar.io").digest()
+    auth_data = rp_id_hash + bytes([0x05]) + struct.pack(">I", sign_count)
+
+    # signature over (authData || clientDataHash), DER; CA hashes with SHA-256
+    digest = hashlib.sha256(auth_data + client_data_hash).digest()
+    sig_der = private_key.sign(digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+
+    return {
+        "id": credential_id,
+        "rawId": credential_id,
+        "type": "public-key",
+        "response": {
+            "clientDataJSON": _b64url(client_data_json),
+            "authenticatorData": _b64url(auth_data),
+            "signature": _b64url(sig_der),
+        },
     }
 
 
@@ -165,6 +215,17 @@ if __name__ == "__main__":
             sys.exit(1)
         pem = sys.argv[2]
         print(json.dumps(make_assertion(pem), indent=2))
+    elif cmd == "ceremony":
+        # ceremony <pem> <challenge_b64url> [credential_id]
+        # → WebAuthn AuthenticationResponseJSON for a dynamic challenge
+        if len(sys.argv) < 4:
+            print("Usage: p256_helper.py ceremony <privkey_pem> <challenge_b64url> [credential_id]", file=sys.stderr)
+            sys.exit(1)
+        pem = sys.argv[2]
+        challenge = sys.argv[3]
+        cred_id = sys.argv[4] if len(sys.argv) > 4 else "dGVzdC1jcmVkZW50aWFs"
+        sc = int(sys.argv[5]) if len(sys.argv) > 5 else 1
+        print(json.dumps(make_ceremony_assertion(pem, challenge, cred_id, sc)))
     elif cmd == "fixture":
         path = sys.argv[2] if len(sys.argv) > 2 else "/dev/stdout"
         label = sys.argv[3] if len(sys.argv) > 3 else "test-user"
@@ -172,4 +233,4 @@ if __name__ == "__main__":
     elif cmd == "gen-all":
         gen_all()
     else:
-        print("Usage: p256_helper.py gen | assertion <pem> | fixture <path> [label] | gen-all")
+        print("Usage: p256_helper.py gen | assertion <pem> | ceremony <pem> <challenge_b64url> [cred_id] | fixture <path> [label] | gen-all")
