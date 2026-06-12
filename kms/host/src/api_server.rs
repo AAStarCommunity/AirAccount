@@ -4026,7 +4026,11 @@ async fn handle_admin_purge_key(
         return Err(warp::reject::custom(ApiError("Invalid admin token".into())));
     }
 
-    let reason = if body.reason.is_empty() { "unspecified".to_string() } else { body.reason.clone() };
+    let reason = if body.reason.is_empty() {
+        "unspecified".to_string()
+    } else {
+        body.reason.clone()
+    };
     match server.admin_purge_key(&body.key_id, &reason).await {
         Ok((tee_ok, sqlite_ok)) => {
             let msg = format!(
@@ -4212,7 +4216,10 @@ async fn handle_get_stats(
     query: StatsQuery,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let pretty = query.pretty.map(|v| v == "1" || v == "true").unwrap_or(false);
+    let pretty = query
+        .pretty
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
     let tx = server.db.get_tx_stats().unwrap_or_default();
@@ -5307,12 +5314,11 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::post())
         .and(warp::body::json())
         .and(
-            warp::header::optional::<String>("authorization")
-                .map(|h: Option<String>| {
-                    h.unwrap_or_default()
-                        .trim_start_matches("Bearer ")
-                        .to_string()
-                }),
+            warp::header::optional::<String>("authorization").map(|h: Option<String>| {
+                h.unwrap_or_default()
+                    .trim_start_matches("Bearer ")
+                    .to_string()
+            }),
         )
         .and(warp::any().map(move || server_admin.clone()))
         .and_then(handle_admin_purge_key);
