@@ -1,6 +1,43 @@
 # KMS Changelog
 
-> Updated: 2026-06-07
+> Updated: 2026-06-12
+
+## 0.20.0 (2026-06-12) — Beta2
+
+**Beta2 里程碑：安全加固 + RPMB 反回滚 + MX93 生产部署 + SuperPaymaster 对齐**
+
+整合 PR #51 / #35 / #33 / #2，真机 FRDM-IMX93 全链验证。
+
+### 新增 (Features)
+- **P2 SuperPaymaster 便利签名器**：`SignMicropaymentVoucher` / `SignGTokenAuthorization`(EIP-3009 TransferWithAuthorization) / `SignX402Payment` —— host 侧构造固定 EIP-712 结构，复用 `SignTypedData` 的 WebAuthn ceremony 鉴权（含重放保护），不新增 TA 命令
+- **RPMB 反回滚计数器** `ReadRollbackCounter`(cmd 24) + `GET /RollbackCounter` 端点
+- **ForceRemoveWallet**(cmd 23)：gap key（无效 P-256 pubkey）的 TEE 强制清理，`DeleteKey` 自动检测
+- **`GET /stats`** 机器可读监控端点（含 API key / 熔断器健康告警）
+- **CAAM-bypass entropy**：CA 用 OsRng 生成钱包熵注入 TA，绕过 i.MX93 不稳定的 CAAM TRNG
+- 自动备份系统（CA/TA 二进制 + metadata）
+
+### 修复 (Fixes)
+- **agent-key TA panic 根治**：`create-agent-key` / `refresh-agent-credential` 用 `std::time::SystemTime::now()` 在 OP-TEE TA 崩溃（0xffff3024），改用 `optee_utee::Time::ree_time()`(TEE_GetREETime)
+- **M-4 TLS 污染**：`count_entries` 读 wallet object 污染 `tpidr_el0`，导致 CreateKey 后续 thread_local 缓存 panic —— 改为只读内存 key 列表
+- `DeleteKey` 走 AWS-KMS action 名 `ScheduleKeyDeletion`
+- `dirf.db` 0 字节自动修复（dirf-repair.service oneshot）
+- `KMS_VERSION` 常量与 Cargo 版本统一（消除 0.19.0/0.19.1 不一致）
+
+### 安全 (Security)
+- 审计 P0/High 全部修复（命令 ID 唯一性 / TEE 调用超时+熔断 / passkey 强制 / submodule 锁定）
+- TA 侧 WebAuthn rpId + User-Presence 验证（C-1 独立验签，编译进 TA）
+- RPMB 钱包存储 + REE-FS fallback（防回滚）
+- `DeleteKey` 正常路径用 strict passkey/WebAuthn 验证
+- 测试 passkey 私钥移出 git → `.env.kms-test` keystore（git-ignored）
+
+### 测试 (Testing)
+- **真机 E2E 100% 端点覆盖：FRDM-IMX93 上 34/34 通过**（含 WebAuthn 注册/认证 ceremony 全流程、agent key、grant session、p256 session、EIP-712）
+- 单元测试：proto 39 + host 56（交叉编译 aarch64 上板运行）
+- 可复现的 host 单元测试 runner（`kms/test/run-host-unit-tests.sh`）
+
+### 合规 (Compliance)
+- Apache 2.0 license 合规：NOTICE / TRADEMARK / 中文 license + CLA workflow
+- README license badge 修正
 
 ## 0.19.0 (2026-06-07)
 

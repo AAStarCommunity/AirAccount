@@ -1,12 +1,12 @@
 # AirAccount KMS 发布计划梳理
 
-> 日期：2026-06-12 | 当前：Beta1 (v0.19.0 生产中)
-> `fix/review-bugfix` 分支 = Beta2 候选（已整合 + 真机 E2E 通过）
+> 日期：2026-06-12 | 当前：**Beta2 (v0.20.0) 已发布** ✅
 
 ## 当前状态
 
-- **Beta1 / v0.19.0**：生产中，基础功能 + MX93 真机部署
-- **`fix/review-bugfix` 分支**：已整合 PR #43/#44/#45/#46/#47 全部代码 + 审计 P0/High 修复 + 真机修复（M-4 TLS 污染、REE-FS fallback、4096 签名、build 流程）。2026-06-12 真机全链 E2E 通过（CreateKey/derive/SignHash/Sign/DeleteKey/WebAuthn）。
+- **Beta2 / v0.20.0**：**已发布**（2026-06-12）。整合 PR #51/#35/#33/#2 全部合并进 main，真机 FRDM-IMX93 全链 E2E **34/34** 通过。详见 [CHANGELOG 0.20.0](../CHANGELOG.md)。
+- **Beta1 / v0.19.0**：前一版本，基础功能 + MX93 真机首次部署。
+- **Beta2 内容**：审计 P0/High 全修 · RPMB 存储+反回滚 · TA 侧 WebAuthn 验证 · MX93 部署(gap-key/CAAM-bypass/ForceRemoveWallet) · P2 SuperPaymaster 便利签名器(ceremony 鉴权) · agent-key TA panic 根治 · 测试私钥移出 git · Apache 2.0 合规。
 
 ## 测试覆盖（2026-06-12 真机验证）
 
