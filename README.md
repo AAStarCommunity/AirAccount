@@ -315,6 +315,6 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](https://opensource.org/licenses/Apache-2.0). See [LICENSE](./LICENSE) for details.  
-Copyright 2024-present AAStarCommunity Contributors. See [NOTICE](./NOTICE) for attribution.
-
+This project is licensed under the [Apache License, Version 2.0](LICENSE).  
+Copyright 2024-present MushroomDAO Contributors.  
+See [NOTICE](./NOTICE) · [TRADEMARK.md](./TRADEMARK.md) · [LICENSE-zh.md](./LICENSE-zh.md) · [TRADEMARK-zh.md](./TRADEMARK-zh.md) for details.
