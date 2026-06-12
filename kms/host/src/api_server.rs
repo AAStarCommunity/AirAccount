@@ -1312,7 +1312,11 @@ impl KmsApiServer {
 
         // Resolve current passkey assertion (WebAuthn or legacy hex)
         let passkey_assertion = self
-            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         // Change passkey in TEE secure storage (TA verifies current passkey first)
@@ -1650,7 +1654,11 @@ impl KmsApiServer {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
         let passkey_assertion = self
-            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
         let address_bytes = self
             .tee
@@ -1703,7 +1711,11 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion_strict(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &key_id_str,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         // Prepare sign payload
@@ -1815,7 +1827,11 @@ impl KmsApiServer {
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
         let passkey_assertion = self
-            .resolve_passkey_assertion_strict(&key_id_str, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &key_id_str,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
 
         let signature = self
@@ -1856,7 +1872,11 @@ impl KmsApiServer {
 
         let wallet_uuid = Uuid::parse_str(&req.key_id)?;
         let passkey_assertion = self
-            .resolve_passkey_assertion_strict(&req.key_id, req.passkey.as_ref(), req.webauthn.as_ref())
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
             .await?;
         self.tee
             .remove_wallet(wallet_uuid, passkey_assertion)
@@ -2560,7 +2580,11 @@ impl KmsApiServer {
     // sign_typed_data(), inheriting its auth gate (Bearer agent-JWT OR replay-protected
     // WebAuthn ceremony; legacy raw passkey is rejected). They add no new TA command.
 
-    pub async fn sign_micropayment_voucher(&self, bearer: Option<String>, req: SignMicropaymentVoucherRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_micropayment_voucher(
+        &self,
+        bearer: Option<String>,
+        req: SignMicropaymentVoucherRequest,
+    ) -> Result<SignTypedDataResponse> {
         let std_req = SignTypedDataRequest {
             key_id: req.key_id,
             hd_path: req.hd_path,
@@ -2574,13 +2598,25 @@ impl KmsApiServer {
             types: vec![JsonEip712TypeDef {
                 name: "Voucher".to_string(),
                 fields: vec![
-                    JsonEip712TypeField { name: "channelId".to_string(), field_type: "bytes32".to_string() },
-                    JsonEip712TypeField { name: "cumulativeAmount".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField {
+                        name: "channelId".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "cumulativeAmount".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
                 ],
             }],
             message: vec![
-                JsonEip712FieldValue { name: "channelId".to_string(), value: serde_json::Value::String(req.channel_id) },
-                JsonEip712FieldValue { name: "cumulativeAmount".to_string(), value: serde_json::Value::String(req.cumulative_amount) },
+                JsonEip712FieldValue {
+                    name: "channelId".to_string(),
+                    value: serde_json::Value::String(req.channel_id),
+                },
+                JsonEip712FieldValue {
+                    name: "cumulativeAmount".to_string(),
+                    value: serde_json::Value::String(req.cumulative_amount),
+                },
             ],
             webauthn_assertion: req.webauthn_assertion,
             passkey_assertion: None,
@@ -2588,7 +2624,11 @@ impl KmsApiServer {
         self.sign_typed_data(bearer, std_req).await
     }
 
-    pub async fn sign_gtoken_authorization(&self, bearer: Option<String>, req: SignGTokenAuthorizationRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_gtoken_authorization(
+        &self,
+        bearer: Option<String>,
+        req: SignGTokenAuthorizationRequest,
+    ) -> Result<SignTypedDataResponse> {
         let std_req = SignTypedDataRequest {
             key_id: req.key_id,
             hd_path: req.hd_path,
@@ -2602,21 +2642,57 @@ impl KmsApiServer {
             types: vec![JsonEip712TypeDef {
                 name: "TransferWithAuthorization".to_string(),
                 fields: vec![
-                    JsonEip712TypeField { name: "from".to_string(), field_type: "address".to_string() },
-                    JsonEip712TypeField { name: "to".to_string(), field_type: "address".to_string() },
-                    JsonEip712TypeField { name: "value".to_string(), field_type: "uint256".to_string() },
-                    JsonEip712TypeField { name: "validAfter".to_string(), field_type: "uint256".to_string() },
-                    JsonEip712TypeField { name: "validBefore".to_string(), field_type: "uint256".to_string() },
-                    JsonEip712TypeField { name: "nonce".to_string(), field_type: "bytes32".to_string() },
+                    JsonEip712TypeField {
+                        name: "from".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "to".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "value".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "validAfter".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "validBefore".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "nonce".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
                 ],
             }],
             message: vec![
-                JsonEip712FieldValue { name: "from".to_string(), value: serde_json::Value::String(req.from) },
-                JsonEip712FieldValue { name: "to".to_string(), value: serde_json::Value::String(req.to) },
-                JsonEip712FieldValue { name: "value".to_string(), value: serde_json::Value::String(req.value) },
-                JsonEip712FieldValue { name: "validAfter".to_string(), value: serde_json::Value::String(req.valid_after) },
-                JsonEip712FieldValue { name: "validBefore".to_string(), value: serde_json::Value::String(req.valid_before) },
-                JsonEip712FieldValue { name: "nonce".to_string(), value: serde_json::Value::String(req.nonce) },
+                JsonEip712FieldValue {
+                    name: "from".to_string(),
+                    value: serde_json::Value::String(req.from),
+                },
+                JsonEip712FieldValue {
+                    name: "to".to_string(),
+                    value: serde_json::Value::String(req.to),
+                },
+                JsonEip712FieldValue {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String(req.value),
+                },
+                JsonEip712FieldValue {
+                    name: "validAfter".to_string(),
+                    value: serde_json::Value::String(req.valid_after),
+                },
+                JsonEip712FieldValue {
+                    name: "validBefore".to_string(),
+                    value: serde_json::Value::String(req.valid_before),
+                },
+                JsonEip712FieldValue {
+                    name: "nonce".to_string(),
+                    value: serde_json::Value::String(req.nonce),
+                },
             ],
             webauthn_assertion: req.webauthn_assertion,
             passkey_assertion: None,
@@ -2624,7 +2700,11 @@ impl KmsApiServer {
         self.sign_typed_data(bearer, std_req).await
     }
 
-    pub async fn sign_x402_payment(&self, bearer: Option<String>, req: SignX402PaymentRequest) -> Result<SignTypedDataResponse> {
+    pub async fn sign_x402_payment(
+        &self,
+        bearer: Option<String>,
+        req: SignX402PaymentRequest,
+    ) -> Result<SignTypedDataResponse> {
         let std_req = SignTypedDataRequest {
             key_id: req.key_id,
             hd_path: req.hd_path,
@@ -2638,17 +2718,41 @@ impl KmsApiServer {
             types: vec![JsonEip712TypeDef {
                 name: "PaymentPayload".to_string(),
                 fields: vec![
-                    JsonEip712TypeField { name: "paymentId".to_string(), field_type: "bytes32".to_string() },
-                    JsonEip712TypeField { name: "amount".to_string(), field_type: "uint256".to_string() },
-                    JsonEip712TypeField { name: "recipient".to_string(), field_type: "address".to_string() },
-                    JsonEip712TypeField { name: "deadline".to_string(), field_type: "uint256".to_string() },
+                    JsonEip712TypeField {
+                        name: "paymentId".to_string(),
+                        field_type: "bytes32".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "amount".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "recipient".to_string(),
+                        field_type: "address".to_string(),
+                    },
+                    JsonEip712TypeField {
+                        name: "deadline".to_string(),
+                        field_type: "uint256".to_string(),
+                    },
                 ],
             }],
             message: vec![
-                JsonEip712FieldValue { name: "paymentId".to_string(), value: serde_json::Value::String(req.payment_id) },
-                JsonEip712FieldValue { name: "amount".to_string(), value: serde_json::Value::String(req.amount) },
-                JsonEip712FieldValue { name: "recipient".to_string(), value: serde_json::Value::String(req.recipient) },
-                JsonEip712FieldValue { name: "deadline".to_string(), value: serde_json::Value::String(req.deadline) },
+                JsonEip712FieldValue {
+                    name: "paymentId".to_string(),
+                    value: serde_json::Value::String(req.payment_id),
+                },
+                JsonEip712FieldValue {
+                    name: "amount".to_string(),
+                    value: serde_json::Value::String(req.amount),
+                },
+                JsonEip712FieldValue {
+                    name: "recipient".to_string(),
+                    value: serde_json::Value::String(req.recipient),
+                },
+                JsonEip712FieldValue {
+                    name: "deadline".to_string(),
+                    value: serde_json::Value::String(req.deadline),
+                },
             ],
             webauthn_assertion: req.webauthn_assertion,
             passkey_assertion: None,
@@ -4107,9 +4211,25 @@ async fn handle_sign_micropayment_voucher(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_micropayment_voucher(strip_bearer(auth_header), body).await {
-        Ok(r) => { println!("✅ SignMicropaymentVoucher OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
-        Err(e) => { eprintln!("SignMicropaymentVoucher error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
+    match server
+        .sign_micropayment_voucher(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!(
+                "✅ SignMicropaymentVoucher OK {}ms",
+                t0.elapsed().as_millis()
+            );
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignMicropaymentVoucher error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
     }
 }
 
@@ -4119,9 +4239,25 @@ async fn handle_sign_gtoken_authorization(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_gtoken_authorization(strip_bearer(auth_header), body).await {
-        Ok(r) => { println!("✅ SignGTokenAuthorization OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
-        Err(e) => { eprintln!("SignGTokenAuthorization error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
+    match server
+        .sign_gtoken_authorization(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!(
+                "✅ SignGTokenAuthorization OK {}ms",
+                t0.elapsed().as_millis()
+            );
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignGTokenAuthorization error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
     }
 }
 
@@ -4131,9 +4267,22 @@ async fn handle_sign_x402_payment(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let t0 = std::time::Instant::now();
-    match server.sign_x402_payment(strip_bearer(auth_header), body).await {
-        Ok(r) => { println!("✅ SignX402Payment OK {}ms", t0.elapsed().as_millis()); Ok(warp::reply::json(&r)) }
-        Err(e) => { eprintln!("SignX402Payment error: {} {}ms", e, t0.elapsed().as_millis()); Err(warp::reject::custom(ApiError(e.to_string()))) }
+    match server
+        .sign_x402_payment(strip_bearer(auth_header), body)
+        .await
+    {
+        Ok(r) => {
+            println!("✅ SignX402Payment OK {}ms", t0.elapsed().as_millis());
+            Ok(warp::reply::json(&r))
+        }
+        Err(e) => {
+            eprintln!(
+                "SignX402Payment error: {} {}ms",
+                e,
+                t0.elapsed().as_millis()
+            );
+            Err(warp::reject::custom(ApiError(e.to_string())))
+        }
     }
 }
 
@@ -4959,8 +5108,15 @@ mod request_deser_tests {
 
     #[test]
     fn derive_address_request_webauthn() {
-        let body = format!(r#"{{"KeyId":"abc","DerivationPath":"m/44","WebAuthn":{}}}"#, WA);
+        let body = format!(
+            r#"{{"KeyId":"abc","DerivationPath":"m/44","WebAuthn":{}}}"#,
+            WA
+        );
         let r: Result<DeriveAddressRequest, _> = serde_json::from_str(&body);
-        assert!(r.is_ok(), "DeriveAddressRequest deser failed: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "DeriveAddressRequest deser failed: {:?}",
+            r.err()
+        );
     }
 }
