@@ -484,3 +484,14 @@ pub struct DeleteP256SessionKeyOutput {
     /// true if the key existed and was deleted; false if it was already absent (idempotent).
     pub deleted: bool,
 }
+
+/// Read the current RPMB anti-rollback counter value (diagnostic).
+/// No auth required — counter value is not sensitive.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ReadRollbackCounterInput {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ReadRollbackCounterOutput {
+    /// Current RPMB counter value. 0 = counter not yet initialized (no mutations recorded).
+    pub counter: u64,
+}

@@ -42,4 +42,4 @@
 	url = https://github.com/apache/incubator-teaclave-trustzone-sdk.git
 [submodule "third_party/teaclave-trustzone-sdk"]
 	path = third_party/teaclave-trustzone-sdk
-	url = https://github.com/apache/teaclave-trustzone-sdk.git
+	url = https://github.com/AAStarCommunity/teaclave-trustzone-sdk.git

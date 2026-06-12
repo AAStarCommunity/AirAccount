@@ -5,6 +5,11 @@
 #
 # Prerequisites:
 #   pip3 install cryptography   (for p256_helper.py)
+#
+# NOTE (P0-2): this script uses LEGACY raw passkey assertions. The legacy
+# path is rejected by default since it has no challenge binding (replayable).
+# The kms-api-server under test must run with KMS_ALLOW_LEGACY_PASSKEY=1.
+# Production deployments must NEVER set that variable.
 
 set -eo pipefail
 
