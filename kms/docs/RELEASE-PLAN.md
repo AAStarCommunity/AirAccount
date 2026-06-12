@@ -12,7 +12,7 @@
 
 | 层 | 命令 | 结果 |
 |----|------|------|
-| **E2E（真机 MX93，100% 端点）** | `kms/test/run-full-e2e.sh`（上板跑） | **33/33 通过**（30 核心 + 3 P2 便利签名器） |
+| **E2E（真机 MX93，100% 端点）** | `kms/test/run-full-e2e.sh`（上板跑） | **34/34 通过**（30 核心 + 3 P2 便利签名器 + 1 负向） |
 | 单元测试 · proto | `cargo test --manifest-path kms/proto/Cargo.toml` | **39 通过** |
 | 单元测试 · host（CA） | `kms/test/run-host-unit-tests.sh`（交叉编译 → 上板跑） | **56 通过** |
 | 单元测试 · TA | 不适用 | 见下 |
@@ -80,7 +80,7 @@
 
 ## 当前未解决问题（主网前必须解决）
 
-1. **#49 WebAuthn 重放攻击（最高优先）**：需新增 `GetChallenge` TA 命令 + nonce 机制 + CA 透传完整 clientDataJSON，TA 内比对 challenge。是 #39 信任链的最后一块。**同时**：P2 便利签名器（SignMicropaymentVoucher / X402 / GTokenAuthorization，commit f3244d5）目前走 **legacy passkey 路径（无 ceremony / 无 challenge 重放保护）**，须随 #49 一起迁移到 `webAuthnAssertion`，主网前闭环。
+1. **#49 WebAuthn 重放攻击（最高优先）**：需新增 `GetChallenge` TA 命令 + nonce 机制 + CA 透传完整 clientDataJSON，TA 内比对 challenge。是 #39 信任链的最后一块。（注：P2 便利签名器已直接复用 `sign_typed_data` 的 ceremony 鉴权路径，与 SignTypedData 同等重放保护，无单独遗留项。）
 2. **#50 RPMB 生产编程**：当前 REE-FS fallback 让基础工作（不阻塞 Beta2），但主网要硬件防回滚需编程 RPMB key（不可逆，硬件定版后做）。
 3. **secp256k1 硬件**：已调研定论 —— i.MX ELE 不支持，软件 k256（~60ms）够用；#40 缩小为 P-256/SHA 加速；硬件 secp256k1 需外接 SE051（可选，非必须）。详见 `secp256k1-hardware-analysis.md`。
 

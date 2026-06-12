@@ -140,13 +140,16 @@ chk "POST /kms/sign-p256-user-op (Bearer JWT)" "$(post_path_code /kms/sign-p256-
 WA=$(ceremony "$PHKID")
 chk "POST /kms/revoke-p256-session-key" "$(post_path_code /kms/revoke-p256-session-key RevokeP256SessionKey "{\"keyId\":\"$PKID\",\"webAuthnAssertion\":$WA}")" 200
 
-echo -e "${YEL}[7d] P2 SuperPaymaster convenience signers (legacy passkey)${NC}"
-# NOTE: these wrappers use the legacy passkey path (no ceremony / replay protection).
-# Migrate to webAuthnAssertion before mainnet (tracked alongside #49 challenge binding).
-PASSKEY=$(python3 "$HELPER" passkey-api "$PEM")
-chk "POST /kms/SignX402Payment" "$(post_path_code /kms/SignX402Payment SignX402Payment "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"paymentId\":\"0x$KX\",\"amount\":\"1000000\",\"recipient\":\"$ADDR\",\"deadline\":\"9999999999\",\"passkeyAssertion\":$PASSKEY}")" 200
-chk "POST /kms/SignMicropaymentVoucher" "$(post_path_code /kms/SignMicropaymentVoucher SignMicropaymentVoucher "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"channelId\":\"0x$KY\",\"cumulativeAmount\":\"500000\",\"passkeyAssertion\":$PASSKEY}")" 200
-chk "POST /kms/SignGTokenAuthorization" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$ADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"passkeyAssertion\":$PASSKEY}")" 200
+echo -e "${YEL}[7d] P2 SuperPaymaster convenience signers (WebAuthn ceremony)${NC}"
+# Same auth as SignTypedData: replay-protected ceremony, no legacy passkey.
+WA=$(ceremony "$KEYID")
+chk "POST /kms/SignX402Payment" "$(post_path_code /kms/SignX402Payment SignX402Payment "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"paymentId\":\"0x$KX\",\"amount\":\"1000000\",\"recipient\":\"$ADDR\",\"deadline\":\"9999999999\",\"webAuthnAssertion\":$WA}")" 200
+WA=$(ceremony "$KEYID")
+chk "POST /kms/SignMicropaymentVoucher" "$(post_path_code /kms/SignMicropaymentVoucher SignMicropaymentVoucher "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"channelId\":\"0x$KY\",\"cumulativeAmount\":\"500000\",\"webAuthnAssertion\":$WA}")" 200
+WA=$(ceremony "$KEYID")
+chk "POST /kms/SignGTokenAuthorization" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$ADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 200
+# Negative: no auth → reject (same gate as SignTypedData)
+chk "SignX402Payment no-auth → reject" "$(post_path_code /kms/SignX402Payment SignX402Payment "{\"keyId\":\"$KEYID\",\"chainId\":1,\"verifyingContract\":\"$ADDR\",\"paymentId\":\"0x$KX\",\"amount\":\"1\",\"recipient\":\"$ADDR\",\"deadline\":\"9999999999\"}")" 400
 
 echo -e "${YEL}[8] Cleanup${NC}"
 WA=$(ceremony "$KEYID")
