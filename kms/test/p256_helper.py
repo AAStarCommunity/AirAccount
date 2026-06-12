@@ -313,6 +313,20 @@ if __name__ == "__main__":
         cred_id = sys.argv[4] if len(sys.argv) > 4 else "dGVzdC1jcmVkZW50aWFs"
         sc = int(sys.argv[5]) if len(sys.argv) > 5 else 1
         print(json.dumps(make_ceremony_assertion(pem, challenge, cred_id, sc)))
+    elif cmd == "passkey-api":
+        # passkey-api <pem> → legacy PasskeyAssertion in API format
+        # {AuthenticatorData, ClientDataHash, Signature(r||s hex)}
+        # Used by the P2 convenience signers (SignX402Payment etc.) which take the
+        # legacy passkey path (no ceremony). Migrate to webAuthnAssertion before mainnet.
+        if len(sys.argv) < 3:
+            print("Usage: p256_helper.py passkey-api <privkey_pem>", file=sys.stderr)
+            sys.exit(1)
+        a = make_assertion(sys.argv[2])
+        print(json.dumps({
+            "AuthenticatorData": a["authenticator_data"],
+            "ClientDataHash": a["client_data_hash"],
+            "Signature": a["signature_r"] + a["signature_s"],
+        }))
     elif cmd == "registration":
         # registration <pem> <challenge_b64url> [credential_id]
         # → WebAuthn RegistrationResponseJSON ('none' attestation) for CompleteRegistration
