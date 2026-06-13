@@ -62,8 +62,6 @@ tags:
     description: SessionKeyValidator GRANT_SESSION_V2 signing (secp256k1 / P-256)
   - name: P256 Sessions
     description: P-256 session keys for ERC-4337 UserOps
-  - name: Admin
-    description: Operator-only force operations (KMS_ADMIN_TOKEN)
 
 security:
   - ApiKey: []
