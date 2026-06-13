@@ -1,6 +1,13 @@
 # TEE 远程证明（Attestation）开发计划
 
-*创建时间: 2026-06-07 | 关联 Issue: #TBD | 目标版本: v0.22.0*
+> ⚠️ **DEPRECATED (2026-06-13)** — 本文档基于未经证实的技术前提,**请勿据此实施**。
+> 已被新设计取代:
+> - 调研:[`docs/design/37-remote-attestation-research.md`](./design/37-remote-attestation-research.md)
+> - 设计:[`docs/design/37-remote-attestation-design.md`](./design/37-remote-attestation-design.md)
+>
+> **本文档的关键错误**:声称"OP-TEE 4.8 支持 DICE 证明"且"MX93 预装 Attestation TA(UUID `731e279e-aafb-4575-a771-38caa6f0cca6`)"。经调研,该 UUID 在 OP-TEE 上游代码中查无此物,DICE 说法也与 OP-TEE 实际机制不符。OP-TEE 真实的证明路径是**原生 attestation PTA**(`PTA_ATTESTATION_GET_TA_SHDR_DIGEST`),详见新调研文档 §2.1。保留本文件仅作历史记录。
+
+*创建时间: 2026-06-07 | 关联 Issue: #37 | 目标版本: v0.22.0（规划）*
 
 ---
 
