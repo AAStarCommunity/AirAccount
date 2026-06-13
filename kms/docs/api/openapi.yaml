@@ -395,24 +395,15 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
       x-tested: { e2e: "run-full-e2e.sh §7c", api: "run-api-tests.sh (no-WebAuthn→400, idempotent)", status: "✅ verified (34/34)" }
 
-  # ───────────────────────── Admin ─────────────────────────
-  /admin/purge-key:
-    post:
-      tags: [Admin]
-      summary: Force-purge a key from TEE + SQLite (operator only, no passkey)
-      description: "Requires `Authorization: Bearer $KMS_ADMIN_TOKEN`. Disabled if the env var is unset."
-      security: [{ AdminToken: [] }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [key_id, reason], properties: { key_id: { type: string }, reason: { type: string } } } } } }
-      responses:
-        '200': { description: Purged, content: { application/json: { schema: { type: object } } } }
-        '400': { description: "Missing/invalid admin token, or env unset", $ref: '#/components/responses/Error' }
-      x-tested: { e2e: "run-full-e2e.sh §7 (no-token→400, added v0.20.0)", status: "✅ negative verified (39/39); positive path is operator-manual (destructive)" }
+  # NOTE: /admin/purge-key is intentionally absent. It is a DEV/TEST-only endpoint
+  # gated behind the compile-time `admin-purge` feature and is NOT present in
+  # production release builds (decentralized KMS has no admin surface). The public
+  # API contract therefore does not document it. See kms/docs/RELEASE-PLAN.md.
 
 components:
   securitySchemes:
     ApiKey: { type: apiKey, in: header, name: x-api-key, description: "API key (open mode if no keys registered)" }
     BearerJWT: { type: http, scheme: bearer, bearerFormat: JWT, description: "TEE-issued agent / session JWT" }
-    AdminToken: { type: http, scheme: bearer, description: "KMS_ADMIN_TOKEN operator secret" }
   parameters:
     AmzTarget:
       name: x-amz-target
