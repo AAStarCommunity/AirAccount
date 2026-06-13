@@ -162,6 +162,11 @@ post_code DeriveAddress "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'
 GADDR=$(jbody "['Address']")
 WA=$(ceremony "$KEYID")
 chk "POST /kms/SignGTokenAuthorization" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$GADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 200
+# #52 (0x normalization): the same `from` without the 0x prefix must still match
+# (address compare strips 0x + lower-cases — a format diff is not a mismatch).
+GADDR_NO0X=$(echo "$GADDR" | sed 's/^0x//')
+WA=$(ceremony "$KEYID")
+chk "GTokenAuth from sans-0x → 200 (normalized)" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$GADDR_NO0X\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 200
 # #52 negative: a `from` that is NOT the derived address must be rejected pre-sign.
 WA=$(ceremony "$KEYID")
 chk "GTokenAuth wrong from → reject" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$ADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 400

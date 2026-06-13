@@ -2939,7 +2939,18 @@ impl KmsApiServer {
         // least once for this key+path); if not, refuse rather than risk a revert.
         match self.db.address_for_key_path(&req.key_id, &req.hd_path)? {
             Some(addr) => {
-                if !addr.eq_ignore_ascii_case(&req.from) {
+                // Normalize both sides — strip an optional 0x/0X prefix and
+                // lower-case — so a mere format difference ("0xABCD" vs "abcd")
+                // is not treated as a from-mismatch. Ethereum addresses are
+                // case-insensitive at the byte level (EIP-55 checksum is
+                // display-only), and callers may or may not include the prefix.
+                let norm = |s: &str| {
+                    s.strip_prefix("0x")
+                        .or_else(|| s.strip_prefix("0X"))
+                        .unwrap_or(s)
+                        .to_ascii_lowercase()
+                };
+                if norm(&addr) != norm(&req.from) {
                     return Err(anyhow!(
                         "from {} does not match the address derived from keyId+hdPath \
                          ({}); EIP-3009 would revert on-chain",
