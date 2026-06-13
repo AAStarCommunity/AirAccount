@@ -2685,7 +2685,10 @@ impl KmsApiServer {
             hd_path: req.hd_path,
             domain: JsonEip712Domain {
                 name: Some("MicroPaymentChannel".to_string()),
-                version: Some("1".to_string()),
+                // EIP-712 version must match the contract's _domainNameAndVersion()
+                // (MicroPaymentChannel.sol returns "1.0.0"); "1" would make the
+                // domainSeparator differ and voucher signatures fail on-chain (#21).
+                version: Some("1.0.0".to_string()),
                 chain_id: Some(req.chain_id),
                 verifying_contract: Some(req.verifying_contract),
             },
