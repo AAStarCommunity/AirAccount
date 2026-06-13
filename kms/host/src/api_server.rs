@@ -3665,7 +3665,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 </head>
 <body>
 <h1>AirAccount KMS</h1>
-<div class="sub">v{version} &middot; TA mode: real &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
+<div class="sub">v{version} &middot; TA mode: real &middot; <a href="/docs">📖 API Docs</a> &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
 
 <h2>Keys</h2>
 <div class="card grid">
