@@ -591,6 +591,28 @@ impl KmsDb {
         Ok(())
     }
 
+    /// #52: look up the cached Ethereum address for a (key_id, derivation_path)
+    /// pair. Used to verify a caller-supplied `from` against the real signing
+    /// address before building an EIP-3009 authorization — a mismatch would
+    /// revert on-chain (wasted gas). Returns None if the pair has not been
+    /// derived/cached yet (caller should DeriveAddress first).
+    pub fn address_for_key_path(
+        &self,
+        key_id: &str,
+        derivation_path: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT address FROM address_index WHERE key_id=?1 AND derivation_path=?2")?;
+        let mut rows = stmt.query_map(params![key_id, derivation_path], |row| {
+            row.get::<_, String>(0)
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn lookup_address(&self, address: &str) -> Result<Option<AddressRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -1563,9 +1585,15 @@ mod tests {
     fn lifecycle_status_defaults_active_and_round_trips() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w-lc")).unwrap();
-        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("active"));
+        assert_eq!(
+            db.get_lifecycle_status("w-lc").unwrap().as_deref(),
+            Some("active")
+        );
         assert!(db.set_lifecycle_status("w-lc", "frozen").unwrap());
-        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("frozen"));
+        assert_eq!(
+            db.get_lifecycle_status("w-lc").unwrap().as_deref(),
+            Some("frozen")
+        );
         // Unknown key -> None
         assert!(db.get_lifecycle_status("nope").unwrap().is_none());
         assert!(!db.set_lifecycle_status("nope", "active").unwrap());
@@ -1596,7 +1624,10 @@ mod tests {
         // Threshold of 1 day: the never-used, old key is dormant -> frozen.
         let frozen = db.freeze_dormant_keys(now, 24 * 60 * 60).unwrap();
         assert_eq!(frozen, vec!["w-old".to_string()]);
-        assert_eq!(db.get_lifecycle_status("w-old").unwrap().as_deref(), Some("frozen"));
+        assert_eq!(
+            db.get_lifecycle_status("w-old").unwrap().as_deref(),
+            Some("frozen")
+        );
     }
 
     #[test]
@@ -1610,7 +1641,10 @@ mod tests {
         // Even with a 1-second threshold, the just-now activity keeps it active.
         let frozen = db.freeze_dormant_keys(now, 1).unwrap();
         assert!(frozen.is_empty());
-        assert_eq!(db.get_lifecycle_status("w-active").unwrap().as_deref(), Some("active"));
+        assert_eq!(
+            db.get_lifecycle_status("w-active").unwrap().as_deref(),
+            Some("active")
+        );
     }
 
     #[test]
@@ -1641,7 +1675,10 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         // Even a 1-second threshold must not freeze it: the address activity counts.
         let frozen = db.freeze_dormant_keys(now, 1).unwrap();
-        assert!(frozen.is_empty(), "address-mode activity must keep the key active");
+        assert!(
+            frozen.is_empty(),
+            "address-mode activity must keep the key active"
+        );
         assert_eq!(
             db.get_lifecycle_status("w-addr").unwrap().as_deref(),
             Some("active")
@@ -1650,5 +1687,31 @@ mod tests {
             db.last_used_at("w-addr").unwrap().is_some(),
             "last_used_at must see the address-mode op"
         );
+    }
+
+    #[test]
+    fn address_for_key_path_lookup() {
+        // #52: GToken from-check resolves the signing address by (key_id, path).
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-1")).unwrap(); // satisfy address_index FK
+        db.upsert_address("0xABC123", "w-1", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        // exact (key_id, path) → hit
+        assert_eq!(
+            db.address_for_key_path("w-1", "m/44'/60'/0'/0/0")
+                .unwrap()
+                .as_deref(),
+            Some("0xABC123")
+        );
+        // same key, different path → miss
+        assert!(db
+            .address_for_key_path("w-1", "m/44'/60'/0'/0/1")
+            .unwrap()
+            .is_none());
+        // different key, same path → miss
+        assert!(db
+            .address_for_key_path("w-2", "m/44'/60'/0'/0/0")
+            .unwrap()
+            .is_none());
     }
 }

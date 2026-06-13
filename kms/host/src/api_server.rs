@@ -2427,7 +2427,10 @@ impl KmsApiServer {
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
             Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
                 Ok(nonce) => {
-                    println!("🔐 Issue #49: using TA-issued challenge nonce for key_id={}", key_id);
+                    println!(
+                        "🔐 Issue #49: using TA-issued challenge nonce for key_id={}",
+                        key_id
+                    );
                     webauthn::generate_authentication_options_with_challenge(
                         &rp_id,
                         allow_credentials,
@@ -2928,6 +2931,42 @@ impl KmsApiServer {
         bearer: Option<String>,
         req: SignGTokenAuthorizationRequest,
     ) -> Result<SignTypedDataResponse> {
+        // #52: verify `from` equals the address actually derived from keyId+hdPath.
+        // EIP-3009 TransferWithAuthorization is checked on-chain by
+        // ecrecover(hash, sig) == from; signing with a key whose address != from
+        // makes the transfer revert and wastes the user's gas. Catch it here with a
+        // clear error. The address must already be cached (DeriveAddress called at
+        // least once for this key+path); if not, refuse rather than risk a revert.
+        match self.db.address_for_key_path(&req.key_id, &req.hd_path)? {
+            Some(addr) => {
+                // Normalize both sides — strip an optional 0x/0X prefix and
+                // lower-case — so a mere format difference ("0xABCD" vs "abcd")
+                // is not treated as a from-mismatch. Ethereum addresses are
+                // case-insensitive at the byte level (EIP-55 checksum is
+                // display-only), and callers may or may not include the prefix.
+                let norm = |s: &str| {
+                    s.strip_prefix("0x")
+                        .or_else(|| s.strip_prefix("0X"))
+                        .unwrap_or(s)
+                        .to_ascii_lowercase()
+                };
+                if norm(&addr) != norm(&req.from) {
+                    return Err(anyhow!(
+                        "from {} does not match the address derived from keyId+hdPath \
+                         ({}); EIP-3009 would revert on-chain",
+                        req.from,
+                        addr
+                    ));
+                }
+            }
+            None => {
+                return Err(anyhow!(
+                    "no cached address for this keyId+hdPath — call DeriveAddress first \
+                     so the signer can verify `from` (prevents an on-chain EIP-3009 revert)"
+                ));
+            }
+        }
+
         let std_req = SignTypedDataRequest {
             key_id: req.key_id,
             hd_path: req.hd_path,
@@ -3789,7 +3828,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.20.0";
+const KMS_VERSION: &str = "0.21.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -5181,7 +5220,7 @@ pub async fn start_kms_server() -> Result<()> {
     // Pinned swagger-ui-dist@5.32.6 with SRI integrity hashes (supply-chain hardening).
     const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AirAccount KMS API — v0.20.0 (Beta2)</title>
+<title>AirAccount KMS API — v0.21.0 (Beta3)</title>
 <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui.css"
  integrity="sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT" crossorigin="anonymous">
 <style>body{margin:0;background:#fafafa}.swagger-ui .topbar{display:none}
@@ -5192,7 +5231,7 @@ pub async fn start_kms_server() -> Result<()> {
 html.dark body{background:#0b1020}
 html.dark #swagger-ui{filter:invert(0.92) hue-rotate(180deg)}
 html.dark #swagger-ui .microlight,html.dark #swagger-ui img{filter:invert(1) hue-rotate(180deg)}</style></head>
-<body><div id="hdr"><h1><span class="b">BETA2 · v0.20.0</span>AirAccount KMS API</h1>
+<body><div id="hdr"><h1><span class="b">BETA3 · v0.21.0</span>AirAccount KMS API</h1>
 <small>TEE 私钥管理 · WebAuthn · AWS KMS 兼容 · 私钥永不出 TEE</small></div>
 <button id="theme" onclick="tgl()" title="切换 dark / light">🌙</button>
 <div id="swagger-ui"></div>
