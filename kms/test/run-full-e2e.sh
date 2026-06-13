@@ -69,6 +69,9 @@ chk "GET /health"          "$(get_code /health)" 200
 chk "GET /version"         "$(get_code /version)" 200
 chk "GET /QueueStatus"     "$(get_code /QueueStatus)" 200
 chk "GET /RollbackCounter" "$(get_code /RollbackCounter)" 200
+chk "GET /stats"           "$(get_code /stats)" 200
+chk "GET / (dashboard)"    "$(get_code /)" 200
+chk "GET /test (test UI)"  "$(get_code /test)" 200
 
 echo -e "${YEL}[2] Wallet lifecycle${NC}"
 chk "POST /CreateKey" "$(post_code CreateKey "{\"Description\":\"e2e\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}")" 200
@@ -88,6 +91,8 @@ WA=$(ceremony "$KEYID")
 chk "POST /SignHash" "$(post_code SignHash "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"WebAuthn\":$WA}")" 200
 WA=$(ceremony "$KEYID")
 chk "POST /Sign (message)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f\",\"WebAuthn\":$WA}")" 200
+WA=$(ceremony "$KEYID")
+chk "POST /Sign (transaction)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"WebAuthn\":$WA}")" 200
 
 echo -e "${YEL}[5] ChangePasskey (isolated key — avoids changing main key's passkey)${NC}"
 post_code CreateKey "{\"Description\":\"cp\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
@@ -106,6 +111,7 @@ chk "GET /kms/begin-grant-session-auth" "$(get_code "/kms/begin-grant-session-au
 echo -e "${YEL}[7] Negative — auth gates reject correctly${NC}"
 chk "SignTypedData no-auth → reject"      "$(post_path_code /kms/SignTypedData SignTypedData '{"domain":{},"types":{},"primaryType":"X","message":{}}')" 400
 chk "sign-grant-session no-auth → reject" "$(post_path_code /kms/sign-grant-session SignGrantSession '{}')" 400
+chk "admin/purge-key no-token → reject"   "$(post_path_code /admin/purge-key AdminPurge '{"key_id":"00000000-0000-0000-0000-000000000000","reason":"e2e-neg"}')" 400
 
 echo -e "${YEL}[7b] Agent key flow (ceremony → Bearer JWT)${NC}"
 post_code CreateKey "{\"Description\":\"ak\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
