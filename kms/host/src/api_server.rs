@@ -2427,7 +2427,10 @@ impl KmsApiServer {
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
             Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
                 Ok(nonce) => {
-                    println!("🔐 Issue #49: using TA-issued challenge nonce for key_id={}", key_id);
+                    println!(
+                        "🔐 Issue #49: using TA-issued challenge nonce for key_id={}",
+                        key_id
+                    );
                     webauthn::generate_authentication_options_with_challenge(
                         &rp_id,
                         allow_credentials,

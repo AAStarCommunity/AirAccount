@@ -602,9 +602,8 @@ impl KmsDb {
         derivation_path: &str,
     ) -> Result<Option<String>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT address FROM address_index WHERE key_id=?1 AND derivation_path=?2",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT address FROM address_index WHERE key_id=?1 AND derivation_path=?2")?;
         let mut rows = stmt.query_map(params![key_id, derivation_path], |row| {
             row.get::<_, String>(0)
         })?;
@@ -1586,9 +1585,15 @@ mod tests {
     fn lifecycle_status_defaults_active_and_round_trips() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w-lc")).unwrap();
-        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("active"));
+        assert_eq!(
+            db.get_lifecycle_status("w-lc").unwrap().as_deref(),
+            Some("active")
+        );
         assert!(db.set_lifecycle_status("w-lc", "frozen").unwrap());
-        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("frozen"));
+        assert_eq!(
+            db.get_lifecycle_status("w-lc").unwrap().as_deref(),
+            Some("frozen")
+        );
         // Unknown key -> None
         assert!(db.get_lifecycle_status("nope").unwrap().is_none());
         assert!(!db.set_lifecycle_status("nope", "active").unwrap());
@@ -1619,7 +1624,10 @@ mod tests {
         // Threshold of 1 day: the never-used, old key is dormant -> frozen.
         let frozen = db.freeze_dormant_keys(now, 24 * 60 * 60).unwrap();
         assert_eq!(frozen, vec!["w-old".to_string()]);
-        assert_eq!(db.get_lifecycle_status("w-old").unwrap().as_deref(), Some("frozen"));
+        assert_eq!(
+            db.get_lifecycle_status("w-old").unwrap().as_deref(),
+            Some("frozen")
+        );
     }
 
     #[test]
@@ -1633,7 +1641,10 @@ mod tests {
         // Even with a 1-second threshold, the just-now activity keeps it active.
         let frozen = db.freeze_dormant_keys(now, 1).unwrap();
         assert!(frozen.is_empty());
-        assert_eq!(db.get_lifecycle_status("w-active").unwrap().as_deref(), Some("active"));
+        assert_eq!(
+            db.get_lifecycle_status("w-active").unwrap().as_deref(),
+            Some("active")
+        );
     }
 
     #[test]
@@ -1664,7 +1675,10 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         // Even a 1-second threshold must not freeze it: the address activity counts.
         let frozen = db.freeze_dormant_keys(now, 1).unwrap();
-        assert!(frozen.is_empty(), "address-mode activity must keep the key active");
+        assert!(
+            frozen.is_empty(),
+            "address-mode activity must keep the key active"
+        );
         assert_eq!(
             db.get_lifecycle_status("w-addr").unwrap().as_deref(),
             Some("active")
