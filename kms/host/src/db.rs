@@ -35,7 +35,12 @@ CREATE TABLE IF NOT EXISTS wallets (
     sign_count      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'creating',
     error_msg       TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    -- Key lifecycle (issue #42). Distinct from `status` above, which tracks the
+    -- provisioning state machine (creating/deriving/ready/error). `lifecycle_status`
+    -- tracks the user-facing key lifecycle: active ⇄ frozen → pending_delete → deleted.
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    last_used_at    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS address_index (
@@ -160,6 +165,11 @@ pub struct WalletRow {
     pub status: String,
     pub error_msg: Option<String>,
     pub created_at: String,
+    /// Key lifecycle stage (issue #42): "active" | "frozen" | "pending_delete" | "deleted".
+    /// Distinct from `status`, which is the provisioning state. Defaults to "active".
+    pub lifecycle_status: String,
+    /// Unix seconds of the last successful Sign/SignHash/DeriveAddress. NULL until first use.
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +281,57 @@ impl KmsDb {
                 }
             }
         }
+        // Migration (issue #42): add lifecycle columns to wallets created before this column
+        // existed. Idempotent — checks PRAGMA table_info first and re-verifies on ALTER failure
+        // (TOCTOU: a concurrent open may have added the column between check and ALTER). Existing
+        // rows get lifecycle_status='active' via the column DEFAULT; last_used_at stays NULL until
+        // first Sign/Derive. Same pattern as the tee_deleted migration above.
+        {
+            let wallet_col_exists = |c: &Connection, col: &str| -> Result<bool> {
+                let mut stmt = c
+                    .prepare("PRAGMA table_info(wallets)")
+                    .context("Failed to query wallets schema")?;
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<_>>()
+                    .context("Failed to read wallets schema")?;
+                Ok(names.iter().any(|n| n == col))
+            };
+            // lifecycle_status — NOT NULL with a literal DEFAULT, valid for ALTER TABLE ADD COLUMN.
+            if !wallet_col_exists(&conn, "lifecycle_status")? {
+                match conn.execute_batch(
+                    "ALTER TABLE wallets \
+                     ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active';",
+                ) {
+                    Ok(()) => {}
+                    Err(alter_err) => {
+                        if !wallet_col_exists(&conn, "lifecycle_status")
+                            .context("Re-check after ALTER TABLE failure (lifecycle_status)")?
+                        {
+                            return Err(alter_err).context(
+                                "Failed to add lifecycle_status column to wallets",
+                            );
+                        }
+                    }
+                }
+            }
+            // last_used_at — nullable INTEGER (unix seconds), no DEFAULT needed.
+            if !wallet_col_exists(&conn, "last_used_at")? {
+                match conn.execute_batch(
+                    "ALTER TABLE wallets ADD COLUMN last_used_at INTEGER;",
+                ) {
+                    Ok(()) => {}
+                    Err(alter_err) => {
+                        if !wallet_col_exists(&conn, "last_used_at")
+                            .context("Re-check after ALTER TABLE failure (last_used_at)")?
+                        {
+                            return Err(alter_err)
+                                .context("Failed to add last_used_at column to wallets");
+                        }
+                    }
+                }
+            }
+        }
         println!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -297,7 +358,8 @@ impl KmsDb {
         conn.execute(
             "INSERT INTO wallets (key_id, address, public_key, derivation_path, description, \
              key_usage, key_spec, origin, passkey_pubkey, credential_id, sign_count, status, \
-             error_msg, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             error_msg, created_at, lifecycle_status, last_used_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 w.key_id,
                 w.address,
@@ -313,6 +375,8 @@ impl KmsDb {
                 w.status,
                 w.error_msg,
                 w.created_at,
+                w.lifecycle_status,
+                w.last_used_at,
             ],
         )
         .context("insert_wallet")?;
@@ -324,7 +388,7 @@ impl KmsDb {
         let mut stmt = conn.prepare(
             "SELECT key_id, address, public_key, derivation_path, description, key_usage, \
              key_spec, origin, passkey_pubkey, credential_id, sign_count, status, error_msg, \
-             created_at FROM wallets WHERE key_id = ?1",
+             created_at, lifecycle_status, last_used_at FROM wallets WHERE key_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![key_id], |row| {
             Ok(WalletRow {
@@ -342,6 +406,8 @@ impl KmsDb {
                 status: row.get(11)?,
                 error_msg: row.get(12)?,
                 created_at: row.get(13)?,
+                lifecycle_status: row.get(14)?,
+                last_used_at: row.get(15)?,
             })
         })?;
         match rows.next() {
@@ -414,6 +480,54 @@ impl KmsDb {
         Ok(())
     }
 
+    /// Update `last_used_at` to the given unix-second timestamp (issue #42).
+    /// Called on the success path of Sign / SignHash / DeriveAddress. Best-effort:
+    /// a failure here must NOT fail the signing operation (caller logs and ignores).
+    pub fn touch_wallet_last_used(&self, key_id: &str, now_unix: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE wallets SET last_used_at=?2 WHERE key_id=?1",
+            params![key_id, now_unix],
+        )
+        .context("touch_wallet_last_used")?;
+        Ok(())
+    }
+
+    /// Transition a key's lifecycle_status only if it is currently in `expected_from`
+    /// (state-machine guard, issue #42). Returns Ok(true) if a row was transitioned,
+    /// Ok(false) if the key does not exist or was not in the expected source state
+    /// (caller maps false → a 4xx "invalid state transition" error).
+    ///
+    /// Phase 1 uses this for active⇄frozen. The same primitive serves
+    /// active/frozen→pending_delete in later phases.
+    pub fn set_wallet_lifecycle_status(
+        &self,
+        key_id: &str,
+        expected_from: &str,
+        new_status: &str,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE wallets SET lifecycle_status=?3 \
+             WHERE key_id=?1 AND lifecycle_status=?2",
+            params![key_id, expected_from, new_status],
+        )
+        .context("set_wallet_lifecycle_status")?;
+        Ok(n > 0)
+    }
+
+    /// Read just the lifecycle_status for a key. Returns None if the key does not exist.
+    pub fn get_wallet_lifecycle_status(&self, key_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT lifecycle_status FROM wallets WHERE key_id=?1")?;
+        let mut rows = stmt.query_map(params![key_id], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn delete_wallet(&self, key_id: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM wallets WHERE key_id=?1", params![key_id])?;
@@ -425,7 +539,7 @@ impl KmsDb {
         let mut stmt = conn.prepare(
             "SELECT key_id, address, public_key, derivation_path, description, key_usage, \
              key_spec, origin, passkey_pubkey, credential_id, sign_count, status, error_msg, \
-             created_at FROM wallets ORDER BY created_at",
+             created_at, lifecycle_status, last_used_at FROM wallets ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(WalletRow {
@@ -443,6 +557,8 @@ impl KmsDb {
                 status: row.get(11)?,
                 error_msg: row.get(12)?,
                 created_at: row.get(13)?,
+                lifecycle_status: row.get(14)?,
+                last_used_at: row.get(15)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1247,6 +1363,8 @@ mod tests {
             status: "creating".to_string(),
             error_msg: None,
             created_at: "2026-03-02T00:00:00Z".to_string(),
+            lifecycle_status: "active".to_string(),
+            last_used_at: None,
         }
     }
 
@@ -1412,6 +1530,58 @@ mod tests {
         db.update_wallet_sign_count("w-sc", 42).unwrap();
         let got = db.get_wallet("w-sc").unwrap().unwrap();
         assert_eq!(got.sign_count, 42);
+    }
+
+    #[test]
+    fn lifecycle_defaults_to_active_and_null_last_used() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-lc")).unwrap();
+        let got = db.get_wallet("w-lc").unwrap().unwrap();
+        assert_eq!(got.lifecycle_status, "active");
+        assert_eq!(got.last_used_at, None);
+        assert_eq!(
+            db.get_wallet_lifecycle_status("w-lc").unwrap().as_deref(),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn touch_last_used_updates_timestamp() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-tu")).unwrap();
+        db.touch_wallet_last_used("w-tu", 1_700_000_000).unwrap();
+        let got = db.get_wallet("w-tu").unwrap().unwrap();
+        assert_eq!(got.last_used_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn lifecycle_freeze_unfreeze_state_machine() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-fz")).unwrap();
+        // active -> frozen succeeds
+        assert!(db
+            .set_wallet_lifecycle_status("w-fz", "active", "frozen")
+            .unwrap());
+        assert_eq!(
+            db.get_wallet_lifecycle_status("w-fz").unwrap().as_deref(),
+            Some("frozen")
+        );
+        // active -> frozen again fails (already frozen, wrong source state)
+        assert!(!db
+            .set_wallet_lifecycle_status("w-fz", "active", "frozen")
+            .unwrap());
+        // frozen -> active succeeds
+        assert!(db
+            .set_wallet_lifecycle_status("w-fz", "frozen", "active")
+            .unwrap());
+        assert_eq!(
+            db.get_wallet_lifecycle_status("w-fz").unwrap().as_deref(),
+            Some("active")
+        );
+        // transition on a missing key returns false (not an error)
+        assert!(!db
+            .set_wallet_lifecycle_status("nope", "active", "frozen")
+            .unwrap());
     }
 
     #[test]

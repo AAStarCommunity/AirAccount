@@ -112,6 +112,15 @@ pub struct KeyMetadata {
     pub origin: String,
     #[serde(rename = "PasskeyPublicKey", skip_serializing_if = "Option::is_none")]
     pub passkey_public_key: Option<String>,
+    /// Key lifecycle stage (issue #42): "active" | "frozen" | "pending_delete" | "deleted".
+    /// NOTE: serde name is `LifecycleStatus`, NOT `Status`. The KMS protocol already uses the
+    /// `Status` JSON field for the provisioning state (creating/deriving/ready/error) in
+    /// KeyStatusResponse, so reusing `Status` here would conflict / mislead clients.
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
+    /// Unix seconds of last successful Sign/SignHash/DeriveAddress; absent if never used.
+    #[serde(rename = "LastUsedAt", skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -241,6 +250,29 @@ pub struct DeleteKeyResponse {
     pub deletion_date: DateTime<Utc>,
 }
 
+/// Issue #42: FreezeKey / UnfreezeKey request. Auth mirrors DeleteKey — WebAuthn-gated
+/// (Passkey or WebAuthn assertion required), verified in the handler via
+/// resolve_passkey_assertion_strict before the lifecycle transition is applied.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FreezeKeyRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    /// Legacy: raw PassKey assertion (hex)
+    #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
+    pub passkey: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (from BeginAuthentication)
+    #[serde(rename = "WebAuthn", skip_serializing_if = "Option::is_none", default)]
+    pub webauthn: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FreezeKeyResponse {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
+}
+
 /// Admin force-purge request — bypasses passkey, deletes from TEE + SQLite.
 /// Requires Authorization: Bearer $KMS_ADMIN_TOKEN header.
 #[derive(Debug, Serialize, Deserialize)]
@@ -295,7 +327,13 @@ pub struct KeyStatusResponse {
     #[serde(rename = "KeyId")]
     pub key_id: String,
     #[serde(rename = "Status")]
-    pub status: String, // "creating" | "deriving" | "ready" | "error"
+    pub status: String, // provisioning state: "creating" | "deriving" | "ready" | "error"
+    /// Key lifecycle stage (issue #42): "active" | "frozen" | "pending_delete" | "deleted".
+    /// Separate from `Status` (provisioning) above — see KeyMetadata::lifecycle_status note.
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
+    #[serde(rename = "LastUsedAt", skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
     #[serde(rename = "Address", skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     #[serde(rename = "PublicKey", skip_serializing_if = "Option::is_none")]
@@ -988,6 +1026,8 @@ fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
         key_spec: w.key_spec.clone(),
         origin: w.origin.clone(),
         passkey_public_key: w.passkey_pubkey.clone(),
+        lifecycle_status: w.lifecycle_status.clone(),
+        last_used_at: w.last_used_at,
     }
 }
 
@@ -1153,6 +1193,8 @@ impl KmsApiServer {
             key_spec: req.key_spec.clone(),
             origin: req.origin.clone(),
             passkey_public_key: Some(req.passkey_public_key.clone()),
+            lifecycle_status: "active".to_string(),
+            last_used_at: None,
         };
 
         // Persist to DB.
@@ -1177,6 +1219,8 @@ impl KmsApiServer {
             status: "deriving".to_string(),
             error_msg: None,
             created_at: now.to_rfc3339(),
+            lifecycle_status: "active".to_string(),
+            last_used_at: None,
         };
         let mut insert_result = self.db.insert_wallet(&row);
         for attempt in 1..=3u64 {
@@ -1293,10 +1337,112 @@ impl KmsApiServer {
         Ok(KeyStatusResponse {
             key_id: key_id.to_string(),
             status: status.to_string(),
+            lifecycle_status: w.lifecycle_status,
+            last_used_at: w.last_used_at,
             address: w.address,
             public_key: w.public_key,
             derivation_path: w.derivation_path,
             error,
+        })
+    }
+
+    /// Issue #42: reject a signing operation if the key's lifecycle_status is "frozen".
+    /// Returns Err with the exact text "key is frozen" (handlers map this to HTTP 400).
+    /// A missing key is left to downstream existence checks, not treated as frozen.
+    fn reject_if_frozen(&self, key_id: &str) -> Result<()> {
+        if let Some(stage) = self.db.get_wallet_lifecycle_status(key_id)? {
+            if stage == "frozen" {
+                return Err(anyhow!("key is frozen"));
+            }
+            // pending_delete / deleted also block signing once those phases land.
+            if stage == "pending_delete" || stage == "deleted" {
+                return Err(anyhow!("key is {}", stage));
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue #42: best-effort update of last_used_at on a signing success path.
+    /// Deliberately swallows errors (logs only) so a metadata write failure never
+    /// turns a successful signature into a client-visible error.
+    fn touch_last_used(&self, key_id: &str) {
+        let now = Utc::now().timestamp();
+        if let Err(e) = self.db.touch_wallet_last_used(key_id, now) {
+            eprintln!(
+                "⚠️  last_used_at update failed for {} (non-fatal): {}",
+                key_id, e
+            );
+        }
+    }
+
+    /// Issue #42: FreezeKey — transition active → frozen.
+    ///
+    /// Auth mirrors DeleteKey: WebAuthn-gated via `resolve_passkey_assertion_strict`
+    /// (same call DeleteKey uses for normal keys), enforced here inside the method so the
+    /// route filter stays identical to DeleteKey's. Invalid transitions surface as an
+    /// error (handler maps to 400). This is a host-only lifecycle flag — the TEE key
+    /// material is NOT touched.
+    pub async fn freeze_key(&self, req: FreezeKeyRequest) -> Result<FreezeKeyResponse> {
+        println!("📝 KMS FreezeKey API called for key: {}", req.key_id);
+        if !self.db.wallet_exists(&req.key_id)? {
+            return Err(anyhow!("Key not found: {}", req.key_id));
+        }
+        // WebAuthn / passkey verification (audit-hardened), identical to DeleteKey normal path.
+        let _assertion = self
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
+            .await?;
+        let changed = self
+            .db
+            .set_wallet_lifecycle_status(&req.key_id, "active", "frozen")?;
+        if !changed {
+            let current = self
+                .db
+                .get_wallet_lifecycle_status(&req.key_id)?
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(anyhow!(
+                "cannot freeze key: expected lifecycle_status 'active', found '{}'",
+                current
+            ));
+        }
+        Ok(FreezeKeyResponse {
+            key_id: req.key_id,
+            lifecycle_status: "frozen".to_string(),
+        })
+    }
+
+    /// Issue #42: UnfreezeKey — transition frozen → active. Auth mirrors DeleteKey.
+    pub async fn unfreeze_key(&self, req: FreezeKeyRequest) -> Result<FreezeKeyResponse> {
+        println!("📝 KMS UnfreezeKey API called for key: {}", req.key_id);
+        if !self.db.wallet_exists(&req.key_id)? {
+            return Err(anyhow!("Key not found: {}", req.key_id));
+        }
+        let _assertion = self
+            .resolve_passkey_assertion_strict(
+                &req.key_id,
+                req.passkey.as_ref(),
+                req.webauthn.as_ref(),
+            )
+            .await?;
+        let changed = self
+            .db
+            .set_wallet_lifecycle_status(&req.key_id, "frozen", "active")?;
+        if !changed {
+            let current = self
+                .db
+                .get_wallet_lifecycle_status(&req.key_id)?
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(anyhow!(
+                "cannot unfreeze key: expected lifecycle_status 'frozen', found '{}'",
+                current
+            ));
+        }
+        Ok(FreezeKeyResponse {
+            key_id: req.key_id,
+            lifecycle_status: "active".to_string(),
         })
     }
 
@@ -1677,6 +1823,9 @@ impl KmsApiServer {
         if !self.db.wallet_exists(&req.key_id)? {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
+        // Issue #42: reject signing ops on frozen keys at the entry (host-side soft reject;
+        // TEE key material is untouched). Error text "key is frozen" maps to HTTP 400.
+        self.reject_if_frozen(&req.key_id)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &req.key_id,
@@ -1690,6 +1839,9 @@ impl KmsApiServer {
             .await?;
 
         let address = format!("0x{}", hex::encode(&address_bytes));
+
+        // Issue #42: record activity on success. Best-effort — never fail the op on a DB error.
+        self.touch_last_used(&req.key_id);
 
         Ok(DeriveAddressResponse {
             address,
@@ -1734,6 +1886,8 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
+        // Issue #42: reject signing on frozen keys (host-side soft reject → HTTP 400).
+        self.reject_if_frozen(&key_id_str)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &key_id_str,
@@ -1804,6 +1958,9 @@ impl KmsApiServer {
             return Err(anyhow!("Either Transaction or Message must be provided"));
         };
 
+        // Issue #42: record activity on success (best-effort).
+        self.touch_last_used(&key_id_str);
+
         Ok(SignResponse {
             signature: hex::encode(&signature),
             transaction_hash: "[TX_HASH_OR_MESSAGE_HASH]".to_string(),
@@ -1850,6 +2007,8 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
+        // Issue #42: reject signing on frozen keys (host-side soft reject → HTTP 400).
+        self.reject_if_frozen(&key_id_str)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &key_id_str,
@@ -1867,6 +2026,9 @@ impl KmsApiServer {
                 passkey_assertion,
             )
             .await?;
+
+        // Issue #42: record activity on success (best-effort).
+        self.touch_last_used(&key_id_str);
 
         Ok(SignHashResponse {
             signature: hex::encode(&signature),
@@ -2170,6 +2332,8 @@ impl KmsApiServer {
             status: "deriving".to_string(),
             error_msg: None,
             created_at: now.to_rfc3339(),
+            lifecycle_status: "active".to_string(),
+            last_used_at: None,
         })?;
 
         // 6. Spawn background address derivation
@@ -3737,7 +3901,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": KMS_VERSION,
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DeleteKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
+            "POST": ["/CreateKey", "/DeleteKey", "/FreezeKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
             "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats"]
         }
     })))
@@ -4001,6 +4165,82 @@ async fn handle_delete_key(
                 elapsed as u64,
                 false,
                 is_panic,
+            );
+            Err(warp::reject::custom(ApiError(msg)))
+        }
+    }
+}
+
+/// POST /FreezeKey — issue #42. WebAuthn-gated (auth verified inside freeze_key,
+/// mirroring DeleteKey). Transitions active → frozen.
+async fn handle_freeze_key(
+    body: FreezeKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
+    match server.freeze_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ FreezeKey OK key={} {}ms", key, elapsed);
+            let _ = server
+                .db
+                .record_tx("FreezeKey", Some(&key), None, false, elapsed as u64, true, false);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            eprintln!("FreezeKey error: {} key={} {}ms", msg, key, elapsed);
+            let _ = server.db.record_tx(
+                "FreezeKey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                false,
+                false,
+            );
+            Err(warp::reject::custom(ApiError(msg)))
+        }
+    }
+}
+
+/// POST /UnfreezeKey — issue #42. WebAuthn-gated (auth verified inside unfreeze_key,
+/// mirroring DeleteKey). Transitions frozen → active.
+async fn handle_unfreeze_key(
+    body: FreezeKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
+    match server.unfreeze_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ UnfreezeKey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx(
+                "UnfreezeKey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                true,
+                false,
+            );
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            eprintln!("UnfreezeKey error: {} key={} {}ms", msg, key, elapsed);
+            let _ = server.db.record_tx(
+                "UnfreezeKey",
+                Some(&key),
+                None,
+                false,
+                elapsed as u64,
+                false,
+                false,
             );
             Err(warp::reject::custom(ApiError(msg)))
         }
@@ -5081,6 +5321,32 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
 
+    // FreezeKey API (issue #42) — filter chain mirrors DeleteKey (api_key + rate-limit +
+    // x-amz-target + aws_kms_body). Auth (WebAuthn/passkey) is enforced inside freeze_key.
+    let server_freeze = Arc::clone(&server);
+    let freeze_key = warp::path("FreezeKey")
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::exact("x-amz-target", "TrentService.FreezeKey"))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_freeze.clone()))
+        .and_then(handle_freeze_key);
+
+    // UnfreezeKey API (issue #42)
+    let server_unfreeze = Arc::clone(&server);
+    let unfreeze_key = warp::path("UnfreezeKey")
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.UnfreezeKey",
+        ))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_unfreeze.clone()))
+        .and_then(handle_unfreeze_key);
+
     // WebAuthn: BeginRegistration
     let server_br = Arc::clone(&server);
     let begin_registration = warp::path("BeginRegistration")
@@ -5332,6 +5598,8 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(get_public_key)
         .boxed();
     let group3 = delete_key
+        .or(freeze_key)
+        .or(unfreeze_key)
         .or(begin_registration)
         .or(complete_registration)
         .or(begin_authentication)
@@ -5388,6 +5656,8 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
     println!("   POST /DeleteKey     - Delete wallet (requires PassKey)");
+    println!("   POST /FreezeKey     - Freeze key: active→frozen (requires PassKey)");
+    println!("   POST /UnfreezeKey   - Unfreeze key: frozen→active (requires PassKey)");
     println!("   POST /ChangePasskey         - Change PassKey public key");
     println!("   POST /BeginRegistration     - WebAuthn registration (step 1)");
     println!("   POST /CompleteRegistration  - WebAuthn registration (step 2)");
