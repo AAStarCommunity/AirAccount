@@ -4882,6 +4882,17 @@ impl warp::reject::Reject for ApiError {}
 async fn handle_rejection(
     err: warp::Rejection,
 ) -> Result<impl warp::Reply, std::convert::Infallible> {
+    // Unmatched path → 404, not 500. warp surfaces these as a plain not_found
+    // rejection; without this they fall through to the 500 catch-all below, which
+    // is misleading. In particular a compile-gated-out /admin/purge-key (release
+    // build, no `admin-purge` feature) must read as "no such endpoint", not
+    // "internal server error".
+    if err.is_not_found() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({ "error": "Not found" })),
+            warp::http::StatusCode::NOT_FOUND,
+        ));
+    }
     if let Some(rl_error) = err.find::<RateLimitError>() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
