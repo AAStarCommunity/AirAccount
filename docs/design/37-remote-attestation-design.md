@@ -1,6 +1,6 @@
 # AirAccount KMS 远程证明设计（i.MX93 落地）
 
-> 创建时间：2026-06-13（本地机器时间 `date '+%Y-%m-%d'`）
+> 创建时间：2026-06-13
 > 关联 Issue：#37 TEE 远程证明
 > 文档性质：落地设计 / 证书链架构 / 分期路线 / 风险登记
 > 前置阅读：`docs/design/37-remote-attestation-research.md`（业界调研，本文不重复论证）
@@ -69,6 +69,12 @@ R-8 未定前，层 A→B 有三条候选,按优先级:
 2. **(R-8=否,折中) attest key 从 ELE 背书的 HUK/device key 派生**：不让 ELE 签外部 key，而是让 OP-TEE 的 attest key **确定性派生自 ELE 持有的 device key / HUK**（OP-TEE secure storage 本就用 HUK 加密）。客户端信任链变成「设备 device key 决定了唯一的 attest key，攻击者无法在别处复现同一把 key」。⚠️ 这要求 HUK 派生关系本身可被外部验证或锚定,可行性 [待验证],并入 R-8。
 3. **(都不成立,无奈降级) TOFU 登记 attest pubkey**：见 §3 降级说明与 §6 P0'。这是**安全降级**,不是更优解。
 
+⚠️ **候选 1 的「背书调用形态」必须 Phase 0 落实（H-1）**：「ELE 背书外部公钥」在 RM00284 里可能对应**三种语义完全不同**的原语，安全含义差很大，Phase 0 须确认 ELE 到底提供哪一种（并入 R-8）：
+- **(i) 签发证书 / 处理 CSR**：ELE 用设备唯一私钥对「OP-TEE attest pubkey + 属性」签发一张 X.509 式证书。**最强**——产出可独立验证、可链到 NXP 根的证书，正是上图理想链路。
+- **(ii) 对任意 blob 签名（sign-arbitrary-data）**：ELE 把设备私钥当通用签名 oracle，对喂入的 pubkey 字节签一下。**够用但要小心**——等于设备私钥变成通用签名能力，须确认 ELE 是否允许（多数 HSM 的 attestation key 被限制为只签固定 attestation 结构，**不做通用 oracle**）。
+- **(iii) 把 OP-TEE pubkey 塞进 ELE evidence 由 device attestation 间接覆盖**：不直接签外部 key，而是让 OP-TEE pubkey 作为 ELE device attestation 的一个输入字段被一并度量+签。**最弱/最易误解**——只证明「出具 evidence 时这把 pubkey 在场」，绑定语义弱，须评估是否足以支撑 V1 链验。
+若 ELE 三者都不提供，候选 1 不成立，退候选 2（派生）或候选 3（TOFU）。
+
 社区 optee-ra 把「给 attest key 引入证书/HSM 锚定」列为 future work——AirAccount 必须自己补,且补法取决于 R-8 的实测结论。
 
 ---
@@ -126,7 +132,7 @@ R-8 未定前，层 A→B 有三条候选,按优先级:
   │     (或在 Sign 响应里带证据)    │── InvokeCommand ────────►│                │
   │                                 │   GetAttestation(nonce)  │                │
   │                                 │                          │ 取 TA 度量(PTA)│
-  │                                 │                          │ 读 secure_boot │
+  │                                 │                          │ (见 ELE 背书↓) │
   │                                 │                          │── 请求 ELE 背书►│
   │                                 │                          │◄ 设备签名/证书 ┤
   │                                 │                          │ 组装三层证据    │
@@ -145,6 +151,10 @@ R-8 未定前，层 A→B 有三条候选,按优先级:
 ```
 
 **V4 降级标注 [待验证, H-2]**：`secure_boot_state` 只有在「值由 ELE 可信度量产出并经层 A 签名」时才有意义。若 Phase 0 实测发现 ELE 不提供可信 secure-boot 状态（R-8 的一部分），则 V4 **不可信**：要么从证据中移除该字段（避免给客户端虚假安全感），要么明确标注「secure_boot 未经硬件背书,仅供参考」,绝不能让客户端把它当通过条件。
+
+**流程图中 `secure_boot_state` 的来源（H-2 消歧）**：上图 TEE 泳道里的 `(见 ELE 背书↓)` 表示 **TEE 不自行读取 secure_boot**——该值是 ELE device attestation 响应（`◄ 设备签名/证书`，层 A）的一部分，由设备密钥签出，TEE 只做转组装。任何「OP-TEE/TA 自读 secure_boot」的实现都不可信（见 §3 H-2 统一口径）。
+
+**`timestamp(ree_time)` 非安全承载（L-2）**：evidence 里的时间戳取自 REE（`optee_utee::Time::ree_time()`），**REE 可篡改**，**严禁**用于有效期/新鲜性窗口判断；证据新鲜性**仅由客户端 nonce 保证**，时间戳只作日志/排障参考。实现者勿据它做 TTL 校验。
 
 ### 4.1 两种交付模式与握手绑定（M-1）
 
@@ -166,7 +176,7 @@ R-8 未定前，层 A→B 有三条候选,按优先级:
 |---|---|
 | **RSA-4096 TA 签名**（OP-TEE 4.8 NXP key 签 TA 镜像） | 这是「TA 加载时被 OP-TEE 校验」的基础；attestation PTA 的 `GET_TA_SHDR_DIGEST` 度量的正是 signed header。两者互补：加载校验防跑非法 TA，attestation 把「跑的是哪个 TA」告诉远端。 |
 | **WebAuthn challenge binding（nonce 已下沉 TA）** | 复用同一套 TA 内一次性 nonce 设施做 evidence freshness；甚至可把 attestation evidence 绑进 WebAuthn ceremony（注册/认证时一并产出证据，层 C）。⚠️ 注意现有 nonce 用了 thread_local 跨 TA 线程有 flaky 记录（见 MEMORY），attestation nonce 不要复用同一坑，需用持久化/会话级存储。 |
-| **RPMB 防回滚** | ⚠️ **RPMB 是防回滚/防降级机制,不是 attestation 的证据源**——证据(度量值、设备身份)来自 PTA 和 ELE,RPMB 不产出任何被签进 evidence 的内容。RPMB 的作用是:① 把「已撤销的旧 attest key / 旧 TA measurement 黑名单」绑定 RPMB 单调计数器,防「物理回滚到旧的、已知漏洞 TA,再出具看似合法的证据」(降级攻击);② 配合 R-9 的 key 轮换,使被吊销的 attest key 无法靠回滚复活。 |
+| **RPMB 防回滚** | ⚠️ **RPMB 是防回滚/防降级机制,不是 attestation 的证据源**——证据(度量值、设备身份)来自 PTA 和 ELE,RPMB 不产出任何被签进 evidence 的内容。RPMB 的作用是:① 把「已撤销的旧 attest key / 旧 TA measurement 黑名单」绑定 RPMB 单调计数器,防「物理回滚到旧的、已知漏洞 TA,再出具看似合法的证据」(降级攻击);② 配合 R-9 的 key 轮换,使被吊销的 attest key 无法靠回滚复活。⚠️ **M-3**：(a) RPMB 防回滚本身依赖 **RPMB 认证密钥**（通常来自 CAAM/ELE/fuse），该密钥 compromise 即可绕过回滚保护——属**单点**，纳入 R-9 的 key 治理范畴登记；(b) RPMB 是**本地**防回滚（让本机 TA **自我拒绝**跑被吊销的旧 TA/key），**远端客户端看不到 RPMB 状态**——**远端防降级的真正机制是 V3 参考值比对 + attest key 证书时效**，两者职责不同，勿混。 |
 | **AWS KMS 兼容 API** | 新增 `GetAttestation`（非 AWS 标准操作，自定义端点，**不强制 `x-amz-target` header**，走独立 GET 路由）。不污染现有 AWS 兼容面。 |
 
 ---
