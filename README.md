@@ -1,7 +1,7 @@
 # KMS (Key Management System) on TEE
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://atom-become-ireland-travels.trycloudflare.com/health)
+[![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://kms.aastar.io/health)
 [![API Compatibility](https://img.shields.io/badge/AWS%20KMS-Compatible-orange.svg)](#aws-kms-compatibility)
 [![API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-85ea2d.svg)](https://kms.aastar.io/docs)
 [![Version](https://img.shields.io/badge/version-v0.20.0%20Beta2-blue.svg)](kms/CHANGELOG.md)
@@ -10,14 +10,14 @@ A production-ready private key management system built on Trusted Execution Envi
 
 ## 🌐 Live Service
 
-**Production URL**: https://atom-become-ireland-travels.trycloudflare.com
+**Production URL**: https://kms.aastar.io
 
 ```bash
 # Quick health check
-curl -s https://atom-become-ireland-travels.trycloudflare.com/health | jq
+curl -s https://kms.aastar.io/health | jq
 
 # Create a key
-curl -X POST https://atom-become-ireland-travels.trycloudflare.com/ \
+curl -X POST https://kms.aastar.io/ \
   -H "Content-Type: application/json" \
   -H "X-Amz-Target: TrentService.CreateKey" \
   -d '{"KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
@@ -184,10 +184,10 @@ The KMS runs on OP-TEE TrustZone with the NXP i.MX93 **ELE (EdgeLock Enclave)** 
 ### 1. Test the Live Service
 ```bash
 # Health check
-curl -s https://atom-become-ireland-travels.trycloudflare.com/health
+curl -s https://kms.aastar.io/health
 
 # Create a signing key
-curl -X POST https://atom-become-ireland-travels.trycloudflare.com/ \
+curl -X POST https://kms.aastar.io/ \
   -H "Content-Type: application/json" \
   -H "X-Amz-Target: TrentService.CreateKey" \
   -d '{"KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
@@ -329,7 +329,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ---
 
-**🚀 Try it now**: https://atom-become-ireland-travels.trycloudflare.com/health
+**🚀 Try it now**: https://kms.aastar.io/health
 
 ## License
 
