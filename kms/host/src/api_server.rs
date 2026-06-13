@@ -23,6 +23,18 @@ use proto;
 /// Estimated seconds per TEE operation with persistent session
 const TEE_OP_ESTIMATE_SECS: u64 = 1;
 
+/// Issue #42: a key with no successful Sign/Derive activity for longer than this
+/// is automatically moved to lifecycle_status='frozen' by the background sweep.
+/// Freezing is a soft host-side gate (extra verification door for dormant keys),
+/// NOT theft prevention or storage reclamation — the TEE key material is untouched.
+/// Default: 365 days. Override with KMS_INACTIVITY_FREEZE_SECS for testing.
+const INACTIVITY_FREEZE_SECS: i64 = 365 * 24 * 60 * 60;
+
+/// How often the dormant-key freeze sweep runs. 6 hours is ample given the
+/// 365-day default threshold; short enough to act promptly when the threshold
+/// is lowered for testing via KMS_INACTIVITY_FREEZE_SECS.
+const FREEZE_SWEEP_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
 // ========================================
 // AWS KMS 兼容的数据结构
 // ========================================
@@ -112,6 +124,14 @@ pub struct KeyMetadata {
     pub origin: String,
     #[serde(rename = "PasskeyPublicKey", skip_serializing_if = "Option::is_none")]
     pub passkey_public_key: Option<String>,
+    /// Issue #42: RFC3339 timestamp of the last successful operation for this key,
+    /// derived from tx_log. None if the key has never had a successful operation.
+    #[serde(rename = "LastUsedAt", skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    /// Issue #42: key lifecycle gate — "active" or "frozen". Frozen keys reject
+    /// signing until unfrozen via passkey (POST /UnfreezeKey).
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -241,6 +261,28 @@ pub struct DeleteKeyResponse {
     pub deletion_date: DateTime<Utc>,
 }
 
+/// Issue #42: POST /UnfreezeKey — owner WebAuthn-gated unfreeze of a dormant key.
+/// Same passkey authentication shape as DeleteKey (strict assertion required).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnfreezeKeyRequest {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    /// Legacy: raw PassKey assertion (hex)
+    #[serde(rename = "Passkey", skip_serializing_if = "Option::is_none", default)]
+    pub passkey: Option<PasskeyAssertion>,
+    /// WebAuthn ceremony assertion (from BeginAuthentication)
+    #[serde(rename = "WebAuthn", skip_serializing_if = "Option::is_none", default)]
+    pub webauthn: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnfreezeKeyResponse {
+    #[serde(rename = "KeyId")]
+    pub key_id: String,
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
+}
+
 /// Admin force-purge request — bypasses passkey, deletes from TEE + SQLite.
 /// Requires Authorization: Bearer $KMS_ADMIN_TOKEN header.
 #[derive(Debug, Serialize, Deserialize)]
@@ -304,6 +346,12 @@ pub struct KeyStatusResponse {
     pub derivation_path: Option<String>,
     #[serde(rename = "Error", skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Issue #42: RFC3339 of last successful op (from tx_log), None if never used.
+    #[serde(rename = "LastUsedAt", skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    /// Issue #42: "active" or "frozen".
+    #[serde(rename = "LifecycleStatus")]
+    pub lifecycle_status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -988,6 +1036,10 @@ fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
         key_spec: w.key_spec.clone(),
         origin: w.origin.clone(),
         passkey_public_key: w.passkey_pubkey.clone(),
+        // Issue #42: populated by the caller (describe_key) via DB lookups, since
+        // WalletRow intentionally does not carry tx_log-derived / lifecycle data.
+        last_used_at: None,
+        lifecycle_status: "active".to_string(),
     }
 }
 
@@ -1153,6 +1205,9 @@ impl KmsApiServer {
             key_spec: req.key_spec.clone(),
             origin: req.origin.clone(),
             passkey_public_key: Some(req.passkey_public_key.clone()),
+            // Issue #42: a just-created key is active and has no usage history yet.
+            last_used_at: None,
+            lifecycle_status: "active".to_string(),
         };
 
         // Persist to DB.
@@ -1258,9 +1313,14 @@ impl KmsApiServer {
             .get_wallet(&req.key_id)?
             .ok_or_else(|| anyhow!("Key not found: {}", req.key_id))?;
 
-        Ok(DescribeKeyResponse {
-            key_metadata: wallet_to_metadata(&w),
-        })
+        let mut key_metadata = wallet_to_metadata(&w);
+        // Issue #42: enrich with tx_log-derived last-used and lifecycle gate.
+        key_metadata.last_used_at = self.db.last_used_at(&req.key_id)?;
+        if let Some(ls) = self.db.get_lifecycle_status(&req.key_id)? {
+            key_metadata.lifecycle_status = ls;
+        }
+
+        Ok(DescribeKeyResponse { key_metadata })
     }
 
     pub async fn list_keys(&self, _req: ListKeysRequest) -> Result<ListKeysResponse> {
@@ -1290,6 +1350,13 @@ impl KmsApiServer {
             (w.status.as_str(), None)
         };
 
+        // Issue #42: surface dormancy/lifecycle alongside derivation status.
+        let last_used_at = self.db.last_used_at(key_id)?;
+        let lifecycle_status = self
+            .db
+            .get_lifecycle_status(key_id)?
+            .unwrap_or_else(|| "active".to_string());
+
         Ok(KeyStatusResponse {
             key_id: key_id.to_string(),
             status: status.to_string(),
@@ -1297,6 +1364,8 @@ impl KmsApiServer {
             public_key: w.public_key,
             derivation_path: w.derivation_path,
             error,
+            last_used_at,
+            lifecycle_status,
         })
     }
 
@@ -1564,6 +1633,20 @@ impl KmsApiServer {
     ///    and relied on the TA alone; every agent/p256/grant endpoint already
     ///    enforces presence host-side — the core KMS paths now match.
     ///
+    /// Issue #42: host-side gate that rejects signing on a frozen (dormant) key
+    /// before any TEE call. Returns Err("key is frozen") when the wallet's
+    /// lifecycle_status is 'frozen'. Unknown/missing keys and 'active' keys pass
+    /// through (callers do their own existence checks). This is a soft CA-layer
+    /// gate, not a TEE-enforced lock — the private key material is untouched.
+    fn ensure_not_frozen(&self, key_id: &str) -> Result<()> {
+        if let Some(status) = self.db.get_lifecycle_status(key_id)? {
+            if status == "frozen" {
+                return Err(anyhow!("key is frozen"));
+            }
+        }
+        Ok(())
+    }
+
     /// Wallets with no passkey bound (legacy/pre-passkey wallets) still pass
     /// `None` through; the TA applies its own policy for those.
     async fn resolve_passkey_assertion_strict(
@@ -1677,6 +1760,8 @@ impl KmsApiServer {
         if !self.db.wallet_exists(&req.key_id)? {
             return Err(anyhow!("Key not found: {}", req.key_id));
         }
+        // Issue #42: reject dormant/frozen keys before any TEE call.
+        self.ensure_not_frozen(&req.key_id)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &req.key_id,
@@ -1734,6 +1819,8 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
+        // Issue #42: reject dormant/frozen keys before any TEE call.
+        self.ensure_not_frozen(&key_id_str)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &key_id_str,
@@ -1850,6 +1937,8 @@ impl KmsApiServer {
 
         // Resolve passkey assertion (WebAuthn ceremony or legacy hex)
         let key_id_str = wallet_uuid.to_string();
+        // Issue #42: reject dormant/frozen keys before any TEE call.
+        self.ensure_not_frozen(&key_id_str)?;
         let passkey_assertion = self
             .resolve_passkey_assertion_strict(
                 &key_id_str,
@@ -1978,6 +2067,47 @@ impl KmsApiServer {
         Ok(DeleteKeyResponse {
             key_id: req.key_id,
             deletion_date,
+        })
+    }
+
+    /// Issue #42: owner-authorized unfreeze. Verifies owner via WebAuthn (same
+    /// strict passkey resolution as DeleteKey), then flips lifecycle_status
+    /// frozen→active. No TEE call — this only touches host SQLite metadata.
+    /// Idempotent: unfreezing an already-active key succeeds and returns 'active'.
+    pub async fn unfreeze_key(&self, req: UnfreezeKeyRequest) -> Result<UnfreezeKeyResponse> {
+        println!("📝 KMS UnfreezeKey API called for key: {}", req.key_id);
+
+        // Existence + UUID validation (mirrors delete_key's parse).
+        let _wallet_uuid = Uuid::parse_str(&req.key_id)?;
+        let current = self
+            .db
+            .get_lifecycle_status(&req.key_id)?
+            .ok_or_else(|| anyhow!("Key not found: {}", req.key_id))?;
+
+        // Owner authentication — identical strict assertion path as DeleteKey.
+        // Verifying ownership is required even when the key is already active so
+        // the endpoint cannot be used as an unauthenticated key-state probe.
+        self.resolve_passkey_assertion_strict(
+            &req.key_id,
+            req.passkey.as_ref(),
+            req.webauthn.as_ref(),
+        )
+        .await?;
+
+        if current != "frozen" {
+            // Already active (or some future state): nothing to flip, report as-is.
+            return Ok(UnfreezeKeyResponse {
+                key_id: req.key_id,
+                lifecycle_status: current,
+            });
+        }
+
+        self.db.set_lifecycle_status(&req.key_id, "active")?;
+        println!("✅ Key unfrozen: {}", req.key_id);
+
+        Ok(UnfreezeKeyResponse {
+            key_id: req.key_id,
+            lifecycle_status: "active".to_string(),
         })
     }
 
@@ -2416,6 +2546,8 @@ impl KmsApiServer {
         if payload.wallet_id != wallet_id_str || payload.agent_index != agent_index {
             return Err(anyhow!("keyId does not match agent credential"));
         }
+        // Issue #42: reject dormant/frozen parent wallet before any TEE signing.
+        self.ensure_not_frozen(&wallet_id_str)?;
 
         // Per-credential rate limit (design §2.2): prevents single compromised key from
         // flooding TEE signing. Keyed by wallet_id/agent_index — independent of global API key limit.
@@ -2487,6 +2619,9 @@ impl KmsApiServer {
     ) -> Result<SignTypedDataResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let wallet_id_str = wallet_id.to_string();
+        // Issue #42: reject dormant/frozen keys before any TEE call. Covers the
+        // EIP-712 family (voucher / gtoken / x402 all route through this method).
+        self.ensure_not_frozen(&wallet_id_str)?;
 
         // Auth gate: require one of two paths.
         // Path A — Bearer JWT (agent key): user previously authorized via WebAuthn; checked against
@@ -2861,6 +2996,8 @@ impl KmsApiServer {
     ) -> Result<SignGrantSessionResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
+        // Issue #42: reject dormant/frozen keys before any TEE call.
+        self.ensure_not_frozen(&key_id_str)?;
 
         // Grant signing requires purpose-bound WebAuthn challenge to prevent
         // cross-operation replay. Challenge must have been created by begin-grant-session-auth.
@@ -2932,6 +3069,8 @@ impl KmsApiServer {
     ) -> Result<SignP256GrantSessionResponse> {
         let wallet_id = Self::validate_key_id(&req.key_id)?;
         let key_id_str = wallet_id.to_string();
+        // Issue #42: reject dormant/frozen keys before any TEE call.
+        self.ensure_not_frozen(&key_id_str)?;
 
         let wa = req.webauthn_assertion.as_ref().ok_or_else(|| {
             anyhow!("sign-p256-grant-session requires WebAuthn ceremony started via /kms/begin-grant-session-auth")
@@ -3258,6 +3397,8 @@ impl KmsApiServer {
         if payload.wallet_id != wallet_id_str || payload.agent_index != session_index {
             return Err(anyhow!("keyId does not match P256 session credential"));
         }
+        // Issue #42: reject dormant/frozen parent wallet before any TEE signing.
+        self.ensure_not_frozen(&wallet_id_str)?;
 
         // Lazy GC: clean up other expired P256 session keys for this wallet.
         // Exclude the current session_index to avoid GC-ing the key being signed.
@@ -3737,7 +3878,7 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "version": KMS_VERSION,
         "ta_mode": "real",
         "endpoints": {
-            "POST": ["/CreateKey", "/DeleteKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
+            "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
             "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats"]
         }
     })))
@@ -4001,6 +4142,46 @@ async fn handle_delete_key(
                 elapsed as u64,
                 false,
                 is_panic,
+            );
+            Err(warp::reject::custom(ApiError(msg)))
+        }
+    }
+}
+
+/// POST /UnfreezeKey — issue #42 owner WebAuthn-gated unfreeze of a dormant key.
+async fn handle_unfreeze_key(
+    body: UnfreezeKeyRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let key = body.key_id.clone();
+    let t0 = std::time::Instant::now();
+    match server.unfreeze_key(body).await {
+        Ok(response) => {
+            let elapsed = t0.elapsed().as_millis();
+            println!("✅ UnfreezeKey OK key={} {}ms", key, elapsed);
+            let _ = server.db.record_tx(
+                "UnfreezeKey",
+                Some(&key),
+                None,
+                true,
+                elapsed as u64,
+                true,
+                false,
+            );
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            let elapsed = t0.elapsed().as_millis();
+            let msg = e.to_string();
+            eprintln!("UnfreezeKey error: {} key={} {}ms", msg, key, elapsed);
+            let _ = server.db.record_tx(
+                "UnfreezeKey",
+                Some(&key),
+                None,
+                true,
+                elapsed as u64,
+                false,
+                false,
             );
             Err(warp::reject::custom(ApiError(msg)))
         }
@@ -4819,6 +5000,43 @@ pub async fn start_kms_server() -> Result<()> {
         println!("🧹 Challenge GC: every 600s");
     }
 
+    // Issue #42: periodic dormant-key freeze sweep. Any 'active' key whose last
+    // successful op (tx_log) is older than the inactivity threshold is moved to
+    // lifecycle_status='frozen'. Soft host-side gate only — TEE material is never
+    // touched. Owner re-enables via POST /UnfreezeKey (WebAuthn). Threshold is
+    // overridable via KMS_INACTIVITY_FREEZE_SECS (seconds) for testing.
+    {
+        let freeze_db = db.clone();
+        let threshold_secs = std::env::var("KMS_INACTIVITY_FREEZE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(INACTIVITY_FREEZE_SECS);
+        tokio::spawn(async move {
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_secs(FREEZE_SWEEP_INTERVAL_SECS));
+            loop {
+                tick.tick().await;
+                let now = chrono::Utc::now().timestamp();
+                match freeze_db.freeze_dormant_keys(now, threshold_secs) {
+                    Ok(ids) if !ids.is_empty() => {
+                        println!(
+                            "🧊 Dormant-key freeze: froze {} key(s): {:?}",
+                            ids.len(),
+                            ids
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("⚠️  Dormant-key freeze sweep failed: {:?}", e),
+                }
+            }
+        });
+        println!(
+            "🧊 Dormant-key freeze: every {}s (threshold {}s)",
+            FREEZE_SWEEP_INTERVAL_SECS, threshold_secs
+        );
+    }
+
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
     // API Key guard.
@@ -5081,6 +5299,20 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server7.clone()))
         .and_then(handle_delete_key);
 
+    // UnfreezeKey API (issue #42) — owner WebAuthn-gated unfreeze.
+    let server_unfreeze = Arc::clone(&server);
+    let unfreeze_key = warp::path("UnfreezeKey")
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::header::exact(
+            "x-amz-target",
+            "TrentService.UnfreezeKey",
+        ))
+        .and(aws_kms_body())
+        .and(warp::any().map(move || server_unfreeze.clone()))
+        .and_then(handle_unfreeze_key);
+
     // WebAuthn: BeginRegistration
     let server_br = Arc::clone(&server);
     let begin_registration = warp::path("BeginRegistration")
@@ -5332,6 +5564,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(get_public_key)
         .boxed();
     let group3 = delete_key
+        .or(unfreeze_key)
         .or(begin_registration)
         .or(complete_registration)
         .or(begin_authentication)
@@ -5388,6 +5621,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     println!("   POST /SignHash      - Sign 32-byte hash directly");
     println!("   POST /GetPublicKey  - Get public key");
     println!("   POST /DeleteKey     - Delete wallet (requires PassKey)");
+    println!("   POST /UnfreezeKey   - Unfreeze dormant wallet (requires PassKey)");
     println!("   POST /ChangePasskey         - Change PassKey public key");
     println!("   POST /BeginRegistration     - WebAuthn registration (step 1)");
     println!("   POST /CompleteRegistration  - WebAuthn registration (step 2)");
