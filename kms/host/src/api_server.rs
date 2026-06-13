@@ -4874,6 +4874,36 @@ pub async fn start_kms_server() -> Result<()> {
     // Health check
     let health = warp::path("health").and(warp::get()).and_then(health_check);
 
+    // Live API docs — Swagger UI at GET /docs, OpenAPI 3.1 spec at GET /openapi.yaml.
+    // The spec is compiled into the binary (include_str!) so it always matches this build.
+    const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AirAccount KMS API — v0.20.0 (Beta2)</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+<style>body{margin:0;background:#0b1020}.swagger-ui .topbar{display:none}
+#hdr{background:linear-gradient(110deg,#070b1e,#101637);color:#f5f7fa;padding:16px 28px;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+#hdr h1{margin:0;font-size:20px}#hdr .b{display:inline-block;background:#45e0c8;color:#06231d;font-weight:700;border-radius:14px;padding:2px 12px;font-size:13px;margin-right:8px}
+#hdr small{color:#8b93b8}</style></head>
+<body><div id="hdr"><h1><span class="b">BETA2 · v0.20.0</span>AirAccount KMS API</h1>
+<small>TEE 私钥管理 · WebAuthn · AWS KMS 兼容 · 私钥永不出 TEE</small></div>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>window.ui=SwaggerUIBundle({url:'/openapi.yaml',dom_id:'#swagger-ui',deepLinking:true,docExpansion:'list',defaultModelsExpandDepth:1,tryItOutEnabled:true,presets:[SwaggerUIBundle.presets.apis]});</script>
+</body></html>"#;
+    let api_docs = warp::path("docs")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| warp::reply::html(SWAGGER_UI_HTML));
+    let openapi_spec = warp::path("openapi.yaml")
+        .and(warp::get())
+        .map(|| {
+            warp::reply::with_header(
+                include_str!("../../docs/api/openapi.yaml"),
+                "content-type",
+                "application/yaml; charset=utf-8",
+            )
+        });
+
     // Version check
     let version = warp::path("version")
         .and(warp::get())
@@ -5273,6 +5303,8 @@ pub async fn start_kms_server() -> Result<()> {
     let group1 = index
         .or(test_ui)
         .or(health)
+        .or(api_docs)
+        .or(openapi_spec)
         .or(version)
         .or(key_status)
         .or(queue_status)
