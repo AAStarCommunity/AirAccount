@@ -50,6 +50,10 @@ pub enum Command {
     /// when a gap key is detected. Requires TA rebuild to activate.
     ForceRemoveWallet = 23,
     ReadRollbackCounter = 24,
+    /// Issue #49: request a fresh one-time WebAuthn challenge nonce from the TA.
+    /// The returned nonce becomes the WebAuthn challenge; the TA verifies + consumes
+    /// it on the next signing assertion to defeat assertion replay by a compromised CA.
+    GetChallenge = 25,
     #[default]
     Unknown,
 }
@@ -99,6 +103,7 @@ mod tests {
         assert_eq!(u32::from(Command::SignP256GrantSession), 22);
         assert_eq!(u32::from(Command::ForceRemoveWallet), 23);
         assert_eq!(u32::from(Command::ReadRollbackCounter), 24);
+        assert_eq!(u32::from(Command::GetChallenge), 25);
     }
 
     #[test]
@@ -121,9 +126,11 @@ mod tests {
             Command::from(22u32),
             Command::SignP256GrantSession
         ));
-        // 23 = ForceRemoveWallet (PR #35), 24 = ReadRollbackCounter (PR #51).
+        // 23 = ForceRemoveWallet (PR #35), 24 = ReadRollbackCounter (PR #51),
+        // 25 = GetChallenge (issue #49 — WebAuthn challenge binding).
         assert!(matches!(Command::from(23u32), Command::ForceRemoveWallet));
         assert!(matches!(Command::from(24u32), Command::ReadRollbackCounter));
+        assert!(matches!(Command::from(25u32), Command::GetChallenge));
     }
 
     #[test]
@@ -136,7 +143,7 @@ mod tests {
     fn command_roundtrip() {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
         let valid_ids: &[u32] = &[
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -419,6 +426,7 @@ mod tests {
                 client_data_hash: [0xcd; 32],
                 signature_r: [0x11; 32],
                 signature_s: [0x22; 32],
+                client_data_json: None,
             }),
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
@@ -522,11 +530,24 @@ mod tests {
 
     #[test]
     fn passkey_assertion_roundtrip() {
+        // Legacy form: client_data_json absent.
         bincode_roundtrip(&PasskeyAssertion {
             authenticator_data: vec![0u8; 37],
             client_data_hash: [0xbb; 32],
             signature_r: [0x11; 32],
             signature_s: [0x22; 32],
+            client_data_json: None,
+        });
+        // Issue #49 form: full clientDataJSON carried for TA-side challenge binding.
+        bincode_roundtrip(&PasskeyAssertion {
+            authenticator_data: vec![0u8; 37],
+            client_data_hash: [0xbb; 32],
+            signature_r: [0x11; 32],
+            signature_s: [0x22; 32],
+            client_data_json: Some(
+                br#"{"type":"webauthn.get","challenge":"AAAA","origin":"https://kms.aastar.io"}"#
+                    .to_vec(),
+            ),
         });
     }
 
@@ -551,6 +572,7 @@ mod tests {
             client_data_hash: [0xcc; 32],
             signature_r: [0xaa; 32],
             signature_s: [0xbb; 32],
+            client_data_json: None,
         };
         bincode_roundtrip(&SignHashInput {
             wallet_id: test_uuid(),
@@ -766,5 +788,67 @@ mod tests {
         bincode_roundtrip(&ReadRollbackCounterOutput { counter: 0 });
         bincode_roundtrip(&ReadRollbackCounterOutput { counter: 42 });
         bincode_roundtrip(&ReadRollbackCounterOutput { counter: u64::MAX });
+    }
+
+    #[test]
+    fn get_challenge_roundtrip() {
+        bincode_roundtrip(&GetChallengeInput {
+            wallet_id: test_uuid(),
+        });
+        bincode_roundtrip(&GetChallengeOutput {
+            nonce: vec![0xab; 32],
+        });
+    }
+
+    /// IMPORTANT bincode wire-compat note (issue #49):
+    ///
+    /// bincode is NOT self-describing, so `#[serde(default)]` does NOT make the
+    /// PasskeyAssertion wire format forward/backward compatible across the
+    /// host<->TA bincode boundary: a payload from the OLD 4-field layout is too
+    /// short and decoding into the NEW 5-field struct hits UnexpectedEof.
+    ///
+    /// Consequence: host and TA MUST be built & deployed from the same proto
+    /// revision (they always are — Beta3 ships host+TA together). The
+    /// `#[serde(default)]` attribute is retained because it IS honored by the
+    /// self-describing serde_json layer used at the public API boundary, and it
+    /// keeps host-side struct construction ergonomic. This test pins the bincode
+    /// behavior so a future contributor does not mistake `serde(default)` for
+    /// cross-version bincode safety.
+    #[test]
+    fn passkey_assertion_bincode_is_not_cross_version() {
+        #[derive(serde::Serialize)]
+        struct LegacyPasskeyAssertion {
+            authenticator_data: Vec<u8>,
+            client_data_hash: [u8; 32],
+            signature_r: [u8; 32],
+            signature_s: [u8; 32],
+        }
+        let legacy = LegacyPasskeyAssertion {
+            authenticator_data: vec![0u8; 37],
+            client_data_hash: [0xbb; 32],
+            signature_r: [0x11; 32],
+            signature_s: [0x22; 32],
+        };
+        let bytes = bincode::serialize(&legacy).expect("serialize legacy");
+        // Old (shorter) payload cannot decode into the new struct under bincode.
+        assert!(
+            bincode::deserialize::<PasskeyAssertion>(&bytes).is_err(),
+            "bincode unexpectedly tolerated a missing trailing field; \
+             re-evaluate the host/TA coordinated-deploy assumption"
+        );
+    }
+
+    /// serde_json (self-describing) DOES honor `#[serde(default)]`, so an API-layer
+    /// JSON object lacking client_data_json deserializes with the field = None.
+    #[test]
+    fn passkey_assertion_json_default_compat() {
+        let json = r#"{
+            "authenticator_data": [0,0,0],
+            "client_data_hash": [187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187,187],
+            "signature_r": [17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],
+            "signature_s": [34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34]
+        }"#;
+        let decoded: PasskeyAssertion = serde_json::from_str(json).expect("json decode");
+        assert_eq!(decoded.client_data_json, None);
     }
 }
