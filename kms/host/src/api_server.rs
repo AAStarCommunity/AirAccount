@@ -3665,7 +3665,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 </head>
 <body>
 <h1>AirAccount KMS</h1>
-<div class="sub">v{version} &middot; TA mode: real &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
+<div class="sub">v{version} &middot; TA mode: real &middot; <a href="/docs">📖 API Docs</a> &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
 
 <h2>Keys</h2>
 <div class="card grid">
@@ -4874,6 +4874,47 @@ pub async fn start_kms_server() -> Result<()> {
     // Health check
     let health = warp::path("health").and(warp::get()).and_then(health_check);
 
+    // Live API docs — Swagger UI at GET /docs, OpenAPI 3.1 spec at GET /openapi.yaml.
+    // The spec is compiled into the binary (include_str!) so it always matches this build.
+    // Pinned swagger-ui-dist@5.32.6 with SRI integrity hashes (supply-chain hardening).
+    const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AirAccount KMS API — v0.20.0 (Beta2)</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui.css"
+ integrity="sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT" crossorigin="anonymous">
+<style>body{margin:0;background:#fafafa}.swagger-ui .topbar{display:none}
+#hdr{background:linear-gradient(110deg,#070b1e,#101637);color:#f5f7fa;padding:16px 28px;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+#hdr h1{margin:0;font-size:20px}#hdr .b{display:inline-block;background:#45e0c8;color:#06231d;font-weight:700;border-radius:14px;padding:2px 12px;font-size:13px;margin-right:8px}
+#hdr small{color:#8b93b8}
+#theme{position:fixed;top:13px;right:20px;z-index:9999;background:#16203f;color:#f5f7fa;border:1px solid #2c3a66;border-radius:20px;padding:6px 13px;cursor:pointer;font-size:16px;line-height:1}
+html.dark body{background:#0b1020}
+html.dark #swagger-ui{filter:invert(0.92) hue-rotate(180deg)}
+html.dark #swagger-ui .microlight,html.dark #swagger-ui img{filter:invert(1) hue-rotate(180deg)}</style></head>
+<body><div id="hdr"><h1><span class="b">BETA2 · v0.20.0</span>AirAccount KMS API</h1>
+<small>TEE 私钥管理 · WebAuthn · AWS KMS 兼容 · 私钥永不出 TEE</small></div>
+<button id="theme" onclick="tgl()" title="切换 dark / light">🌙</button>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui-bundle.js"
+ integrity="sha384-EYdOaiRwn44zNjrw+Tfs06qYz9BGQVo2f4/pLY5i7VorbjnZNhdplAbTBk8FXHUJ" crossorigin="anonymous"></script>
+<script>window.ui=SwaggerUIBundle({url:'/openapi.yaml',dom_id:'#swagger-ui',deepLinking:true,docExpansion:'list',defaultModelsExpandDepth:1,tryItOutEnabled:true,presets:[SwaggerUIBundle.presets.apis]});
+function tgl(){var d=document.documentElement.classList.toggle('dark');document.getElementById('theme').textContent=d?'☀️':'🌙';localStorage.setItem('kms-theme',d?'dark':'light')}
+(function(){if(localStorage.getItem('kms-theme')==='dark'){document.documentElement.classList.add('dark');document.getElementById('theme').textContent='☀️'}})();</script>
+</body></html>"#;
+    let api_docs = warp::path("docs")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| warp::reply::html(SWAGGER_UI_HTML));
+    let openapi_spec = warp::path("openapi.yaml")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            warp::reply::with_header(
+                include_str!("../../docs/api/openapi.yaml"),
+                "content-type",
+                "application/yaml; charset=utf-8",
+            )
+        });
+
     // Version check
     let version = warp::path("version")
         .and(warp::get())
@@ -5273,6 +5314,8 @@ pub async fn start_kms_server() -> Result<()> {
     let group1 = index
         .or(test_ui)
         .or(health)
+        .or(api_docs)
+        .or(openapi_spec)
         .or(version)
         .or(key_status)
         .or(queue_status)
