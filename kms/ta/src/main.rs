@@ -1129,7 +1129,23 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
     // register before the cache_put inside save_wallet. (The previous
     // implementation read every wallet object here, which corrupted TLS on real
     // i.MX93 hardware and panicked the subsequent thread_local cache access.)
-    const MAX_WALLETS: usize = 100;
+    //
+    // Capacity sizing: wallets live in REE-FS (GB-scale), NOT RPMB/ELE secure
+    // storage. RPMB only holds the anti-rollback epoch counter, and the i.MX93
+    // ELE cannot do secp256k1 (issue #40/#48), so Ethereum keys are software-
+    // managed in REE-FS with the secure enclave acting only as a root-of-trust /
+    // rollback guard — NOT as wallet storage. Enabling the MX security enclave
+    // therefore does NOT shrink this budget: capacity stays bounded by REE-FS.
+    // Measured on FRDM-IMX93: ~100 wallets occupy ~476 KB and /var/lib/tee has
+    // >1 GB free → physical room for ~300 000 wallets. We cap at 30 000 (~140 MB)
+    // to keep ~10x headroom AND a hard DoS ceiling on a compromised CA. The old
+    // value of 100 was three orders of magnitude too low for a community/city-
+    // scale KMS and only ever bit us via repeated-E2E test pollution.
+    //
+    // Kept as a build-time const (NOT a runtime/CA-supplied config) on purpose:
+    // this is a security boundary, so a compromised CA must not be able to raise
+    // it. Operators needing a different ceiling change this line and rebuild.
+    const MAX_WALLETS: usize = 30_000;
     let existing = db_client.count_entries::<Wallet>()?;
     if existing >= MAX_WALLETS {
         return Err(anyhow!(
