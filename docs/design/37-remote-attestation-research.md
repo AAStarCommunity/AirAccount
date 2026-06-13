@@ -1,6 +1,7 @@
 # TEE 远程证明（Remote Attestation）业界方案调研
 
 > 创建时间：2026-06-13
+> 最后更新：2026-06-13（已获取并通读 NXP RM00284 Rev 4.3 + imx-secure-enclave 官方代码，§3.2 升为官方确证）
 > 关联 Issue：#37 TEE 远程证明
 > 文档性质：技术调研 / 方案全景 / 对抗性评估
 > 配套文档：`docs/design/37-remote-attestation-design.md`（AirAccount 落地设计）
@@ -14,11 +15,12 @@
 - **[官方源确证]**：已用**官方仓库源码 / 官方手册**逐项核对，给出文件路径 + 函数名/命令名 + URL。最高可信度。
 - **[确证]**：有官方文档 / RFC / 一手仓库支撑，链接在节末（但未做逐行源码核对）。
 - **[较可信]**：多个二手来源一致，但未读到一手 spec 原文。**本轮已尽量消除此档**——能升则升、不能则降为 [待验证]。
-- **[待验证]**：推断或单一来源，或需要的官方源本环境拿不到（如 NXP RM00284 需账号）。**落地前必须查指定官方源 / 真机确认。这些点是给主架构师复核、且是 Phase 0 必做项的重点。**
+- **[待验证]**：推断或单一来源，或现有一手源未涵盖（如 R-1 的签名 key provenance，RM00284 已通读但未涉及，需 NXP 安全参考手册 / EdgeLock 2GO / 实机）。**落地前必须查指定官方源 / 真机确认。这些点是给主架构师复核、且是 Phase 0 必做项的重点。**
 
-⚠️ **诚实声明（关于本环境能/不能核对的官方源）**：
-- **能核对**：OP-TEE 全部走**公开的官方仓库 `OP-TEE/optee_os`**，已逐行核对（§2.1 升为 [官方源确证]）。
-- **不能核对**：**NXP ELE 的权威手册 RM00284 本环境拿不到（需 NXP 账号注册）**。因此**所有 ELE attestation 能力声明（能否签外部 key、能否提供可信 secure_boot_state、签名 key 是否工厂注入、有无连 NXP 根的证书链）一律标 [待 RM00284 + 实机验证]，绝不伪装成确证**。这正说明 R-1/R-8/H-2 必须在 Phase 0 用真机 + RM00284 先落实。
+⚠️ **诚实声明（关于已核对 / 仍未答的官方源，2026-06-13 更新）**：
+- **OP-TEE**：走公开官方仓库 `OP-TEE/optee_os`，已逐行核对（§2.1 [官方源确证]）。
+- **NXP ELE**：**已获取并通读 RM00284 Rev 4.3（本地 PDF）+ imx-secure-enclave 官方代码（本地 clone）**，§3.2 升为 [官方手册确证 / 官方代码确证]。`hsm_dev_attest`/`hsm_pub_key_attest` 的输出结构、签名算法（ECDSA P-384）、「只 attest 库内 key」限制、secure-boot 度量字段均已坐实 → **R-8 架构已修正、H-2 已成立**。
+- **仍未答 [待外部一手源]**：**R-1（dev_attest 签名 key 是否 NXP 工厂注入 + 连 NXP 根证书链）—— RM00284 §3.12「Detailed description」为空，API 参考手册不含 key provenance/信任根，即便通读也无法收口**，必须另查 NXP 安全参考手册 / EdgeLock 2GO / NDA / 实机。这是「不信任部署方」唯一阻塞前提，绝不伪装成已确证。
 
 ⚠️ **对既有 `docs/attestation-plan.md`（2026-06-07）的纠偏（已用官方源坐实）**：该计划声称 "OP-TEE 4.8 支持基于 DICE 的证明" 且 "MX93 预装 Attestation TA（UUID `731e279e-aafb-4575-a771-38caa6f0cca6`）"。**经官方仓库 `lib/libutee/include/pta_attestation.h` 核对，真实 PTA UUID 是 `39800861-182a-4720-9b67-2bcd622bc0b5`，上游根本不存在 `731e279e...`，该 UUID 系臆造 [官方源确证]**；DICE 也不是 OP-TEE 上游的证明路径，真实路径是 **attestation PTA**（详见 §2.1）。后续设计以本文为准。
 
@@ -126,21 +128,34 @@ OP-TEE 上游 `optee_os` 自带一个 **attestation PTA**。**官方核对结论
 - 提供：硬件信任根、secure boot、生命周期管理、tamper detection、密钥存储、加解密。**[确证]**
 - **i.MX93 EdgeLock Secure Enclave 已通过 PSA Certified 认证**。⚠️ **务必区分:PSA Certified（安全鲁棒性 Level 1/2/3 认证）≠ PSA Functional API Certified（后者才认证「暴露可用的 Initial Attestation Token API」），更不等于「BSP 已把可用的 remote attestation token 接口暴露出来」**——它说明架构上具备 PSA-RoT 能力、理论上可产出 PSA attestation token（EAT），但**BSP/固件是否真把这条链路暴露给 OP-TEE/应用层调用,是另一回事 [待验证]**。**[确证(认证事实) + 待验证(实际可用性)]**
 
-### 3.2 ELE 的 attestation 原语 **[待 RM00284 + 实机验证]**
+### 3.2 ELE 的 attestation 原语 **[官方手册确证 + 官方代码确证]**
 
-> ⚠️ **整节降级声明**：本节涉及的 ELE attestation 行为，权威来源是 **NXP RM00284**（EdgeLock Enclave HSM API），**本环境无法访问（需 NXP 账号）**。以下基于二手资料（SPSDK/社区/GitLab 文档）的描述**一律标 [待 RM00284 + 实机验证]**，不作确证。Phase 0 必须用真机 + RM00284 逐项落实。
+> ✅ **本节已用一手材料逐项核对（2026-06-13）**：NXP **RM00284 Rev 4.3**（EdgeLock Enclave HSM API，本地 PDF）+ **imx-secure-enclave** 官方参考实现（本地 clone）。ELE **有两个**独立的 attestation 原语，必须分清：
 
-- `ELE_get_info` / "Get device information"：据 SPSDK `nxpele get-info` 输出，返回 **SoC ID、版本、lifecycle 状态、UUID、ROM patch hash、firmware hash、monotonic counter** 等。**[较可信(SPSDK 工具输出) / 字段细节待 RM00284]** 这是设备指纹来源。
-- **设备证明（device attestation）疑似是 ELE 的一个原语**：二手资料称会话内调用、HSM 库为 `uid / sha_rom_patch / sha_fw / signature` 分配内存，似可产出「签名过的度量（uid + ROM hash + FW hash）」。**[待 RM00284 + 实机验证]**
+**(1) Device attestation — `hsm_dev_attest`（RM00284 §3.12, p65-66）[官方手册确证]**
+签设备自身度量 + 客户端 nonce。输出结构 `op_dev_attest_args_t`（`hsm_dev_attest.h`）：
+- `uid`(16B 芯片唯一 ID)、`soc_id`/`soc_rev`、`lmda_val`(lifecycle: OPEN=0x10/CLOSED=0x40/LOCKED=0x200)、`ssm_state`(安全子系统状态机)。
+- `sha_rom_patch`(32B, Sentinel ROM patch SHA-256)、`sha_fw`(32B, 已装 FW SHA 前 256bit)。
+- **`oem_srkh`(64B, OEM Super Root Key Hash = OEM 安全启动根公钥 hash)**、`oem_pqc_srkh`(v3, 后量子 SRKH)、`imem_state`/`csal_state`/`trng_state`。
+- `nounce`+`rsp_nounce`(防重放)、`info_buf`(验签用的被签内容 = dev_info+nounce)、`signature`。
+- **签名 = ECDSA P-384**（`sab_dev_attest.h`: `DEV_ATTEST_SIGN_SIZE=96`）；走 **`ROM_DEV_ATTEST_REQ`(0xDB) ROM 级请求**。**[官方代码确证]**
 
-⚠️ **关键观察(给设计文档)**：上面这条说明 ELE device attestation **签的是它自己的内部度量**(uid + 它度量的 ROM/FW hash)。这**不等于** ELE 愿意「对外部传入的任意公钥/数据签名」——后者(key attestation / sign-external-data)是另一类能力,很多 HSM 的 device attestation 并不提供。这直接影响设计文档里「ELE 背书 OP-TEE 自生成 attest pubkey」那条链路能否建立(对应设计文档 **R-8**)。
+**(2) Public key attestation — `hsm_pub_key_attest`（RM00284 §3.4.6, p39）[官方手册确证]**
+- 手册原文：「Attest the public key of an asymmetric key **present in the ELE FW key storage**」。
+- 参数：`key_identifier`(被 attest 的 key) + `key_attestation_id`(做背书的 key) + `attest_algo`(CMAC / ECDSA_SHA224-512) → 输出 `certificate`(signed TLV)。
+- **关键限制：被 attest 的 key 和做背书的 key 都必须是「ELE 密钥库内」的 key**（`hsm_generate_key` 生成）。**无法 attest 一把存在 OP-TEE secure storage 里、ELE 库外的 key。** `#ifdef PSA_COMPLIANT` 才编入。**[官方手册 + 代码确证]**
 
-⚠️ **五个必须查一手手册（RM00284）确认的点，给主架构师**：
-1. ELE attestation 那个 `signature` **用哪把 key 签**？是设备唯一私钥（NXP 工厂注入、可连 NXP 根 CA），还是只是某个本地 key？**这决定了能不能做到「不信任部署方」**。**[待验证 - 决定成败 / 设计 R-1]**
-2. **NXP 是否提供一条公开的、可被第三方客户端验证的证书链**（NXP Root CA → i.MX93 设备证书）？还是必须走 **EdgeLock 2GO**（NXP 云服务）做 provisioning 才能拿到设备证书？后者 = 强中心化依赖 NXP 云。**[待验证 - 决定去中心化程度 / 设计 R-1]**
-3. OP-TEE TA 内部**能不能调到 ELE 这个 attestation 命令**（经 imx-secure-enclave / SCMI / ELE mailbox）？还是只能从 normal world 调（那就失去 TEE 内取证的意义）？**[待验证 / 设计 R-3]**
-4. **ELE 是否提供「对外部公钥/数据签名」或「key attestation / key-import-with-attestation」原语**？这决定了「ELE 背书 OP-TEE attest pubkey」可不可行;若否,层 A→B 须改走「attest key 派生自 ELE device key」或 TOFU 降级。**[待验证 - 决定锚定方式 / 设计 R-8]**
-5. **ELE 是否提供可被外部验证的 secure-boot 状态度量**(用于 evidence 里的 `secure_boot_state`)？该字段必须源自 ELE 可信度量,不能由 OP-TEE 自填,否则被攻破的启动链可自报 verified。**[待验证 / 设计 R-8 + H-2]**
+⚠️ **三条已被一手材料坐实的硬结论（直接喂给设计文档）**：
+1. **H-2 成立**：ELE **确实**提供经硬件签名的 secure-boot/lifecycle 度量（dev_attest 的 `oem_srkh`/`sha_fw`/`lmda_val`），**不需要也不应由 OP-TEE 自填**。
+2. **R-8 架构修正**：「ELE 背书 OP-TEE 自生成 attest pubkey」**做不到**——pub_key_attest 只收库内 key。正解是 attest/签名 key 直接在 ELE 库内生成、用 pub_key_attest 出证书。
+3. **R-8/R-1 残留缺口**：pub_key_attest 的背书 key（`key_attestation_id`）本身是**用户用 `hsm_generate_key` 生成的普通库 key**——**RM00284 没有提供任何「内置的、NXP 工厂注入并连 NXP 根」的 attestation key**；dev_attest 的设备 key 也**不会去签库内 key**（它只签设备度量）。所以「库内 attestation key 如何连到 NXP 根」在 RM00284 里**没有答案**。
+
+⚠️ **R-1 — RM00284 已查仍未答（最关键，诚实标注）[待 NXP 安全参考手册 / EdgeLock 2GO / NDA]**：
+`hsm_dev_attest` 的 `signature` 到底用哪把 key 签、那把 key 是否 NXP 工厂注入的设备唯一私钥、有没有可被第三方离线验证到 NXP 根 CA 的证书链——**RM00284 §3.12 的「Detailed description」一节为空，整章只给输出结构 + 函数签名，对签名 key 的 provenance 和证书链完全沉默**。这是 API 参考手册的固有边界（不含 key provisioning / 信任根架构）。**结论：即便拿到并通读了 RM00284，R-1 仍无解**，必须另查 NXP 安全参考手册 / EdgeLock 2GO provisioning 文档 / NDA 材料，或实机抓 dev_attest 输出逆向证书链。**这是「不信任部署方」能否成立的唯一阻塞前提。**
+
+⚠️ **R-3 [待实机]**：imx-secure-enclave 的 dev_attest / pub_key_attest demo 均为 **normal-world 用户态库**调用；OP-TEE TA 内能否经 SCMI/mailbox 直接调 ELE attestation 未确认。
+
+⚠️ **实机已验证（架构师提供）**：`hsm_dev_attest exchange Passed`（真机跑通）；lifecycle = OPEN（开发态）；完整 HSM session（含 pub_key_attest）需 **NVM-Daemon**，当前 disabled（`hsm_open_session 0x14 HSM Feature Disabled`），pub_key_attest 未实测。
 
 ### 3.3 对照：NXP 离散安全芯片 SE05x **[确证，作反差]**
 
@@ -227,13 +242,13 @@ NXP 的**离散** Secure Element **SE05x** 有非常成熟、文档清晰的 att
 
 ## 6. 对 AirAccount 的启示（本文结论）
 
-1. **既有 plan 的技术前提已被官方源推翻**：没有 "OP-TEE 4.8 DICE 证明"、没有预装 `731e279e` Attestation TA（真实 UUID = `39800861-...`，`pta_attestation.h` 核对 [官方源确证]）。真实可用的是 **OP-TEE attestation PTA**（4 命令、度量 TA/内存、RSA 签名）+ **ELE 设备 attestation**（签 uid/ROM/FW hash，能力 [待 RM00284 + 实机验证]）。设计文档据此重做。
+1. **既有 plan 的技术前提已被官方源推翻**：没有 "OP-TEE 4.8 DICE 证明"、没有预装 `731e279e` Attestation TA（真实 UUID = `39800861-...`，`pta_attestation.h` 核对 [官方源确证]）。真实可用的是 **OP-TEE attestation PTA**（4 命令、度量 TA/内存、RSA 签名）+ **ELE 两个 attestation 原语**（`hsm_dev_attest` 签设备度量 ECDSA P-384、`hsm_pub_key_attest` 只 attest 库内 key，[官方手册确证]）。设计文档据此重做。
 
-2. **最大缺口 = 信任根锚定（官方代码坐实）**：`core/pta/attestation.c` 确认 attestation key 设备自生成、零证书链、零硬件锚定 [官方源确证]；且 `pta_attestation.h` 确认 PTA **不签外部公钥** [官方源确证]。**不把它锚到 ELE，远程证明就只是「自签名」，挡不住自建 TEE 的攻击者**；而锚定动作 PTA 自己做不到，只能靠 ELE——这是 #37 成败手，也是 R-8 死结。
+2. **最大缺口 = 信任根锚定（官方坐实）**：`core/pta/attestation.c` 确认 OP-TEE attest key 设备自生成、零锚定 [官方源确证]；PTA **不签外部公钥**、ELE `hsm_pub_key_attest` **只 attest 库内 key**（RM00284 §3.4.6）[官方确证]。→ 「OP-TEE 自生成 key + ELE 背书它」两头堵死,**架构改为「attest/签名 key 直接在 ELE 库内生成 + pub_key_attest 出证书」**。
 
-3. **ELE 侧四个 RM00284 必查项**（决定方案天花板，本环境拿不到手册 [待 RM00284 + 实机验证]）：ELE attestation 签名密钥是不是 NXP 工厂注入的设备唯一私钥；NXP 是否给可第三方离线验的证书链（还是必须走 EdgeLock 2GO 云）；**ELE 能否对外部公钥/数据签名（决定能否背书 OP-TEE 自生成 key）**；**ELE 能否提供可信 secure_boot_state**。全在 RM00284，Phase 0 必做。
+3. **R-1 是唯一阻塞「不信任部署方」的前提，且 RM00284 已查仍未答 [待 NXP 安全参考手册 / EdgeLock 2GO]**：`hsm_dev_attest` 的签名 key 是否 NXP 工厂注入、有无连 NXP 根的可离线验证书链——**RM00284 §3.12「Detailed description」为空，API 参考手册不含 key provenance/信任根**。残留:pub_key_attest 的背书 key 本身也是普通库 key,无内置 NXP 根 key,无 device-key→keystore-key 桥。Phase 0 必须另找一手源收口。
 
-4. **最对味的标准是 PSA Attestation Token（EAT/RFC 9783）**：i.MX93 ELE 已过 **PSA Certified 认证**（合规等级 ≠ 已暴露可用 attestation token 接口）。走 EAT + Veraison 既标准化又可自建 verifier，契合半去中心化。但「BSP/固件是否真暴露 PSA token 接口」[待 RM00284 + 实机验证]——大概率需要 fallback 到自定义证据格式。
+4. **H-2 已确证为可用**：ELE `hsm_dev_attest` 提供经硬件 ECDSA P-384 签名的 secure-boot/lifecycle 度量（`oem_srkh`/`sha_fw`/`lmda_val`），evidence 的 secure_boot 字段应取自此处，非 OP-TEE 自填。**最对味的标准仍是 PSA Attestation Token（EAT/RFC 9783）**：i.MX93 已过 PSA Certified（合规等级 ≠ 已暴露可用 EAT 接口）；RM00284 未见标准 EAT/COSE 输出（dev_attest 是 NXP 私有结构 + 裸 ECDSA 签名）,走 EAT 需自己在 verifier 侧封装，大概率 fallback 到自定义证据格式 + Veraison 自定义 scheme。
 
 5. **Web3 先例可借**：Automata 的链上 DCAP、Marlin 的链上 Nitro 证明说明「TEE 证据可在 EVM 上验」。AirAccount 管的是以太坊私钥，未来可把 attestation 验证做成链上合约，让 SuperPaymaster/SuperRelay 等依赖方在链上确认「KMS 跑在真 TEE」，这比纯客户端 SDK 验证更去中心化。
 
@@ -245,16 +260,27 @@ NXP 的**离散** Secure Element **SE05x** 有非常成熟、文档清晰的 att
 
 ## 权威来源 / Authoritative Sources（本文引用来源汇总）
 
-> **可信度分层**：打 ✅【已核对】的，是本设计期间直接从官方源码 WebFetch 拉取、逐行核对过的（[官方源确证]）；其余为参考来源，落地前仍须在能访问的环境核对（尤其 NXP 一手手册 RM00284，本环境需账号 / 网络策略拦截、无法访问 → 标 [待 RM00284 + 实机验证]）。
+> **可信度分层**：打 ✅【已核对】的，是本设计期间从官方源码（OP-TEE 仓库 WebFetch）/ 官方一手材料（RM00284 本地 PDF、imx-secure-enclave 本地 clone）逐行核对过的（[官方源/手册/代码确证]）；其余为二手参考来源。⚠️ R-1（dev_attest 签名 key provenance + NXP 根证书链）即便通读 RM00284 仍未涵盖，单列「仍待外部一手源」。
 
 ### ✅ 已用官方源核对（authoritative — 本设计已逐行核对）
 - **OP-TEE attestation PTA 头文件** — https://raw.githubusercontent.com/OP-TEE/optee_os/master/lib/libutee/include/pta_attestation.h
   - 核对结论：真实 PTA UUID = `39800861-182a-4720-9b67-2bcd622bc0b5`（确认旧 `attestation-plan.md` 的 `731e279e-...` 是臆造）；仅 4 个命令（`GET_PUBKEY`=0x0 / `GET_TA_SHDR_DIGEST`=0x1 / `HASH_TA_MEMORY`=0x2 / `HASH_TEE_MEMORY`=0x3）；**无任何命令签 caller 提供的外部公钥**，全部签 `(nonce | 自身度量/摘要)`。→ H-1 的官方依据。
 - **OP-TEE attestation PTA 实现** — https://raw.githubusercontent.com/OP-TEE/optee_os/master/core/pta/attestation.c
   - 核对结论：attest RSA key **首次使用时设备自生成**（`load_key` 失败 → `generate_key()` → `crypto_acipher_gen_rsa_key()`），**无证书链 / 无 vendor CA / 无硬件根锚定**（bare self-generated）；存 secure storage（`sec_storage_obj_write(..., TEE_STORAGE_PRIVATE, ...)` → 通常 RPMB）。→ H-1 的官方依据。
-- **本地代码核对**：`third_party/teaclave-trustzone-sdk/examples/` **不含 attestation 示例**（已 `find` 确认，无 `attestation-rs`）；本地无 `optee_os` 源码（构建用 Docker 内预编译 OP-TEE）。故 attestation PTA 权威代码只在上方 `OP-TEE/optee_os` 官方仓库；NXP ELE 侧官方 demo 见下方 `imx-ele-demo` / `imx-secure-enclave`（均外部仓库，**本环境拦截，待能访问环境核对**）。
+- **NXP RM00284 EdgeLock Enclave HSM API, Rev 4.3（本地 PDF `RM00284.pdf`，139 页，2026-06-13 通读）[官方手册确证]**
+  - §3.12 Dev attest (p65-66)：`hsm_dev_attest` 输出 uid/ssm_state/lmda_val/sha_rom_patch/sha_fw/`oem_srkh`/oem_pqc_srkh/nounce/info_buf/signature。⚠️ **§3.12.1 Detailed description 为空 → 不含签名 key provenance / 证书链 → R-1 未答**。
+  - §3.4.6 (p39)：`hsm_pub_key_attest` 只 attest「present in the ELE FW key storage」的 key；§3.4.5.1 attest algo = CMAC/ECDSA_SHA224-512。
+  - §3.2 (p9) `hsm_key_type_t` 无 secp256k1；§3.13 (p67) lifecycle 枚举。
+- **NXP imx-secure-enclave（本地 clone `third_party/imx-secure-enclave/`）[官方代码确证]**
+  - `hsm_dev_attest.h` / `sab_dev_attest.c`：`DEV_ATTEST_SIGN_SIZE=96`(ECDSA P-384)、`ROM_DEV_ATTEST_REQ=0xDB`、oem_srkh 64B。
+  - `hsm_pub_key_attest.h` / `test_pub_key_attest.c`：key_identifier + key_attestation_id 均为库内 key,demo 用 AES-CMAC,输出 signed-TLV certificate,`#ifdef PSA_COMPLIANT`。
+- **本地代码核对**：`third_party/teaclave-trustzone-sdk/examples/` **不含 attestation 示例**（已 `find` 确认）；本地无 `optee_os` 源码（构建用 Docker 内预编译 OP-TEE）。故 attestation PTA 权威代码只在 `OP-TEE/optee_os` 官方仓库。
 
-### 参考来源（待落地前核对，尤其 NXP 一手手册）
+### 仍待外部一手源（落地前必须收口）
+- **R-1**：dev_attest 签名 key 是否 NXP 工厂注入 + 连 NXP 根证书链 → **RM00284 未涵盖**,待 NXP 安全参考手册 / EdgeLock 2GO / NDA / 实机逆向。
+- **R-3**：OP-TEE TA 内能否调 ELE attestation（demo 均 normal-world）。
+
+### 参考来源（二手 / 公开）
 OP-TEE / TrustZone：
 - https://www.rfc-editor.org/rfc/rfc9334.html （RATS 架构）
 - https://github.com/OP-TEE/optee_os/blob/master/lib/libutee/include/pta_attestation.h
