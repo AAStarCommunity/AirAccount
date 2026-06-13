@@ -111,7 +111,10 @@ chk "GET /kms/begin-grant-session-auth" "$(get_code "/kms/begin-grant-session-au
 echo -e "${YEL}[7] Negative — auth gates reject correctly${NC}"
 chk "SignTypedData no-auth → reject"      "$(post_path_code /kms/SignTypedData SignTypedData '{"domain":{},"types":{},"primaryType":"X","message":{}}')" 400
 chk "sign-grant-session no-auth → reject" "$(post_path_code /kms/sign-grant-session SignGrantSession '{}')" 400
-chk "admin/purge-key no-token → reject"   "$(post_path_code /admin/purge-key AdminPurge '{"key_id":"00000000-0000-0000-0000-000000000000","reason":"e2e-neg"}')" 400
+# Release build (no `admin-purge` feature) compiles out /admin/purge-key entirely,
+# so it must be unreachable → 404. (A dev/test build with --features admin-purge
+# would instead return 400 for a missing admin token; this suite targets release.)
+chk "admin/purge-key absent in release → 404" "$(post_path_code /admin/purge-key AdminPurge '{"key_id":"00000000-0000-0000-0000-000000000000","reason":"e2e-neg"}')" 404
 
 echo -e "${YEL}[7b] Agent key flow (ceremony → Bearer JWT)${NC}"
 post_code CreateKey "{\"Description\":\"ak\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null

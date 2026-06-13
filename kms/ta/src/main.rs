@@ -255,6 +255,156 @@ fn cache_len() -> usize {
     WALLET_CACHE.with(|c| c.borrow().len())
 }
 
+// ========================================
+// Pending WebAuthn challenge table (issue #49 — TA-side anti-replay)
+// ========================================
+// The TA issues one-time 32-byte nonces via GetChallenge and verifies/consumes
+// them inside verify_passkey_for_wallet. This closes the replay hole where a
+// compromised CA could resubmit one captured assertion to authorize arbitrary
+// payloads: the nonce is signed by the authenticator (it IS the WebAuthn
+// challenge), checked against the TA's own table, and deleted on first use.
+//
+// Design constraints (see kms memory + issue #49):
+//   * IN-MEMORY only, never TEE secure storage. Nonces are short-lived; losing
+//     them on TA restart only forces a re-challenge. This also avoids the
+//     secure-storage-write-then-TLS-access hazard (H-3): we never touch this
+//     table after a storage write inside a single command.
+//   * Vec instead of HashMap — std HashMap's SipHasher pulls getrandom, which
+//     panics in the OP-TEE TA. Same rationale as WALLET_CACHE above.
+//   * PROCESS-GLOBAL static, NOT thread_local. The host serializes TA calls
+//     (single-worker queue in ta_client.rs) so access is strictly serial — but
+//     OP-TEE may dispatch consecutive InvokeCommands onto DIFFERENT pool
+//     threads. A thread_local nonce issued by GetChallenge would then be
+//     invisible to the verify on the very next call, which showed up as a flaky
+//     "No pending challenge" (#49 / #61). A global UnsafeCell shares the table
+//     across all TA threads; the serial-invocation guarantee makes the unsafe
+//     access sound without a lock or a new crate. Unlike WALLET_CACHE, this
+//     table has NO secure-storage fallback — a lost entry is unrecoverable, so
+//     correctness here must not depend on thread affinity.
+
+/// Challenge nonce lifetime. An assertion whose nonce was issued more than this
+/// many seconds ago is rejected even if the nonce still matches.
+const CHALLENGE_TTL_SECS: i64 = 300;
+
+/// Upper bound on simultaneously-pending challenges. Bounds memory and limits a
+/// compromised CA's ability to exhaust the TA by spamming GetChallenge. Oldest
+/// entries are evicted when full (a dropped pending challenge just forces the
+/// honest client to re-request — it cannot authorize anything).
+const MAX_PENDING_CHALLENGES: usize = 256;
+
+/// Issue #49 enforcement policy.
+///
+/// `false` (TRANSITION, current default): assertions WITHOUT `client_data_json`
+/// fall through to the legacy ECDSA-only verification with a warning. This keeps
+/// existing E2E/clients working while the host + SDK roll out the GetChallenge
+/// flow. Assertions WITH `client_data_json` are ALWAYS strictly verified
+/// regardless of this flag — there is no downgrade once a client opts in.
+///
+/// `true` (STRICT): every assertion MUST carry `client_data_json` and pass nonce
+/// binding. Flip this (and rebuild/re-flash the TA) once all clients are
+/// migrated. TODO(#49): switch to strict for GA after Beta3 soak.
+const ENFORCE_TA_CHALLENGE: bool = false;
+
+struct PendingChallenge {
+    wallet_id: Uuid,
+    nonce: [u8; 32],
+    issued_at: i64,
+}
+
+/// Process-global pending-nonce table, shared across ALL TA pool threads.
+/// See the "Design constraints" block above for why this must be a global
+/// static rather than a `thread_local` (flaky "No pending challenge", #49/#61).
+struct GlobalChallenges(core::cell::UnsafeCell<Vec<PendingChallenge>>);
+
+// SAFETY: this cell is only ever accessed serially, for two independent reasons
+// rooted in the OP-TEE / GP execution model — NOT in any host-side discipline
+// (the CA's single-worker queue is merely an additional Rust-side serialization,
+// not what makes this sound):
+//   1. Same session: GP TEE Client API `TEEC_InvokeCommand` is a BLOCKING call,
+//      so a client cannot have two in-flight commands on one session — commands
+//      on a given session are inherently serial. The KMS CA uses ONE persistent
+//      session (ta_client.rs keeps it open to avoid the ~4.4s per-open cost), so
+//      all real traffic flows through that single session.
+//   2. Different sessions: this TA is built with default properties
+//      (TA_FLAGS = 0 → gpd.ta.singleInstance = false), so EACH session gets its
+//      own TA instance in its own address space — a second session has its own
+//      copy of this static and cannot alias the first session's cell.
+// In both cases no two threads ever hold a `&mut` to the SAME cell; `with_pending`
+// further confines the `&mut` to one synchronous closure that never escapes across
+// an InvokeCommand boundary. (If the TA were ever rebuilt as singleInstance +
+// multiSession, this reasoning breaks and an explicit TA-side lock would be
+// required; the build uses default flags today and ta.json is absent, so it is
+// not.)
+unsafe impl Sync for GlobalChallenges {}
+
+static PENDING_CHALLENGES: GlobalChallenges =
+    GlobalChallenges(core::cell::UnsafeCell::new(Vec::new()));
+
+/// Run `f` with exclusive access to the global pending-challenge table.
+/// SAFETY: serial TA invocation (see `GlobalChallenges`) guarantees no
+/// concurrent borrow; the `&mut` does not escape this function.
+fn with_pending<R>(f: impl FnOnce(&mut Vec<PendingChallenge>) -> R) -> R {
+    // SAFETY: see GlobalChallenges — serial access, borrow confined to `f`.
+    let tbl = unsafe { &mut *PENDING_CHALLENGES.0.get() };
+    f(tbl)
+}
+
+/// Generate a fresh 32-byte nonce, record it for `wallet_id`, and return it.
+/// Replaces any previously-pending nonce for the same wallet (only the latest
+/// challenge is valid — requesting a new one invalidates the old).
+fn challenge_issue(wallet_id: &Uuid) -> [u8; 32] {
+    let mut nonce = [0u8; 32];
+    Random::generate(&mut nonce);
+    let issued_at = tee_unix_secs();
+    with_pending(|tbl| {
+        // Drop any existing pending challenge for this wallet (one live nonce per wallet).
+        tbl.retain(|e| &e.wallet_id != wallet_id);
+        // Bound memory: evict the oldest entry if at capacity.
+        if tbl.len() >= MAX_PENDING_CHALLENGES {
+            if let Some((idx, _)) = tbl
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.issued_at)
+            {
+                tbl.swap_remove(idx);
+            }
+        }
+        tbl.push(PendingChallenge {
+            wallet_id: *wallet_id,
+            nonce,
+            issued_at,
+        });
+    });
+    nonce
+}
+
+/// Look up the pending nonce for `wallet_id` WITHOUT removing it.
+/// Used to verify an incoming challenge before committing to consuming it: a
+/// request carrying a wrong/expired challenge must NOT burn a victim's still-
+/// valid pending nonce (DoS-on-nonce). The nonce is consumed (challenge_consume)
+/// only after every binding/length/match/TTL check has passed.
+fn challenge_peek(wallet_id: &Uuid) -> Option<([u8; 32], i64)> {
+    with_pending(|tbl| {
+        tbl.iter()
+            .find(|e| &e.wallet_id == wallet_id)
+            .map(|e| (e.nonce, e.issued_at))
+    })
+}
+
+/// Look up and CONSUME (remove) the pending nonce for `wallet_id`.
+/// Returns the (nonce, issued_at) if one was present. The removal makes the
+/// nonce strictly one-time: a replayed assertion finds nothing to match.
+fn challenge_consume(wallet_id: &Uuid) -> Option<([u8; 32], i64)> {
+    with_pending(|tbl| {
+        if let Some(idx) = tbl.iter().position(|e| &e.wallet_id == wallet_id) {
+            let e = tbl.swap_remove(idx);
+            Some((e.nonce, e.issued_at))
+        } else {
+            None
+        }
+    })
+}
+
 // ── P256 Session Key storage ──
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -723,6 +873,13 @@ fn verify_passkey_for_wallet(
         ));
     };
 
+    // ── Issue #49: challenge binding / anti-replay (TA-side) ──
+    // Verified BEFORE the ECDSA check so a replayed/forged assertion is rejected
+    // without spending the ~320ms p256-m verification. The wallet_id used to
+    // consume the nonce is the TA's own (wallet.get_id()), never a CA-supplied
+    // value, so a compromised CA cannot redirect the consumption to another slot.
+    verify_challenge_binding(&wallet.get_id(), _assertion)?;
+
     // Build signed_data = authenticator_data || client_data_hash
     let mut signed_data = _assertion.authenticator_data.clone();
     signed_data.extend_from_slice(&_assertion.client_data_hash);
@@ -757,6 +914,206 @@ fn verify_passkey_for_wallet(
     }
 
     Ok(())
+}
+
+/// Issue #49: bind the assertion to a TA-issued one-time challenge nonce.
+///
+/// Two cases:
+///   * `client_data_json` present → STRICT. We (1) verify
+///     `SHA-256(client_data_json) == client_data_hash` so the JSON is the exact
+///     preimage of the bytes the authenticator signed (a compromised CA cannot
+///     forge the JSON), (2) extract the `challenge` field, base64url-decode it,
+///     (3) consume the TA's pending nonce for this wallet and require an exact,
+///     constant-time match plus a fresh (un-expired) issue time. The nonce is
+///     deleted on first lookup, making it strictly one-time.
+///   * `client_data_json` absent → governed by `ENFORCE_TA_CHALLENGE`:
+///     transition mode logs a warning and allows (legacy ECDSA-only path);
+///     strict mode rejects.
+fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertion) -> Result<()> {
+    let client_data_json = match assertion.client_data_json.as_ref() {
+        Some(json) => json,
+        None => {
+            if ENFORCE_TA_CHALLENGE {
+                return Err(anyhow!(
+                    "Issue #49 strict mode: assertion missing clientDataJSON; \
+                     obtain a challenge via GetChallenge and resubmit"
+                ));
+            }
+            // Transition: do NOT leave a stale nonce around for this wallet — if
+            // one was issued but this legacy assertion bypassed binding, drop it
+            // so it cannot be paired with a future replay.
+            let _ = challenge_consume(wallet_id);
+            trace_println!(
+                "[!] Issue #49 TRANSITION: assertion without clientDataJSON accepted (legacy path); \
+                 migrate client to GetChallenge flow"
+            );
+            return Ok(());
+        }
+    };
+
+    // (1) Bind JSON to the signed bytes: SHA-256(clientDataJSON) must equal the
+    // client_data_hash that goes into the ECDSA-verified message. Constant-time.
+    use sha2::Digest;
+    let computed = sha2::Sha256::digest(client_data_json);
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= computed[i] ^ assertion.client_data_hash[i];
+    }
+    if diff != 0 {
+        return Err(anyhow!(
+            "clientDataJSON does not hash to client_data_hash (binding broken)"
+        ));
+    }
+
+    // (2) Extract the base64url `challenge` field and decode it.
+    let challenge_b64 = extract_json_string_field(client_data_json, "challenge")
+        .ok_or_else(|| anyhow!("clientDataJSON missing 'challenge' field"))?;
+    let challenge_bytes = base64url_decode_no_pad(challenge_b64.as_bytes())
+        .ok_or_else(|| anyhow!("clientDataJSON challenge is not valid base64url"))?;
+
+    // (3) PEEK (do not yet consume) the TA's pending nonce for this wallet. We
+    // only remove it once every check below passes, so a request with a wrong or
+    // expired challenge cannot burn a victim's still-valid nonce (DoS-on-nonce).
+    let (nonce, issued_at) = challenge_peek(wallet_id).ok_or_else(|| {
+        anyhow!("No pending challenge for this wallet (replay, expired, or GetChallenge not called)")
+    })?;
+
+    if challenge_bytes.len() != nonce.len() {
+        return Err(anyhow!(
+            "challenge length mismatch: got {}B, expected {}B",
+            challenge_bytes.len(),
+            nonce.len()
+        ));
+    }
+    let mut cdiff = 0u8;
+    for i in 0..nonce.len() {
+        cdiff |= challenge_bytes[i] ^ nonce[i];
+    }
+    if cdiff != 0 {
+        return Err(anyhow!("challenge does not match the TA-issued nonce"));
+    }
+
+    // Freshness: reject a nonce that, while matching, was issued too long ago.
+    // tee_unix_secs uses REE time (TA SystemTime::now() panics — see kms memory).
+    let now = tee_unix_secs();
+    let age = now.saturating_sub(issued_at);
+    if age < 0 || age > CHALLENGE_TTL_SECS {
+        return Err(anyhow!(
+            "challenge expired (age {}s > TTL {}s)",
+            age,
+            CHALLENGE_TTL_SECS
+        ));
+    }
+
+    // All checks passed — NOW consume the nonce (strictly one-time). Consuming
+    // here rather than before the checks means a failed verification leaves the
+    // legitimate nonce intact for the real client to retry.
+    let _ = challenge_consume(wallet_id);
+
+    trace_println!("[+] Issue #49: challenge nonce verified + consumed (age {}s)", age);
+    Ok(())
+}
+
+/// Minimal extractor for a string-valued JSON field, used in place of serde_json
+/// (which is not a TA dependency). Returns the raw (unescaped) string content of
+/// `"<key>":"<value>"`. WebAuthn clientDataJSON `challenge`/`type`/`origin` are
+/// always plain base64url / ASCII tokens with no escapes, so unescaping is not
+/// required for our use. Returns None if the field is absent or malformed.
+///
+/// This is intentionally conservative: it scans for the `"key"` token, skips
+/// whitespace and the colon, requires an opening quote, and reads until the next
+/// unescaped quote. A `\"` inside the value terminates extraction early and the
+/// caller's base64url decode will then reject it — safe-by-rejection.
+fn extract_json_string_field(json: &[u8], key: &str) -> Option<String> {
+    // Build the needle: "key"
+    let mut needle = Vec::with_capacity(key.len() + 2);
+    needle.push(b'"');
+    needle.extend_from_slice(key.as_bytes());
+    needle.push(b'"');
+
+    let mut i = 0usize;
+    let n = json.len();
+    let nl = needle.len();
+    while i + nl <= n {
+        if &json[i..i + nl] == needle.as_slice() {
+            let mut j = i + nl;
+            // skip whitespace
+            while j < n && (json[j] == b' ' || json[j] == b'\t' || json[j] == b'\n' || json[j] == b'\r') {
+                j += 1;
+            }
+            // require colon
+            if j >= n || json[j] != b':' {
+                return None;
+            }
+            j += 1;
+            // skip whitespace
+            while j < n && (json[j] == b' ' || json[j] == b'\t' || json[j] == b'\n' || json[j] == b'\r') {
+                j += 1;
+            }
+            // require opening quote
+            if j >= n || json[j] != b'"' {
+                return None;
+            }
+            j += 1;
+            let start = j;
+            while j < n && json[j] != b'"' {
+                // stop at backslash — value would need unescaping we don't do;
+                // safer to refuse than to mis-handle.
+                if json[j] == b'\\' {
+                    return None;
+                }
+                j += 1;
+            }
+            if j >= n {
+                return None; // unterminated string
+            }
+            return core::str::from_utf8(&json[start..j]).ok().map(|s| s.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Decode unpadded base64url. WebAuthn challenges are base64url WITHOUT padding,
+/// but we also tolerate padding by stripping trailing '='. Returns None on any
+/// invalid character or length. Implemented directly to avoid relying on the
+/// base64ct decoder's exact padding mode (we already depend on base64ct for JWT,
+/// but its Base64UrlUnpadded would reject any '=' a client might include).
+fn base64url_decode_no_pad(input: &[u8]) -> Option<Vec<u8>> {
+    // Map a base64url char to its 6-bit value.
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    // Strip optional trailing padding.
+    let mut end = input.len();
+    while end > 0 && input[end - 1] == b'=' {
+        end -= 1;
+    }
+    let data = &input[..end];
+    // A valid base64 group is 2..=4 chars; length % 4 == 1 is impossible.
+    if data.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for &c in data {
+        let v = val(c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWalletOutput> {
@@ -806,7 +1163,23 @@ fn create_wallet(input: &proto::CreateWalletInput) -> Result<proto::CreateWallet
     // register before the cache_put inside save_wallet. (The previous
     // implementation read every wallet object here, which corrupted TLS on real
     // i.MX93 hardware and panicked the subsequent thread_local cache access.)
-    const MAX_WALLETS: usize = 100;
+    //
+    // Capacity sizing: wallets live in REE-FS (GB-scale), NOT RPMB/ELE secure
+    // storage. RPMB only holds the anti-rollback epoch counter, and the i.MX93
+    // ELE cannot do secp256k1 (issue #40/#48), so Ethereum keys are software-
+    // managed in REE-FS with the secure enclave acting only as a root-of-trust /
+    // rollback guard — NOT as wallet storage. Enabling the MX security enclave
+    // therefore does NOT shrink this budget: capacity stays bounded by REE-FS.
+    // Measured on FRDM-IMX93: ~100 wallets occupy ~476 KB and /var/lib/tee has
+    // >1 GB free → physical room for ~300 000 wallets. We cap at 30 000 (~140 MB)
+    // to keep ~10x headroom AND a hard DoS ceiling on a compromised CA. The old
+    // value of 100 was three orders of magnitude too low for a community/city-
+    // scale KMS and only ever bit us via repeated-E2E test pollution.
+    //
+    // Kept as a build-time const (NOT a runtime/CA-supplied config) on purpose:
+    // this is a security boundary, so a compromised CA must not be able to raise
+    // it. Operators needing a different ceiling change this line and rebuild.
+    const MAX_WALLETS: usize = 30_000;
     let existing = db_client.count_entries::<Wallet>()?;
     if existing >= MAX_WALLETS {
         return Err(anyhow!(
@@ -1064,6 +1437,23 @@ fn read_rollback_counter(
 ) -> Result<proto::ReadRollbackCounterOutput> {
     let counter = rpmb_read_counter()?;
     Ok(proto::ReadRollbackCounterOutput { counter })
+}
+
+/// Issue #49: issue a fresh one-time WebAuthn challenge nonce bound to a wallet.
+///
+/// Requires the wallet to exist (and thus have a passkey bound) so a compromised
+/// CA cannot farm nonces for non-existent wallets. The nonce is held in-memory
+/// only and consumed by the next signing assertion. No secure-storage write
+/// happens here, so there is no TLS/thread_local hazard (H-3).
+fn get_challenge(input: &proto::GetChallengeInput) -> Result<proto::GetChallengeOutput> {
+    dbg_println!("[+] GetChallenge for wallet: {:?}", input.wallet_id);
+    // Ensure the wallet exists before issuing a nonce. load_wallet_cached errors
+    // if the wallet is unknown.
+    let _wallet = load_wallet_cached(&input.wallet_id)?;
+    let nonce = challenge_issue(&input.wallet_id);
+    Ok(proto::GetChallengeOutput {
+        nonce: nonce.to_vec(),
+    })
 }
 
 fn agent_derivation_path(agent_index: u32) -> String {
@@ -1933,6 +2323,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::SignP256GrantSession => process(serialized_input, sign_p256_grant_session),
         Command::ForceRemoveWallet => process(serialized_input, force_remove_wallet),
         Command::ReadRollbackCounter => process(serialized_input, read_rollback_counter),
+        Command::GetChallenge => process(serialized_input, get_challenge),
         _ => bail!("Unsupported command"),
     }
 }
