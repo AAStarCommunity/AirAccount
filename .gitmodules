@@ -43,3 +43,6 @@
 [submodule "third_party/teaclave-trustzone-sdk"]
 	path = third_party/teaclave-trustzone-sdk
 	url = https://github.com/AAStarCommunity/teaclave-trustzone-sdk.git
+[submodule "third_party/imx-secure-enclave"]
+	path = third_party/imx-secure-enclave
+	url = https://github.com/nxp-imx/imx-secure-enclave
