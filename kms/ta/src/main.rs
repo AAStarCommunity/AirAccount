@@ -378,6 +378,19 @@ fn challenge_issue(wallet_id: &Uuid) -> [u8; 32] {
     nonce
 }
 
+/// Look up the pending nonce for `wallet_id` WITHOUT removing it.
+/// Used to verify an incoming challenge before committing to consuming it: a
+/// request carrying a wrong/expired challenge must NOT burn a victim's still-
+/// valid pending nonce (DoS-on-nonce). The nonce is consumed (challenge_consume)
+/// only after every binding/length/match/TTL check has passed.
+fn challenge_peek(wallet_id: &Uuid) -> Option<([u8; 32], i64)> {
+    with_pending(|tbl| {
+        tbl.iter()
+            .find(|e| &e.wallet_id == wallet_id)
+            .map(|e| (e.nonce, e.issued_at))
+    })
+}
+
 /// Look up and CONSUME (remove) the pending nonce for `wallet_id`.
 /// Returns the (nonce, issued_at) if one was present. The removal makes the
 /// nonce strictly one-time: a replayed assertion finds nothing to match.
@@ -958,8 +971,10 @@ fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertio
     let challenge_bytes = base64url_decode_no_pad(challenge_b64.as_bytes())
         .ok_or_else(|| anyhow!("clientDataJSON challenge is not valid base64url"))?;
 
-    // (3) Consume the TA's pending nonce for this wallet and match it.
-    let (nonce, issued_at) = challenge_consume(wallet_id).ok_or_else(|| {
+    // (3) PEEK (do not yet consume) the TA's pending nonce for this wallet. We
+    // only remove it once every check below passes, so a request with a wrong or
+    // expired challenge cannot burn a victim's still-valid nonce (DoS-on-nonce).
+    let (nonce, issued_at) = challenge_peek(wallet_id).ok_or_else(|| {
         anyhow!("No pending challenge for this wallet (replay, expired, or GetChallenge not called)")
     })?;
 
@@ -989,6 +1004,11 @@ fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertio
             CHALLENGE_TTL_SECS
         ));
     }
+
+    // All checks passed — NOW consume the nonce (strictly one-time). Consuming
+    // here rather than before the checks means a failed verification leaves the
+    // legitimate nonce intact for the real client to retry.
+    let _ = challenge_consume(wallet_id);
 
     trace_println!("[+] Issue #49: challenge nonce verified + consumed (age {}s)", age);
     Ok(())
