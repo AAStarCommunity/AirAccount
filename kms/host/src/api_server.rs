@@ -2928,6 +2928,31 @@ impl KmsApiServer {
         bearer: Option<String>,
         req: SignGTokenAuthorizationRequest,
     ) -> Result<SignTypedDataResponse> {
+        // #52: verify `from` equals the address actually derived from keyId+hdPath.
+        // EIP-3009 TransferWithAuthorization is checked on-chain by
+        // ecrecover(hash, sig) == from; signing with a key whose address != from
+        // makes the transfer revert and wastes the user's gas. Catch it here with a
+        // clear error. The address must already be cached (DeriveAddress called at
+        // least once for this key+path); if not, refuse rather than risk a revert.
+        match self.db.address_for_key_path(&req.key_id, &req.hd_path)? {
+            Some(addr) => {
+                if !addr.eq_ignore_ascii_case(&req.from) {
+                    return Err(anyhow!(
+                        "from {} does not match the address derived from keyId+hdPath \
+                         ({}); EIP-3009 would revert on-chain",
+                        req.from,
+                        addr
+                    ));
+                }
+            }
+            None => {
+                return Err(anyhow!(
+                    "no cached address for this keyId+hdPath — call DeriveAddress first \
+                     so the signer can verify `from` (prevents an on-chain EIP-3009 revert)"
+                ));
+            }
+        }
+
         let std_req = SignTypedDataRequest {
             key_id: req.key_id,
             hd_path: req.hd_path,

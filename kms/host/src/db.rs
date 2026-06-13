@@ -591,6 +591,29 @@ impl KmsDb {
         Ok(())
     }
 
+    /// #52: look up the cached Ethereum address for a (key_id, derivation_path)
+    /// pair. Used to verify a caller-supplied `from` against the real signing
+    /// address before building an EIP-3009 authorization — a mismatch would
+    /// revert on-chain (wasted gas). Returns None if the pair has not been
+    /// derived/cached yet (caller should DeriveAddress first).
+    pub fn address_for_key_path(
+        &self,
+        key_id: &str,
+        derivation_path: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT address FROM address_index WHERE key_id=?1 AND derivation_path=?2",
+        )?;
+        let mut rows = stmt.query_map(params![key_id, derivation_path], |row| {
+            row.get::<_, String>(0)
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn lookup_address(&self, address: &str) -> Result<Option<AddressRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -1650,5 +1673,31 @@ mod tests {
             db.last_used_at("w-addr").unwrap().is_some(),
             "last_used_at must see the address-mode op"
         );
+    }
+
+    #[test]
+    fn address_for_key_path_lookup() {
+        // #52: GToken from-check resolves the signing address by (key_id, path).
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-1")).unwrap(); // satisfy address_index FK
+        db.upsert_address("0xABC123", "w-1", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        // exact (key_id, path) → hit
+        assert_eq!(
+            db.address_for_key_path("w-1", "m/44'/60'/0'/0/0")
+                .unwrap()
+                .as_deref(),
+            Some("0xABC123")
+        );
+        // same key, different path → miss
+        assert!(db
+            .address_for_key_path("w-1", "m/44'/60'/0'/0/1")
+            .unwrap()
+            .is_none());
+        // different key, same path → miss
+        assert!(db
+            .address_for_key_path("w-2", "m/44'/60'/0'/0/0")
+            .unwrap()
+            .is_none());
     }
 }
