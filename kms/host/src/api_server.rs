@@ -3814,7 +3814,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.20.0";
+const KMS_VERSION: &str = "0.21.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -5206,7 +5206,7 @@ pub async fn start_kms_server() -> Result<()> {
     // Pinned swagger-ui-dist@5.32.6 with SRI integrity hashes (supply-chain hardening).
     const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AirAccount KMS API — v0.20.0 (Beta2)</title>
+<title>AirAccount KMS API — v0.21.0 (Beta3)</title>
 <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui.css"
  integrity="sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT" crossorigin="anonymous">
 <style>body{margin:0;background:#fafafa}.swagger-ui .topbar{display:none}
@@ -5217,7 +5217,7 @@ pub async fn start_kms_server() -> Result<()> {
 html.dark body{background:#0b1020}
 html.dark #swagger-ui{filter:invert(0.92) hue-rotate(180deg)}
 html.dark #swagger-ui .microlight,html.dark #swagger-ui img{filter:invert(1) hue-rotate(180deg)}</style></head>
-<body><div id="hdr"><h1><span class="b">BETA2 · v0.20.0</span>AirAccount KMS API</h1>
+<body><div id="hdr"><h1><span class="b">BETA3 · v0.21.0</span>AirAccount KMS API</h1>
 <small>TEE 私钥管理 · WebAuthn · AWS KMS 兼容 · 私钥永不出 TEE</small></div>
 <button id="theme" onclick="tgl()" title="切换 dark / light">🌙</button>
 <div id="swagger-ui"></div>
