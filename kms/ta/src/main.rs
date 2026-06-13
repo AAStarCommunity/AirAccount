@@ -1682,12 +1682,33 @@ fn verify_jwt_wallet_claims(
         return Err(anyhow!("JWT agent_index claim does not match request"));
     }
 
-    // H-4-lite: structural exp/iat check (no trusted clock available in TA mock mode,
-    // but we can reject obviously invalid JWTs: exp must be after iat, within TTL cap).
+    // Structural exp/iat check: exp must be after iat and within the TTL cap.
     let iat = extract_json_u64_field(payload_str, "iat")?;
     let exp = extract_json_u64_field(payload_str, "exp")?;
     if exp <= iat || exp.saturating_sub(iat) > MAX_AGENT_JWT_TTL as u64 {
         return Err(anyhow!("JWT exp/iat structurally invalid or exceeds TTL cap"));
+    }
+
+    // #15: runtime expiry check against the TEE-side trusted clock. tee_unix_secs()
+    // reads REE time via optee_utee::Time::ree_time() — the same trusted-time source
+    // the #49 challenge-binding TTL already relies on (the old "no trusted clock in
+    // mock mode" note was stale). Reject a JWT whose exp is at/before now. Guard on
+    // now > 0 so a mock/uninitialized clock (returns 0) skips the check rather than
+    // rejecting every token; on real hardware ree_time is a valid unix timestamp.
+    let now = tee_unix_secs();
+    if now > 0 {
+        if now as u64 >= exp {
+            return Err(anyhow!("JWT expired (now {} >= exp {})", now, exp));
+        }
+    } else {
+        // Observability: the REE clock returned <= 0 (mock/uninitialized or a
+        // fault). We skip the runtime expiry check rather than reject every
+        // token, but surface it — a PERSISTENT now<=0 on real hardware means JWT
+        // expiry is silently NOT being enforced and must be investigated.
+        trace_println!(
+            "[!] #15: TEE REE clock returned {} (<=0); JWT runtime expiry NOT enforced this call",
+            now
+        );
     }
 
     Ok(())
