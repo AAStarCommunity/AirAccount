@@ -42,6 +42,7 @@
 | `/CreateKey` | POST | ✅ | U | ✅ |
 | `/KeyStatus` | GET | ✅ | | ✅ |
 | `/DeleteKey`(ScheduleKeyDeletion) | POST 🔒 | ✅ | U | ✅ |
+| `/UnfreezeKey` (#42) | POST 🔒 | ✅ (test-freeze-unfreeze.sh 5/5) | U | ✅ |
 | `/ListKeys` | POST | ✅ | | ✅ |
 | `/DescribeKey` | POST | ✅ | | ✅ |
 | `/GetPublicKey` | POST | ✅ | | ✅ |
