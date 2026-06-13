@@ -2,7 +2,7 @@
 
 > Updated: 2026-06-13
 
-## Unreleased — Beta3 (security)
+## 0.21.0 (2026-06-13) — Beta3 — 安全加固 + 生态对齐
 
 **Issue #49 (H-2)：WebAuthn challenge binding 下沉到 TA，防 assertion 重放**
 
@@ -18,6 +18,25 @@
 - 关闭 H-2 重放窗口：即使 CA 被攻陷，捕获的 assertion 也无法重放（nonce 一次性 + TA 内消费 + JSON↔hash 绑定 + TTL）
 - 过渡兼容：`ENFORCE_TA_CHALLENGE=false` 时，无 `client_data_json` 的旧 assertion 走 legacy ECDSA-only 路径（带告警 + 清除残留 nonce）；迁移完成后翻到 strict
 - ⚠️ proto bincode 线格式变更：host 与 TA 必须同版本一起部署（bincode 非自描述，`serde(default)` 不提供跨版本兼容）
+
+### 新增 (Features) — 其余 Beta3 内容
+- **#42 密钥生命周期(freeze/unfreeze)**：久置 key 后台 sweep 自动 `frozen`；owner WebAuthn ceremony `POST /UnfreezeKey` 解冻；`last_used_at`(查 tx_log，关联主/派生地址)；9 个签名操作前 `ensure_not_frozen` gate。去中心化定位：无 admin / 无 pending_delete，owner 自主
+- **#52 GToken `from` 地址绑定**：`SignGTokenAuthorization` 校验 `from` == keyId+hdPath 派生地址，防 EIP-3009 链上 `ecrecover != from` revert（白烧 gas）；X402 / Micropayment 无签名者地址字段，不受影响
+- **#15 TA 侧 JWT 运行时过期检查**：`verify_jwt_wallet_claims` 用 `tee_unix_secs()`(trusted TEE time source) 拒绝 `exp <= now`
+- **#21 EIP-712 domain 对齐**：MicroPaymentChannel domain version `1`→`1.0.0`（对齐合约）
+
+### 安全 (Security) — 其余 Beta3 内容
+- **#59 admin 编译期门控**：`/admin/purge-key` 移到 compile-time feature `admin-purge`，正式 release 零 admin surface（二进制无 admin symbol，物理不存在；`scripts/security-check.sh` CI 门）
+- **MAX_WALLETS 100→30000**：M-4 storage-DoS 上限过保守（实测 100 wallet 仅 476K，板子 1.4G 空闲），提到生产容量(~140MB，硬 DoS 天花板)；wallet 永在 REE-FS，不受 RPMB/ELE 约束
+- **DoS-on-nonce 修复**：#49 challenge nonce 改 peek → 验证 → 成功才 consume，携带错误 challenge 的请求不再烧掉受害者合法 nonce
+- **#49 nonce 跨 TA 线程 flaky 修复**：pending nonce 表从 `thread_local` 改进程级 `static`（OP-TEE 跨 InvokeCommand 换线程会丢 thread_local），消除间歇性 "No pending challenge"
+- **未匹配路径返回 404**：`handle_rejection` 对未知路径返回 404 而非 500（admin 编译掉后访问应读作"无此端点"）
+- **#53 cla.yml SHA-pin**：GitHub Action pin 到 commit SHA（供应链加固）
+- 外部 4-round PK review（DeepSeek / Sonnet / Codex / Opus）+ Codex 多轮对抗审查，全部 **APPROVED**
+
+### 测试 (Testing) — Beta3
+- 真机 FRDM-IMX93：E2E **40/40**、防重放/DoS **4/4**、freeze/unfreeze **5/5**、host 单元 **63/63**、proto 单元 42
+- mainnet 前置追踪 **issue #63**（grant-session TA binding + `ENFORCE_TA_CHALLENGE` flip）
 
 ## 0.20.0 (2026-06-12) — Beta2
 
