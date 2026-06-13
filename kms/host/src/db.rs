@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     sign_count      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'creating',
     error_msg       TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    lifecycle_status TEXT NOT NULL DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS address_index (
@@ -271,6 +272,37 @@ impl KmsDb {
                 }
             }
         }
+        // Migration: add lifecycle_status column to wallets for DBs created before
+        // issue #42 (dormant-key freeze). Same idempotent PRAGMA-check + ALTER pattern
+        // as tee_deleted above. Existing rows default to 'active'.
+        {
+            let check_col_exists = |c: &Connection| -> Result<bool> {
+                let mut stmt = c
+                    .prepare("PRAGMA table_info(wallets)")
+                    .context("Failed to query wallets schema")?;
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<_>>()
+                    .context("Failed to read wallets schema")?;
+                Ok(names.iter().any(|n| n == "lifecycle_status"))
+            };
+            if !check_col_exists(&conn)? {
+                match conn.execute_batch(
+                    "ALTER TABLE wallets \
+                     ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active';",
+                ) {
+                    Ok(()) => {}
+                    Err(alter_err) => {
+                        // Re-verify: concurrent process may have added the column between
+                        // our check and the ALTER. Only propagate if column still absent.
+                        if !check_col_exists(&conn).context("Re-check after ALTER TABLE failure")? {
+                            return Err(alter_err)
+                                .context("Failed to add lifecycle_status column to wallets");
+                        }
+                    }
+                }
+            }
+        }
         println!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -446,6 +478,99 @@ impl KmsDb {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ── Key lifecycle (issue #42: dormant-key freeze) ──
+
+    /// Last successful operation timestamp for a key, derived from tx_log
+    /// (no dedicated column — the data already lives there). Returns the RFC3339
+    /// string of MAX(created_at) over successful tx_log rows for this key, or
+    /// None if the key has never had a successful logged operation.
+    ///
+    /// A tx_log row may identify the key by `key_id` OR by signing `addr` (the
+    /// address-based Sign/SignHash paths log only the address). We therefore
+    /// match on key_id, the wallet's primary address, AND any derived address in
+    /// address_index — otherwise an actively-used address-mode key would look
+    /// dormant and get wrongly frozen.
+    pub fn last_used_at(&self, key_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        // MAX over a TEXT column returns NULL when no rows match; map to None.
+        let v: Option<String> = conn
+            .query_row(
+                "SELECT MAX(created_at) FROM tx_log WHERE success=1 AND ( \
+                   key_id=?1 \
+                   OR addr=(SELECT address FROM wallets WHERE key_id=?1) \
+                   OR addr IN (SELECT address FROM address_index WHERE key_id=?1) \
+                 )",
+                params![key_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .context("last_used_at")?;
+        Ok(v)
+    }
+
+    /// Current lifecycle_status for a key ('active' | 'frozen'), or None if the
+    /// key_id does not exist.
+    pub fn get_lifecycle_status(&self, key_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT lifecycle_status FROM wallets WHERE key_id=?1")?;
+        let mut rows = stmt.query_map(params![key_id], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Set lifecycle_status for a key. Returns true if a row was updated.
+    pub fn set_lifecycle_status(&self, key_id: &str, status: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE wallets SET lifecycle_status=?2 WHERE key_id=?1",
+            params![key_id, status],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Auto-freeze dormant keys: set lifecycle_status='frozen' for every currently
+    /// 'active' wallet whose last successful activity is older than `threshold_secs`.
+    /// "Last activity" = the most recent successful tx_log row for the key, falling
+    /// back to the wallet's created_at when it has no successful operations yet (so a
+    /// freshly created, never-signed key is not frozen until it has genuinely aged).
+    /// Returns the list of key_ids that were frozen.
+    pub fn freeze_dormant_keys(&self, now_unix: i64, threshold_secs: i64) -> Result<Vec<String>> {
+        let cutoff = now_unix - threshold_secs;
+        let conn = self.lock();
+        // created_at (wallets + tx_log) is RFC3339 text; strftime('%s', ...) parses it
+        // to a unix epoch for comparison. COALESCE picks the latest signing activity,
+        // falling back to wallet creation time.
+        // Match tx_log rows by key_id OR by signing address (primary or derived),
+        // mirroring last_used_at — an address-mode Sign logs only `addr`, so a
+        // key_id-only join would miss active use and freeze a live key.
+        let mut stmt = conn.prepare(
+            "SELECT w.key_id FROM wallets w \
+             WHERE w.lifecycle_status='active' \
+               AND COALESCE( \
+                     (SELECT CAST(strftime('%s', MAX(t.created_at)) AS INTEGER) \
+                        FROM tx_log t WHERE t.success=1 AND ( \
+                          t.key_id=w.key_id \
+                          OR t.addr=w.address \
+                          OR t.addr IN (SELECT address FROM address_index ai WHERE ai.key_id=w.key_id) \
+                        )), \
+                     CAST(strftime('%s', w.created_at) AS INTEGER) \
+                   ) < ?1",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![cutoff], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for id in &ids {
+            conn.execute(
+                "UPDATE wallets SET lifecycle_status='frozen' \
+                 WHERE key_id=?1 AND lifecycle_status='active'",
+                params![id],
+            )?;
+        }
+        Ok(ids)
     }
 
     // ── Address index ──
@@ -1430,5 +1555,100 @@ mod tests {
         assert!(db.consume_challenge("c-valid").unwrap().is_some());
         // Expired one was cleaned up
         assert!(db.consume_challenge("c-expired").unwrap().is_none());
+    }
+
+    // ── Issue #42: dormant-key freeze + last_used_at ──
+
+    #[test]
+    fn lifecycle_status_defaults_active_and_round_trips() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-lc")).unwrap();
+        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("active"));
+        assert!(db.set_lifecycle_status("w-lc", "frozen").unwrap());
+        assert_eq!(db.get_lifecycle_status("w-lc").unwrap().as_deref(), Some("frozen"));
+        // Unknown key -> None
+        assert!(db.get_lifecycle_status("nope").unwrap().is_none());
+        assert!(!db.set_lifecycle_status("nope", "active").unwrap());
+    }
+
+    #[test]
+    fn last_used_at_none_then_some() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-lu")).unwrap();
+        // No tx_log rows yet.
+        assert!(db.last_used_at("w-lu").unwrap().is_none());
+        // A failed op does not count.
+        db.record_tx("Sign", Some("w-lu"), None, false, 5, false, false)
+            .unwrap();
+        assert!(db.last_used_at("w-lu").unwrap().is_none());
+        // A successful op sets it.
+        db.record_tx("Sign", Some("w-lu"), None, false, 5, true, false)
+            .unwrap();
+        assert!(db.last_used_at("w-lu").unwrap().is_some());
+    }
+
+    #[test]
+    fn freeze_dormant_by_created_at_fallback() {
+        let db = test_db();
+        // sample_wallet created_at is 2026-03-02 (well in the past relative to now).
+        db.insert_wallet(&sample_wallet("w-old")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Threshold of 1 day: the never-used, old key is dormant -> frozen.
+        let frozen = db.freeze_dormant_keys(now, 24 * 60 * 60).unwrap();
+        assert_eq!(frozen, vec!["w-old".to_string()]);
+        assert_eq!(db.get_lifecycle_status("w-old").unwrap().as_deref(), Some("frozen"));
+    }
+
+    #[test]
+    fn freeze_skips_recently_used_keys() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-active")).unwrap();
+        // Recent successful op (record_tx stamps now).
+        db.record_tx("Sign", Some("w-active"), None, false, 5, true, false)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Even with a 1-second threshold, the just-now activity keeps it active.
+        let frozen = db.freeze_dormant_keys(now, 1).unwrap();
+        assert!(frozen.is_empty());
+        assert_eq!(db.get_lifecycle_status("w-active").unwrap().as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn freeze_is_idempotent_and_skips_already_frozen() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-f")).unwrap();
+        db.set_lifecycle_status("w-f", "frozen").unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Already frozen -> not returned again.
+        let frozen = db.freeze_dormant_keys(now, 1).unwrap();
+        assert!(frozen.is_empty());
+    }
+
+    #[test]
+    fn freeze_skips_address_mode_recently_used() {
+        // Regression (codex review): address-based Sign/SignHash log activity by
+        // `addr` with key_id=None. last_used_at / freeze_dormant_keys must still
+        // credit that activity to the wallet via its address (primary or derived),
+        // otherwise an actively-used address-mode key looks dormant and is wrongly
+        // frozen.
+        let db = test_db();
+        let mut w = sample_wallet("w-addr");
+        w.address = Some("0xdeadbeef00000000000000000000000000000000".to_string());
+        db.insert_wallet(&w).unwrap();
+        // Recent op recorded by ADDRESS only (no key_id) — the address-mode path.
+        db.record_tx("Sign", None, w.address.as_deref(), false, 5, true, false)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Even a 1-second threshold must not freeze it: the address activity counts.
+        let frozen = db.freeze_dormant_keys(now, 1).unwrap();
+        assert!(frozen.is_empty(), "address-mode activity must keep the key active");
+        assert_eq!(
+            db.get_lifecycle_status("w-addr").unwrap().as_deref(),
+            Some("active")
+        );
+        assert!(
+            db.last_used_at("w-addr").unwrap().is_some(),
+            "last_used_at must see the address-mode op"
+        );
     }
 }

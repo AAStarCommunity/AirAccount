@@ -109,6 +109,22 @@ impl TaClient {
         Ok(())
     }
 
+    /// Issue #49: request a fresh one-time WebAuthn challenge nonce from the TA.
+    ///
+    /// The returned 32-byte nonce MUST be used as the WebAuthn `challenge`
+    /// presented to the browser, so the value the authenticator signs is the one
+    /// the TA can later verify and consume. The TA binds the nonce to `wallet_id`.
+    pub fn get_challenge(&mut self, wallet_id: uuid::Uuid) -> Result<Vec<u8>> {
+        let input = proto::GetChallengeInput { wallet_id };
+        let serialized_input =
+            bincode::serialize(&input).context("Failed to serialize GetChallengeInput")?;
+        let serialized_output =
+            self.invoke_command(proto::Command::GetChallenge, &serialized_input)?;
+        let output: proto::GetChallengeOutput = bincode::deserialize(&serialized_output)
+            .context("Failed to deserialize GetChallengeOutput")?;
+        Ok(output.nonce)
+    }
+
     /// Derive an Ethereum address from the wallet using HD path
     /// Returns 20-byte Ethereum address
     pub fn derive_address(
@@ -552,6 +568,19 @@ impl TeeHandle {
         .context("Failed to serialize RemoveWalletInput")?;
         self.call(proto::Command::RemoveWallet, input).await?;
         Ok(())
+    }
+
+    /// Issue #49: request a fresh one-time WebAuthn challenge nonce from the TA.
+    /// Returns 32 bytes. Use as the WebAuthn challenge so the TA can verify and
+    /// consume it on the subsequent signing assertion (anti-replay). Requires
+    /// TA with GetChallenge = 25; older TAs return "Unsupported command".
+    pub async fn get_challenge(&self, wallet_id: uuid::Uuid) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::GetChallengeInput { wallet_id })
+            .context("Failed to serialize GetChallengeInput")?;
+        let out = self.call(proto::Command::GetChallenge, input).await?;
+        let output: proto::GetChallengeOutput =
+            bincode::deserialize(&out).context("Failed to deserialize GetChallengeOutput")?;
+        Ok(output.nonce)
     }
 
     /// Force-remove a gap key from TEE secure storage.
