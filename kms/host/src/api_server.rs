@@ -1648,6 +1648,17 @@ impl KmsApiServer {
     /// lifecycle_status is 'frozen'. Unknown/missing keys and 'active' keys pass
     /// through (callers do their own existence checks). This is a soft CA-layer
     /// gate, not a TEE-enforced lock — the private key material is untouched.
+    ///
+    /// TOCTOU note: this check and the subsequent TEE call are not atomic with the
+    /// background dormant-sweep, so a sign that passes here can race a concurrent
+    /// freeze and still complete. This is acceptable by design: (a) freeze is a
+    /// dormancy re-verification gate, not key-security enforcement, and the sign is
+    /// already authorized by a live WebAuthn ceremony; (b) a key being signed right
+    /// now is by definition active — the sign records a tx_log row that updates
+    /// last_used_at, so the sweep will not re-select it; (c) the TEE has already
+    /// produced the signature by the time any post-check could run, so it cannot be
+    /// rolled back. The only observable effect of losing the race is that the key is
+    /// frozen *after* this one signature and the next sign needs an UnfreezeKey.
     fn ensure_not_frozen(&self, key_id: &str) -> Result<()> {
         if let Some(status) = self.db.get_lifecycle_status(key_id)? {
             if status == "frozen" {

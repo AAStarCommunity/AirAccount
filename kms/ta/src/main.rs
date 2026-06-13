@@ -316,11 +316,25 @@ struct PendingChallenge {
 /// static rather than a `thread_local` (flaky "No pending challenge", #49/#61).
 struct GlobalChallenges(core::cell::UnsafeCell<Vec<PendingChallenge>>);
 
-// SAFETY: every TA InvokeCommand is funneled through the host's single-worker
-// queue (ta_client.rs), so invocations are strictly serial — there is never
-// concurrent access to this cell. The only access path is `with_pending`, which
-// confines the `&mut` to a single synchronous closure and never lets it escape
-// across an InvokeCommand boundary, so no aliasing `&mut` can ever exist.
+// SAFETY: this cell is only ever accessed serially, for two independent reasons
+// rooted in the OP-TEE / GP execution model — NOT in any host-side discipline
+// (the CA's single-worker queue is merely an additional Rust-side serialization,
+// not what makes this sound):
+//   1. Same session: GP TEE Client API `TEEC_InvokeCommand` is a BLOCKING call,
+//      so a client cannot have two in-flight commands on one session — commands
+//      on a given session are inherently serial. The KMS CA uses ONE persistent
+//      session (ta_client.rs keeps it open to avoid the ~4.4s per-open cost), so
+//      all real traffic flows through that single session.
+//   2. Different sessions: this TA is built with default properties
+//      (TA_FLAGS = 0 → gpd.ta.singleInstance = false), so EACH session gets its
+//      own TA instance in its own address space — a second session has its own
+//      copy of this static and cannot alias the first session's cell.
+// In both cases no two threads ever hold a `&mut` to the SAME cell; `with_pending`
+// further confines the `&mut` to one synchronous closure that never escapes across
+// an InvokeCommand boundary. (If the TA were ever rebuilt as singleInstance +
+// multiSession, this reasoning breaks and an explicit TA-side lock would be
+// required; the build uses default flags today and ta.json is absent, so it is
+// not.)
 unsafe impl Sync for GlobalChallenges {}
 
 static PENDING_CHALLENGES: GlobalChallenges =

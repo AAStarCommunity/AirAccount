@@ -484,14 +484,24 @@ impl KmsDb {
 
     /// Last successful operation timestamp for a key, derived from tx_log
     /// (no dedicated column — the data already lives there). Returns the RFC3339
-    /// string of MAX(created_at) over successful tx_log rows for this key_id, or
+    /// string of MAX(created_at) over successful tx_log rows for this key, or
     /// None if the key has never had a successful logged operation.
+    ///
+    /// A tx_log row may identify the key by `key_id` OR by signing `addr` (the
+    /// address-based Sign/SignHash paths log only the address). We therefore
+    /// match on key_id, the wallet's primary address, AND any derived address in
+    /// address_index — otherwise an actively-used address-mode key would look
+    /// dormant and get wrongly frozen.
     pub fn last_used_at(&self, key_id: &str) -> Result<Option<String>> {
         let conn = self.lock();
         // MAX over a TEXT column returns NULL when no rows match; map to None.
         let v: Option<String> = conn
             .query_row(
-                "SELECT MAX(created_at) FROM tx_log WHERE key_id=?1 AND success=1",
+                "SELECT MAX(created_at) FROM tx_log WHERE success=1 AND ( \
+                   key_id=?1 \
+                   OR addr=(SELECT address FROM wallets WHERE key_id=?1) \
+                   OR addr IN (SELECT address FROM address_index WHERE key_id=?1) \
+                 )",
                 params![key_id],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -533,12 +543,19 @@ impl KmsDb {
         // created_at (wallets + tx_log) is RFC3339 text; strftime('%s', ...) parses it
         // to a unix epoch for comparison. COALESCE picks the latest signing activity,
         // falling back to wallet creation time.
+        // Match tx_log rows by key_id OR by signing address (primary or derived),
+        // mirroring last_used_at — an address-mode Sign logs only `addr`, so a
+        // key_id-only join would miss active use and freeze a live key.
         let mut stmt = conn.prepare(
             "SELECT w.key_id FROM wallets w \
              WHERE w.lifecycle_status='active' \
                AND COALESCE( \
                      (SELECT CAST(strftime('%s', MAX(t.created_at)) AS INTEGER) \
-                        FROM tx_log t WHERE t.key_id=w.key_id AND t.success=1), \
+                        FROM tx_log t WHERE t.success=1 AND ( \
+                          t.key_id=w.key_id \
+                          OR t.addr=w.address \
+                          OR t.addr IN (SELECT address FROM address_index ai WHERE ai.key_id=w.key_id) \
+                        )), \
                      CAST(strftime('%s', w.created_at) AS INTEGER) \
                    ) < ?1",
         )?;
@@ -1605,5 +1622,33 @@ mod tests {
         // Already frozen -> not returned again.
         let frozen = db.freeze_dormant_keys(now, 1).unwrap();
         assert!(frozen.is_empty());
+    }
+
+    #[test]
+    fn freeze_skips_address_mode_recently_used() {
+        // Regression (codex review): address-based Sign/SignHash log activity by
+        // `addr` with key_id=None. last_used_at / freeze_dormant_keys must still
+        // credit that activity to the wallet via its address (primary or derived),
+        // otherwise an actively-used address-mode key looks dormant and is wrongly
+        // frozen.
+        let db = test_db();
+        let mut w = sample_wallet("w-addr");
+        w.address = Some("0xdeadbeef00000000000000000000000000000000".to_string());
+        db.insert_wallet(&w).unwrap();
+        // Recent op recorded by ADDRESS only (no key_id) — the address-mode path.
+        db.record_tx("Sign", None, w.address.as_deref(), false, 5, true, false)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Even a 1-second threshold must not freeze it: the address activity counts.
+        let frozen = db.freeze_dormant_keys(now, 1).unwrap();
+        assert!(frozen.is_empty(), "address-mode activity must keep the key active");
+        assert_eq!(
+            db.get_lifecycle_status("w-addr").unwrap().as_deref(),
+            Some("active")
+        );
+        assert!(
+            db.last_used_at("w-addr").unwrap().is_some(),
+            "last_used_at must see the address-mode op"
+        );
     }
 }
