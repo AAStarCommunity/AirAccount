@@ -1,0 +1,706 @@
+# AirAccount KMS — OpenAPI 3.1 specification
+# Generated: 2026-06-13 · Version 0.20.0 (Beta2)
+# Render with Swagger UI: open kms/docs/api/index.html
+# Test coverage per endpoint: see `x-tested` + kms/docs/API-TEST-MATRIX.md
+openapi: 3.1.0
+info:
+  title: AirAccount KMS API
+  version: 0.20.0
+  summary: TEE private-key management · WebAuthn · AWS KMS-compatible
+  description: |
+    AirAccount KMS manages secp256k1 / P-256 keys inside an OP-TEE TrustZone secure world.
+    **Private keys never leave the TEE.** Every signing operation requires either a live,
+    replay-protected **WebAuthn ceremony** or a TEE-issued **agent JWT**.
+
+    ## Auth models
+    - **API key** (`x-api-key` header) — gates most endpoints (open mode if no keys registered).
+    - **AWS-KMS style** — root POST endpoints require an `x-amz-target: TrentService.<Op>` header.
+    - **WebAuthn ceremony** (`WebAuthn`/`webAuthnAssertion` in body) — challenge-bound, replay-proof
+      proof of user presence. Obtain the challenge from `/BeginAuthentication` (or
+      `/kms/begin-grant-session-auth` for grant-session purpose).
+    - **Agent JWT** (`Authorization: Bearer <jwt>`) — TEE-HMAC'd credential from create-agent-key /
+      create-p256-session-key, scoped to one derivation path.
+    - Legacy raw `Passkey` assertions are accepted on some endpoints but **rejected** on
+      sign-typed-data / grant-session (no challenge binding → replay risk).
+
+    ## Test coverage
+    Every functional endpoint is covered by the real-device E2E suite
+    (`kms/test/run-full-e2e.sh`, FRDM-IMX93) and/or the API chain test
+    (`kms/test/run-api-tests.sh`). See the `x-tested` extension on each operation and the
+    full matrix in `kms/docs/API-TEST-MATRIX.md`.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: AAStarCommunity
+    url: https://github.com/AAStarCommunity/AirAccount
+
+servers:
+  - url: https://kms.aastar.io
+    description: Production (Cloudflare Tunnel)
+  - url: http://127.0.0.1:3000
+    description: Local / on-device
+
+tags:
+  - name: Infrastructure
+    description: Health, version, diagnostics, dashboards (no auth)
+  - name: Wallet Lifecycle
+    description: Create / status / delete keys
+  - name: Metadata
+    description: List / describe / public-key queries
+  - name: Signing
+    description: Derive address, sign hash / message / transaction (WebAuthn-gated)
+  - name: Passkey
+    description: Rotate the WebAuthn passkey bound to a key
+  - name: WebAuthn Ceremony
+    description: Registration / authentication challenge flows
+  - name: Agent Keys
+    description: TEE-JWT agent credentials (create / sign / refresh / revoke)
+  - name: EIP-712 & SuperPaymaster
+    description: Typed-data signing + gasless payment convenience signers
+  - name: Grant Sessions
+    description: SessionKeyValidator GRANT_SESSION_V2 signing (secp256k1 / P-256)
+  - name: P256 Sessions
+    description: P-256 session keys for ERC-4337 UserOps
+  - name: Admin
+    description: Operator-only force operations (KMS_ADMIN_TOKEN)
+
+security:
+  - ApiKey: []
+
+paths:
+  # ───────────────────────── Infrastructure ─────────────────────────
+  /health:
+    get:
+      tags: [Infrastructure]
+      summary: Service health probe
+      security: []
+      responses:
+        '200': { description: Healthy, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+      x-tested: { e2e: "run-full-e2e.sh §1", status: "✅ verified (34/34)" }
+  /version:
+    get:
+      tags: [Infrastructure]
+      summary: Version + ta_mode + endpoint list
+      security: []
+      responses:
+        '200': { description: Version info, content: { application/json: { schema: { type: object } } } }
+      x-tested: { e2e: "run-full-e2e.sh §1", status: "✅ verified (34/34)" }
+  /QueueStatus:
+    get:
+      tags: [Infrastructure]
+      summary: TEE call queue depth + circuit-breaker state
+      security: []
+      responses:
+        '200': { description: Queue status, content: { application/json: { schema: { $ref: '#/components/schemas/QueueStatus' } } } }
+      x-tested: { e2e: "run-full-e2e.sh §1", status: "✅ verified (34/34)" }
+  /RollbackCounter:
+    get:
+      tags: [Infrastructure]
+      summary: RPMB anti-rollback monotonic counter (diagnostic)
+      security: []
+      responses:
+        '200': { description: Counter value, content: { application/json: { schema: { type: object, properties: { counter: { type: integer, format: int64 } } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §1", status: "✅ verified (34/34)" }
+  /stats:
+    get:
+      tags: [Infrastructure]
+      summary: Machine-readable stats (wallets, tx, queue, warnings)
+      security: []
+      parameters:
+        - { name: pretty, in: query, required: false, schema: { type: string }, description: "1 / true → indented JSON" }
+      responses:
+        '200': { description: Stats JSON, content: { application/json: { schema: { type: object } } } }
+      x-tested: { e2e: "run-full-e2e.sh §1 (added v0.20.0)", status: "✅ verified (39/39)" }
+  /:
+    get:
+      tags: [Infrastructure]
+      summary: HTML stats dashboard
+      security: []
+      responses:
+        '200': { description: HTML page, content: { text/html: {} } }
+      x-tested: { e2e: "run-full-e2e.sh §1 (added v0.20.0)", status: "✅ verified (39/39)" }
+  /test:
+    get:
+      tags: [Infrastructure]
+      summary: Interactive HTML test UI
+      security: []
+      responses:
+        '200': { description: HTML page, content: { text/html: {} } }
+      x-tested: { e2e: "run-full-e2e.sh §1 (added v0.20.0)", status: "✅ verified (39/39)" }
+
+  # ───────────────────────── Wallet Lifecycle ─────────────────────────
+  /CreateKey:
+    post:
+      tags: [Wallet Lifecycle]
+      summary: Create a key (TEE generates entropy; private key never leaves TEE)
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateKeyRequest' } } } }
+      responses:
+        '200': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/CreateKeyResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §2", unit: "request_deser_tests", status: "✅ verified (34/34)" }
+  /KeyStatus:
+    get:
+      tags: [Wallet Lifecycle]
+      summary: Poll async key creation/derivation status
+      parameters: [{ name: KeyId, in: query, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Status, content: { application/json: { schema: { $ref: '#/components/schemas/KeyStatusResponse' } } } }
+      x-tested: { e2e: "run-full-e2e.sh §2", status: "✅ verified (34/34)" }
+  /DeleteKey:
+    post:
+      tags: [Wallet Lifecycle]
+      summary: Schedule key deletion (AWS-KMS action ScheduleKeyDeletion); WebAuthn-gated
+      description: "x-amz-target MUST be `TrentService.ScheduleKeyDeletion`. Gap keys (invalid passkey) are force-removed without ceremony."
+      parameters: [{ name: x-amz-target, in: header, required: true, schema: { type: string, enum: ["TrentService.ScheduleKeyDeletion"] } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteKeyRequest' } } } }
+      responses:
+        '200': { description: Scheduled, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteKeyResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §8", unit: "delete_key_request_minimal_webauthn", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── Metadata ─────────────────────────
+  /ListKeys:
+    post:
+      tags: [Metadata]
+      summary: List keys (paginated)
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/ListKeysRequest' } } } }
+      responses: { '200': { description: Key list, content: { application/json: { schema: { type: object } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §3", status: "✅ verified (34/34)" }
+  /DescribeKey:
+    post:
+      tags: [Metadata]
+      summary: Get key metadata
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyIdBody' } } } }
+      responses:
+        '200': { description: Metadata, content: { application/json: { schema: { type: object, properties: { KeyMetadata: { $ref: '#/components/schemas/KeyMetadata' } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §3", status: "✅ verified (34/34)" }
+  /GetPublicKey:
+    post:
+      tags: [Metadata]
+      summary: Get the key's public key
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyIdBody' } } } }
+      responses: { '200': { description: Public key, content: { application/json: { schema: { type: object } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §3", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── Signing ─────────────────────────
+  /DeriveAddress:
+    post:
+      tags: [Signing]
+      summary: Derive an Ethereum address at a BIP-44 path (WebAuthn-gated)
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeriveAddressRequest' } } } }
+      responses:
+        '200': { description: Address + pubkey, content: { application/json: { schema: { $ref: '#/components/schemas/DeriveAddressResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §4", unit: "derive_address_request_webauthn", status: "✅ verified (34/34)" }
+  /SignHash:
+    post:
+      tags: [Signing]
+      summary: Sign a 32-byte digest (WebAuthn-gated)
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignHashRequest' } } } }
+      responses:
+        '200': { description: Signature, content: { application/json: { schema: { type: object, properties: { Signature: { type: string } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §4", api: "run-api-tests.sh (+ bad-sig negative)", status: "✅ verified (34/34)" }
+  /Sign:
+    post:
+      tags: [Signing]
+      summary: Sign a message or an EIP-155 transaction (WebAuthn-gated)
+      description: "Provide exactly one of `Message` (hex) or `Transaction`. Lookup by `KeyId`+`DerivationPath` or by `Address`."
+      parameters: [{ $ref: '#/components/parameters/AmzTarget' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignRequest' } } } }
+      responses:
+        '200': { description: Signature (+ tx hash for transactions), content: { application/json: { schema: { $ref: '#/components/schemas/SignResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §4 (message ✅; transaction added v0.20.0)", api: "run-api-tests.sh (transaction)", status: "✅ verified (39/39, message + transaction)" }
+
+  # ───────────────────────── Passkey ─────────────────────────
+  /ChangePasskey:
+    post:
+      tags: [Passkey]
+      summary: Rotate the WebAuthn passkey bound to a key (WebAuthn-gated, RPMB-bound)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChangePasskeyRequest' } } } }
+      responses:
+        '200': { description: Changed, content: { application/json: { schema: { type: object, properties: { KeyId: { type: string }, Changed: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §5 (isolated key)", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── WebAuthn Ceremony ─────────────────────────
+  /BeginRegistration:
+    post:
+      tags: [WebAuthn Ceremony]
+      summary: Start a WebAuthn registration ceremony (returns challenge)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { UserName: { type: string }, UserDisplayName: { type: string } } } } } }
+      responses: { '200': { description: ChallengeId + PublicKeyCredentialCreationOptions, content: { application/json: { schema: { type: object } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §6", status: "✅ verified (34/34)" }
+  /CompleteRegistration:
+    post:
+      tags: [WebAuthn Ceremony]
+      summary: Complete registration with an attestation response → new key
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { ChallengeId: { type: string }, Credential: { type: object } } } } } }
+      responses:
+        '200': { description: KeyId + CredentialId, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §6 (hand-built 'none' attestation w/ COSE P-256)", status: "✅ verified (34/34)" }
+  /BeginAuthentication:
+    post:
+      tags: [WebAuthn Ceremony]
+      summary: Start an authentication ceremony for a key (returns challenge)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyIdBody' } } } }
+      responses: { '200': { description: ChallengeId + options, content: { application/json: { schema: { type: object } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §6 (drives every ceremony)", status: "✅ verified (34/34)" }
+  /kms/begin-grant-session-auth:
+    get:
+      tags: [WebAuthn Ceremony]
+      summary: Start a purpose='grant-session' challenge (for grant-session signing)
+      parameters: [{ name: keyId, in: query, required: true, schema: { type: string } }]
+      responses: { '200': { description: ChallengeId + options, content: { application/json: { schema: { type: object } } } } }
+      x-tested: { e2e: "run-full-e2e.sh §6", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── Agent Keys ─────────────────────────
+  /kms/create-agent-key:
+    post:
+      tags: [Agent Keys]
+      summary: Mint a TEE-JWT agent credential under a human key (WebAuthn-gated)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateAgentKeyRequest' } } } }
+      responses:
+        '200': { description: keyId + agentAddress + agentCredential(JWT), content: { application/json: { schema: { $ref: '#/components/schemas/CreateAgentKeyResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7b", status: "✅ verified (34/34) — TA panic fix validated" }
+  /kms/sign-agent:
+    post:
+      tags: [Agent Keys]
+      summary: Sign a userOpHash with an agent key (Bearer JWT)
+      security: [{ BearerJWT: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignAgentRequest' } } } }
+      responses:
+        '200': { description: 106-byte agent signature, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7b", status: "✅ verified (34/34)" }
+  /kms/refresh-agent-credential:
+    post:
+      tags: [Agent Keys]
+      summary: Refresh an agent JWT (Bearer JWT + WebAuthn)
+      security: [{ BearerJWT: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RefreshAgentCredentialRequest' } } } }
+      responses:
+        '200': { description: New agentCredential, content: { application/json: { schema: { $ref: '#/components/schemas/CreateAgentKeyResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7b", status: "✅ verified (34/34)" }
+  /kms/revoke-agent-credential:
+    post:
+      tags: [Agent Keys]
+      summary: Revoke an agent credential (WebAuthn-gated)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyIdWithAuth' } } } }
+      responses:
+        '200': { description: Revoked, content: { application/json: { schema: { type: object, properties: { success: { type: boolean }, revokedAt: { type: integer } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7b", status: "✅ verified (34/34)" }
+
+  # ─────────────────── EIP-712 & SuperPaymaster ───────────────────
+  /kms/SignTypedData:
+    post:
+      tags: [EIP-712 & SuperPaymaster]
+      summary: Sign arbitrary EIP-712 typed-data (WebAuthn ceremony OR agent JWT)
+      description: "Auth: Bearer agent-JWT OR `webAuthnAssertion`. Legacy passkey is rejected (replay risk)."
+      security: [{ BearerJWT: [] }, { ApiKey: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignTypedDataRequest' } } } }
+      responses:
+        '200': { description: 65-byte ECDSA signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { description: "No/invalid auth", $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c (positive) + §7 (no-auth→400)", api: "run-api-tests.sh (malformed/invalid HMAC negatives)", status: "✅ verified (34/34)" }
+  /kms/SignMicropaymentVoucher:
+    post:
+      tags: [EIP-712 & SuperPaymaster]
+      summary: Sign a MicroPaymentChannel Voucher (gasless micropayment)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignMicropaymentVoucherRequest' } } } }
+      responses:
+        '200': { description: Signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7d", status: "✅ verified (34/34)" }
+  /kms/SignGTokenAuthorization:
+    post:
+      tags: [EIP-712 & SuperPaymaster]
+      summary: Sign GToken EIP-3009 TransferWithAuthorization (gasless transfer)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignGTokenAuthorizationRequest' } } } }
+      responses:
+        '200': { description: Signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7d", status: "✅ verified (34/34)" }
+  /kms/SignX402Payment:
+    post:
+      tags: [EIP-712 & SuperPaymaster]
+      summary: Sign an x402 PaymentPayload (API/agent pay-per-call)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignX402PaymentRequest' } } } }
+      responses:
+        '200': { description: Signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7d (positive) + no-auth→400", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── Grant Sessions ─────────────────────────
+  /kms/sign-grant-session:
+    post:
+      tags: [Grant Sessions]
+      summary: Sign GRANT_SESSION_V2 for a secp256k1 session key (purpose-bound WebAuthn)
+      description: "Requires a challenge from /kms/begin-grant-session-auth (purpose='grant-session')."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignGrantSessionRequest' } } } }
+      responses:
+        '200': { description: 65-byte ECDSA signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c (positive) + §7 (no-auth→400)", status: "✅ verified (34/34)" }
+  /kms/sign-p256-grant-session:
+    post:
+      tags: [Grant Sessions]
+      summary: Sign GRANT_P256_SESSION_V2 for a P-256 session key (purpose-bound WebAuthn)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignP256GrantSessionRequest' } } } }
+      responses:
+        '200': { description: Signature, content: { application/json: { schema: { $ref: '#/components/schemas/SignatureResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── P256 Sessions ─────────────────────────
+  /kms/create-p256-session-key:
+    post:
+      tags: [P256 Sessions]
+      summary: Create a P-256 session key under a human key (WebAuthn-gated)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateP256SessionKeyRequest' } } } }
+      responses:
+        '200': { description: keyId + pubKeyX/Y + agentCredential, content: { application/json: { schema: { $ref: '#/components/schemas/CreateP256SessionKeyResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c", status: "✅ verified (34/34)" }
+  /kms/sign-p256-user-op:
+    post:
+      tags: [P256 Sessions]
+      summary: Sign an ERC-4337 UserOp hash with a P-256 session key (Bearer JWT)
+      security: [{ BearerJWT: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SignP256UserOpRequest' } } } }
+      responses:
+        '200': { description: 149-byte P-256 signature, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c", api: "run-api-tests.sh (149-byte format assert)", status: "✅ verified (34/34)" }
+  /kms/revoke-p256-session-key:
+    post:
+      tags: [P256 Sessions]
+      summary: Revoke a P-256 session key (WebAuthn-gated, idempotent)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyIdWithAuth' } } } }
+      responses:
+        '200': { description: Revoked, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7c", api: "run-api-tests.sh (no-WebAuthn→400, idempotent)", status: "✅ verified (34/34)" }
+
+  # ───────────────────────── Admin ─────────────────────────
+  /admin/purge-key:
+    post:
+      tags: [Admin]
+      summary: Force-purge a key from TEE + SQLite (operator only, no passkey)
+      description: "Requires `Authorization: Bearer $KMS_ADMIN_TOKEN`. Disabled if the env var is unset."
+      security: [{ AdminToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [key_id, reason], properties: { key_id: { type: string }, reason: { type: string } } } } } }
+      responses:
+        '200': { description: Purged, content: { application/json: { schema: { type: object } } } }
+        '400': { description: "Missing/invalid admin token, or env unset", $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "run-full-e2e.sh §7 (no-token→400, added v0.20.0)", status: "✅ negative verified (39/39); positive path is operator-manual (destructive)" }
+
+components:
+  securitySchemes:
+    ApiKey: { type: apiKey, in: header, name: x-api-key, description: "API key (open mode if no keys registered)" }
+    BearerJWT: { type: http, scheme: bearer, bearerFormat: JWT, description: "TEE-issued agent / session JWT" }
+    AdminToken: { type: http, scheme: bearer, description: "KMS_ADMIN_TOKEN operator secret" }
+  parameters:
+    AmzTarget:
+      name: x-amz-target
+      in: header
+      required: true
+      schema: { type: string }
+      description: "AWS-KMS style action, e.g. TrentService.CreateKey"
+  responses:
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error: { type: object, properties: { error: { type: string } } }
+    Health: { type: object, properties: { status: { type: string }, service: { type: string }, ta_mode: { type: string }, version: { type: string } } }
+    QueueStatus:
+      type: object
+      properties:
+        queue_depth: { type: integer }
+        estimated_wait_seconds: { type: integer }
+        circuit_breaker_open: { type: boolean }
+        consecutive_failures: { type: integer }
+    PasskeyAssertion:
+      type: object
+      description: Legacy raw passkey assertion (no challenge binding)
+      properties:
+        AuthenticatorData: { type: string, description: hex }
+        ClientDataHash: { type: string, description: "hex, SHA-256(clientDataJSON)" }
+        Signature: { type: string, description: "hex r||s (64B) or DER" }
+    WebAuthnAssertion:
+      type: object
+      description: Challenge-bound WebAuthn ceremony assertion
+      required: [ChallengeId, Credential]
+      properties:
+        ChallengeId: { type: string }
+        Credential: { type: object, description: WebAuthn AuthenticationResponseJSON }
+    KeyMetadata:
+      type: object
+      properties:
+        KeyId: { type: string }
+        Address: { type: string }
+        PublicKey: { type: string }
+        DerivationPath: { type: string }
+        Arn: { type: string }
+        CreationDate: { type: string, format: date-time }
+        Enabled: { type: boolean }
+        Description: { type: string }
+        KeyUsage: { type: string }
+        KeySpec: { type: string }
+        Origin: { type: string }
+        PasskeyPublicKey: { type: string }
+    KeyStatusResponse:
+      type: object
+      properties:
+        KeyId: { type: string }
+        Status: { type: string, enum: [creating, deriving, ready, error] }
+        Address: { type: string }
+        PublicKey: { type: string }
+        DerivationPath: { type: string }
+        Error: { type: string }
+    EthereumTransaction:
+      type: object
+      required: [chainId, nonce, to, value, gasPrice, gas, data]
+      properties:
+        chainId: { type: integer, format: int64 }
+        nonce: { type: integer, format: int64 }
+        to: { type: string, description: "0x… 20 bytes" }
+        value: { type: string, description: "uint256, 0x… or decimal" }
+        gasPrice: { type: string }
+        gas: { type: integer, format: int64 }
+        data: { type: string }
+    KeyIdBody: { type: object, required: [KeyId], properties: { KeyId: { type: string } } }
+    KeyIdWithAuth:
+      type: object
+      required: [keyId]
+      properties:
+        keyId: { type: string }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        passkeyAssertion: { $ref: '#/components/schemas/PasskeyAssertion' }
+    SignatureResponse: { type: object, properties: { keyId: { type: string }, signature: { type: string, description: "hex 65-byte R||S||V" } } }
+    CreateKeyRequest:
+      type: object
+      required: [KeyUsage, KeySpec, Origin, PasskeyPublicKey]
+      properties:
+        KeyId: { type: string }
+        Description: { type: string }
+        KeyUsage: { type: string, example: SIGN_VERIFY }
+        KeySpec: { type: string, example: ECC_SECG_P256K1 }
+        Origin: { type: string, example: AWS_KMS }
+        PasskeyPublicKey: { type: string, description: "hex 0x04… 65-byte uncompressed P-256" }
+    CreateKeyResponse: { type: object, properties: { KeyMetadata: { $ref: '#/components/schemas/KeyMetadata' }, Mnemonic: { type: string } } }
+    ListKeysRequest: { type: object, properties: { Limit: { type: integer }, Marker: { type: string } } }
+    DeleteKeyRequest:
+      type: object
+      required: [KeyId]
+      properties:
+        KeyId: { type: string }
+        PendingWindowInDays: { type: integer }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        Passkey: { $ref: '#/components/schemas/PasskeyAssertion' }
+    DeleteKeyResponse: { type: object, properties: { KeyId: { type: string }, DeletionDate: { type: string, format: date-time } } }
+    DeriveAddressRequest:
+      type: object
+      required: [KeyId, DerivationPath]
+      properties:
+        KeyId: { type: string }
+        DerivationPath: { type: string, example: "m/44'/60'/0'/0/0" }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        Passkey: { $ref: '#/components/schemas/PasskeyAssertion' }
+    DeriveAddressResponse: { type: object, properties: { Address: { type: string }, PublicKey: { type: string } } }
+    SignHashRequest:
+      type: object
+      required: [Hash]
+      properties:
+        KeyId: { type: string }
+        Address: { type: string }
+        DerivationPath: { type: string }
+        Hash: { type: string, description: "hex, exactly 32 bytes" }
+        SigningAlgorithm: { type: string }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        Passkey: { $ref: '#/components/schemas/PasskeyAssertion' }
+    SignRequest:
+      type: object
+      description: "Provide exactly one of Message or Transaction."
+      properties:
+        KeyId: { type: string }
+        Address: { type: string }
+        DerivationPath: { type: string }
+        Message: { type: string, description: hex }
+        Transaction: { $ref: '#/components/schemas/EthereumTransaction' }
+        SigningAlgorithm: { type: string }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        Passkey: { $ref: '#/components/schemas/PasskeyAssertion' }
+    SignResponse: { type: object, properties: { Signature: { type: string }, TransactionHash: { type: string } } }
+    ChangePasskeyRequest:
+      type: object
+      required: [KeyId, PasskeyPublicKey]
+      properties:
+        KeyId: { type: string }
+        PasskeyPublicKey: { type: string, description: "hex 0x04… 65 bytes" }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        Passkey: { $ref: '#/components/schemas/PasskeyAssertion' }
+    CreateAgentKeyRequest:
+      type: object
+      required: [humanKeyId]
+      properties:
+        humanKeyId: { type: string }
+        label: { type: string }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        passkeyAssertion: { $ref: '#/components/schemas/PasskeyAssertion' }
+    CreateAgentKeyResponse:
+      type: object
+      properties:
+        keyId: { type: string, description: "wallet_uuid:agent_index" }
+        agentAddress: { type: string }
+        derivationPath: { type: string }
+        agentCredential: { type: string, description: JWT }
+        expiresAt: { type: integer, format: int64 }
+    SignAgentRequest:
+      type: object
+      required: [keyId, payload, accountAddress]
+      properties:
+        keyId: { type: string }
+        payload: { type: string, description: "hex userOpHash" }
+        algorithm: { type: string, default: secp256k1 }
+        accountAddress: { type: string, description: "0x… ERC-4337 account" }
+    RefreshAgentCredentialRequest:
+      type: object
+      required: [keyId]
+      properties:
+        keyId: { type: string }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+        passkeyAssertion: { $ref: '#/components/schemas/PasskeyAssertion' }
+    JsonEip712Domain:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        chainId: { type: integer, format: int64 }
+        verifyingContract: { type: string }
+    SignTypedDataRequest:
+      type: object
+      required: [keyId, domain, primaryType, types, message]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string, default: "m/44'/60'/0'/0/0" }
+        domain: { $ref: '#/components/schemas/JsonEip712Domain' }
+        primaryType: { type: string }
+        types: { type: array, items: { type: object } }
+        message: { type: array, items: { type: object } }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    SignMicropaymentVoucherRequest:
+      type: object
+      required: [keyId, chainId, verifyingContract, channelId, cumulativeAmount]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string }
+        chainId: { type: integer, format: int64 }
+        verifyingContract: { type: string }
+        channelId: { type: string, description: "0x… 32 bytes" }
+        cumulativeAmount: { type: string, description: uint256 }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    SignGTokenAuthorizationRequest:
+      type: object
+      required: [keyId, chainId, gTokenAddress, from, to, value, validAfter, validBefore, nonce]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string }
+        chainId: { type: integer, format: int64 }
+        gTokenAddress: { type: string }
+        from: { type: string, description: "must == derived address" }
+        to: { type: string }
+        value: { type: string, description: uint256 }
+        validAfter: { type: string }
+        validBefore: { type: string }
+        nonce: { type: string, description: "0x… 32 bytes" }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    SignX402PaymentRequest:
+      type: object
+      required: [keyId, chainId, verifyingContract, paymentId, amount, recipient, deadline]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string }
+        chainId: { type: integer, format: int64 }
+        verifyingContract: { type: string }
+        paymentId: { type: string, description: "0x… 32 bytes" }
+        amount: { type: string, description: uint256 }
+        recipient: { type: string }
+        deadline: { type: string }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    SignGrantSessionRequest:
+      type: object
+      required: [keyId, chainId, verifyingContract, account, sessionKey, expiry, contractScope, selectorScope, velocityLimit, velocityWindow, nonce]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string }
+        chainId: { type: integer, format: int64 }
+        verifyingContract: { type: string, description: SessionKeyValidator }
+        account: { type: string, description: Smart Account }
+        sessionKey: { type: string, description: "secp256k1 session key addr" }
+        expiry: { type: integer, format: int64, description: uint48 }
+        contractScope: { type: string }
+        selectorScope: { type: string, description: bytes4 }
+        velocityLimit: { type: integer }
+        velocityWindow: { type: integer, format: int64 }
+        callTargets: { type: array, items: { type: string } }
+        selectorAllowlist: { type: array, items: { type: string } }
+        nonce: { type: integer, format: int64 }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    SignP256GrantSessionRequest:
+      type: object
+      required: [keyId, chainId, verifyingContract, account, keyX, keyY, expiry, contractScope, selectorScope, velocityLimit, velocityWindow, nonce]
+      properties:
+        keyId: { type: string }
+        hdPath: { type: string }
+        chainId: { type: integer, format: int64 }
+        verifyingContract: { type: string }
+        account: { type: string }
+        keyX: { type: string, description: "P-256 X, 0x… 32 bytes" }
+        keyY: { type: string, description: "P-256 Y, 0x… 32 bytes" }
+        expiry: { type: integer, format: int64 }
+        contractScope: { type: string }
+        selectorScope: { type: string }
+        velocityLimit: { type: integer }
+        velocityWindow: { type: integer, format: int64 }
+        callTargets: { type: array, items: { type: string } }
+        selectorAllowlist: { type: array, items: { type: string } }
+        nonce: { type: integer, format: int64 }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    CreateP256SessionKeyRequest:
+      type: object
+      required: [humanKeyId]
+      properties:
+        humanKeyId: { type: string }
+        label: { type: string }
+        webAuthnAssertion: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    CreateP256SessionKeyResponse:
+      type: object
+      properties:
+        keyId: { type: string }
+        pubKeyX: { type: string }
+        pubKeyY: { type: string }
+        algorithm: { type: string, example: p256 }
+        agentCredential: { type: string, description: JWT }
+        expiresAt: { type: integer, format: int64 }
+    SignP256UserOpRequest:
+      type: object
+      required: [keyId, payload, accountAddress]
+      properties:
+        keyId: { type: string }
+        payload: { type: string, description: "hex userOpHash 32 bytes" }
+        accountAddress: { type: string }

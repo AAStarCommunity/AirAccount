@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AirAccount KMS API — v0.20.0 (Beta2)</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #0b1020; }
+    .topbar { display: none; }
+    #hdr { background: linear-gradient(110deg,#070b1e,#101637); color: #f5f7fa;
+           padding: 18px 28px; font-family: -apple-system,Segoe UI,Roboto,sans-serif; }
+    #hdr h1 { margin: 0 0 4px; font-size: 22px; }
+    #hdr .badge { display:inline-block; background:#45e0c8; color:#06231d; font-weight:700;
+                  border-radius: 14px; padding: 2px 12px; font-size: 13px; margin-right: 8px; }
+    #hdr small { color:#8b93b8; }
+    #hdr a { color:#45e0c8; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div id="hdr">
+    <h1><span class="badge">BETA2 · v0.20.0</span> AirAccount KMS API</h1>
+    <small>TEE 私钥管理 · WebAuthn · AWS KMS 兼容 · 每个端点标注了单元/E2E 测试覆盖（见 <code>x-tested</code> / description）。
+    测试矩阵：<a href="../API-TEST-MATRIX.md">API-TEST-MATRIX.md</a></small>
+  </div>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: './openapi.yaml',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      defaultModelsExpandDepth: 1,
+      docExpansion: 'list',
+      tryItOutEnabled: true,
+      presets: [SwaggerUIBundle.presets.apis]
+    });
+  </script>
+</body>
+</html>
