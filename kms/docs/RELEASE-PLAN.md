@@ -67,6 +67,26 @@
 
 ---
 
+## 编译期 feature 门控（去中心化定位 — 正式版无 admin）
+
+AirAccount 是**去中心化 KMS**，正式发布版**不能含任何 admin/超级用户面**。危险/运维工具一律走**编译期 feature**（默认不编译进二进制，物理上不存在），而非运行时 env gate（env 可被人重新设上而"复活"）。
+
+| Feature | 门控内容 | 默认 | 何时启用 |
+|---------|---------|------|---------|
+| `export-secrets` | 助记词导出 + 无 passkey 的 `ExportPrivateKey` CLI（`export_key` bin） | OFF | 仅本地调试 |
+| `admin-purge` | `POST /admin/purge-key` 端点（用 `KMS_ADMIN_TOKEN` 无 passkey 强删 key），测试期清理坏 key/孤儿/gap key 用 | OFF | 仅 beta/测试构建 |
+
+**构建约定**：
+
+- **正式 release（默认）**：`cargo build --release`
+  → **不带任何 feature**，`/admin/purge-key` 端点的方法、handler、struct、route **全部不编译进二进制**，admin 面物理上不存在。即使有人设了 `KMS_ADMIN_TOKEN` 也无端点可调。
+- **beta/测试构建**：`cargo build --release --features admin-purge`
+  → admin 端点编译进二进制，仍需 `KMS_ADMIN_TOKEN` 运行时鉴权（双重门控）。
+
+> 实现：route 定义在 `#[cfg(feature = "admin-purge")]` 块里折叠进 `group4`（re-boxed），使带/不带 feature 两条编译路径的 `routes` 链类型完全一致，无需在链上额外 `.or()`。两条路径都必须能编译通过（CI 应分别 build 默认 + `--features admin-purge` 验证）。
+
+---
+
 ## 主网（Mainnet）发布前**必须**闭环 — 安全关键
 
 | Issue | 内容 | 为什么主网前必须 |

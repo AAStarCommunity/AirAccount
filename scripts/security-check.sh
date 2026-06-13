@@ -41,6 +41,21 @@ else
     check "deploy scripts do not enable export-secrets" "ok"
 fi
 
+# 1b. Decentralized KMS: production release must ship NO admin surface.
+#     The /admin/purge-key endpoint is gated behind the compile-time "admin-purge"
+#     feature; release deploy/CI scripts must never enable it (--all-features already
+#     covered by check 1). Comment lines (e.g. the mx93-build.sh hint) are excluded.
+_check1b=$(grep -rE "(--features|-F)[[:space:]+=].*admin-purge" \
+        --exclude="security-check.sh" \
+        scripts/ .github/ kms/scripts/ qemu/ docker/ 2>/dev/null \
+        | grep -vE ':[[:space:]]*#' || true)
+if [[ -n "$_check1b" ]]; then
+    check "deploy scripts do not enable admin-purge" \
+          "fail: found --features/-F ...admin-purge in deploy/CI scripts (no admin in release)"
+else
+    check "deploy scripts do not enable admin-purge" "ok"
+fi
+
 # 2. Confirm the cfg(not(export-secrets)) stub for export_private_key contains the disabled error.
 #    Use awk for function-scope matching: track the cfg line → fn export_private_key → closing brace,
 #    verify "ExportPrivateKey is disabled" appears inside that specific function body.

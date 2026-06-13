@@ -47,6 +47,13 @@ tee = ["optee-teec"]
 # DEV/TEST ONLY — gates mnemonic export and passkey-less ExportPrivateKey CLI.
 # Never enable in production builds or CI release pipelines.
 export-secrets = []
+# DEV/TEST ONLY — gates the /admin/purge-key endpoint (passkey-less force-delete
+# using KMS_ADMIN_TOKEN). AirAccount is a decentralized KMS: production/release
+# builds MUST NOT contain any admin/super-user surface, so this is OFF by default
+# and the endpoint is not compiled into the binary at all. Enable only for
+# beta/test builds: `cargo build --features admin-purge`.
+# Never enable in production builds or CI release pipelines.
+admin-purge = []
 
 [dependencies]
 proto = { path = "../proto" }
