@@ -30,6 +30,21 @@ pub struct PasskeyAssertion {
     pub signature_r: [u8; 32],
     /// ECDSA signature s component (32 bytes)
     pub signature_s: [u8; 32],
+    /// Raw clientDataJSON bytes (issue #49 — TA-side challenge binding / anti-replay).
+    ///
+    /// When present, the TA:
+    ///   1. Verifies `SHA-256(client_data_json) == client_data_hash` so the JSON is
+    ///      cryptographically bound to the ECDSA-signed message (a compromised CA
+    ///      cannot lie about the JSON it forwards).
+    ///   2. Extracts the `challenge` field, base64url-decodes it, and matches it
+    ///      against the one-time nonce the TA itself issued via `GetChallenge`.
+    ///
+    /// `None` = legacy clients that predate #49. Handled per the TA's
+    /// `ENFORCE_TA_CHALLENGE` policy (transition: allowed + warned; strict: rejected).
+    /// `#[serde(default)]` keeps bincode wire-compatible with old hosts/TAs that
+    /// never set this field.
+    #[serde(default)]
+    pub client_data_json: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -494,4 +509,23 @@ pub struct ReadRollbackCounterInput {}
 pub struct ReadRollbackCounterOutput {
     /// Current RPMB counter value. 0 = counter not yet initialized (no mutations recorded).
     pub counter: u64,
+}
+
+/// Request a fresh one-time WebAuthn challenge nonce from the TA (issue #49).
+///
+/// The TA generates 32 bytes via `optee_utee::Random`, stores `(wallet_id, nonce, issued_at)`
+/// in an in-memory pending table, and returns the nonce. The host MUST use this nonce as the
+/// WebAuthn `challenge` presented to the browser, so the value the authenticator signs is the
+/// one the TA can later verify. The nonce is single-use and expires after `CHALLENGE_TTL_SECS`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GetChallengeInput {
+    /// Wallet the challenge is bound to. A nonce issued for wallet A cannot be
+    /// consumed by an assertion against wallet B.
+    pub wallet_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GetChallengeOutput {
+    /// 32-byte one-time nonce. Host base64url-encodes this as the WebAuthn challenge.
+    pub nonce: Vec<u8>,
 }
