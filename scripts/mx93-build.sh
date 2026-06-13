@@ -114,6 +114,10 @@ build_ca() {
       unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
       cd '"$C_KMS"'/host
       rm -f target/aarch64-unknown-linux-gnu/release/kms-api-server
+      # NOTE: release build = NO features. Decentralized KMS has no admin surface,
+      # so /admin/purge-key (the "admin-purge" compile-time feature) is NOT built in.
+      # For a beta/test image that needs admin force-delete, add: --features admin-purge
+      # (still requires KMS_ADMIN_TOKEN at runtime). See kms/docs/RELEASE-PLAN.md.
       cargo build --release --target aarch64-unknown-linux-gnu --bin kms-api-server
       file target/aarch64-unknown-linux-gnu/release/kms-api-server | grep -q "ARM aarch64" \
         || { echo "CA is not aarch64!"; exit 1; }

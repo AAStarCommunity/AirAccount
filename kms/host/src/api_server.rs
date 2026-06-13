@@ -243,6 +243,10 @@ pub struct DeleteKeyResponse {
 
 /// Admin force-purge request — bypasses passkey, deletes from TEE + SQLite.
 /// Requires Authorization: Bearer $KMS_ADMIN_TOKEN header.
+///
+/// DEV/TEST ONLY — compiled in only under the `admin-purge` feature. Release
+/// builds (no feature) contain no admin surface at all.
+#[cfg(feature = "admin-purge")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AdminPurgeKeyRequest {
     pub key_id: String,
@@ -251,6 +255,7 @@ pub struct AdminPurgeKeyRequest {
     pub reason: String,
 }
 
+#[cfg(feature = "admin-purge")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AdminPurgeKeyResponse {
     pub key_id: String,
@@ -1985,6 +1990,9 @@ impl KmsApiServer {
     /// Used for: TEE orphans (SQLite row gone), test keys, gap keys.
     /// Requires KMS_ADMIN_TOKEN to be set in the environment.
     /// Returns (tee_purged, sqlite_deleted).
+    ///
+    /// DEV/TEST ONLY — compiled in only under the `admin-purge` feature.
+    #[cfg(feature = "admin-purge")]
     pub async fn admin_purge_key(&self, key_id: &str, reason: &str) -> Result<(bool, bool)> {
         let wallet_uuid = Uuid::parse_str(key_id)?;
 
@@ -4010,6 +4018,10 @@ async fn handle_delete_key(
 /// POST /admin/purge-key — admin force-delete from TEE + SQLite (no passkey needed).
 /// Requires Authorization: Bearer $KMS_ADMIN_TOKEN.
 /// Used for: TEE orphans, test keys, gap keys whose SQLite row is already deleted.
+///
+/// DEV/TEST ONLY — compiled in only under the `admin-purge` feature. Release
+/// builds (no feature) do not contain this handler or its route.
+#[cfg(feature = "admin-purge")]
 async fn handle_admin_purge_key(
     body: AdminPurgeKeyRequest,
     admin_token: String,
@@ -5352,25 +5364,34 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(revoke_p256_session_key)
         .boxed();
     // POST /admin/purge-key — admin force-delete (no passkey). Requires KMS_ADMIN_TOKEN.
-    let server_admin = server.clone();
-    let admin_purge = warp::path!("admin" / "purge-key")
-        .and(warp::post())
-        .and(warp::body::json())
-        .and(
-            warp::header::optional::<String>("authorization").map(|h: Option<String>| {
-                h.unwrap_or_default()
-                    .trim_start_matches("Bearer ")
-                    .to_string()
-            }),
-        )
-        .and(warp::any().map(move || server_admin.clone()))
-        .and_then(handle_admin_purge_key);
+    //
+    // DEV/TEST ONLY — compiled in only under the `admin-purge` feature. In release
+    // builds (no feature) this entire block is cfg-d out, so `group4` keeps its
+    // original value and the route is never registered. Folding the route into
+    // `group4` (re-boxed) keeps the final `routes` chain type-identical across both
+    // compile paths, so no `.or(admin_purge)` is needed in the chain below.
+    #[cfg(feature = "admin-purge")]
+    let group4 = {
+        let server_admin = server.clone();
+        let admin_purge = warp::path!("admin" / "purge-key")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(
+                warp::header::optional::<String>("authorization").map(|h: Option<String>| {
+                    h.unwrap_or_default()
+                        .trim_start_matches("Bearer ")
+                        .to_string()
+                }),
+            )
+            .and(warp::any().map(move || server_admin.clone()))
+            .and_then(handle_admin_purge_key);
+        group4.or(admin_purge).boxed()
+    };
 
     let routes = group1
         .or(group2)
         .or(group3)
         .or(group4)
-        .or(admin_purge)
         .recover(handle_rejection);
 
     println!(
