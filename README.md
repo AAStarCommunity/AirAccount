@@ -3,6 +3,8 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://atom-become-ireland-travels.trycloudflare.com/health)
 [![API Compatibility](https://img.shields.io/badge/AWS%20KMS-Compatible-orange.svg)](#aws-kms-compatibility)
+[![API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-85ea2d.svg)](https://kms.aastar.io/docs)
+[![Version](https://img.shields.io/badge/version-v0.20.0%20Beta2-blue.svg)](kms/CHANGELOG.md)
 
 A production-ready private key management system built on Trusted Execution Environment (TEE) using the eth_wallet sample from Teaclave TrustZone SDK. Provides enterprise-grade security with AWS KMS API compatibility.
 
@@ -20,6 +22,22 @@ curl -X POST https://atom-become-ireland-travels.trycloudflare.com/ \
   -H "X-Amz-Target: TrentService.CreateKey" \
   -d '{"KeyUsage":"SIGN_VERIFY","KeySpec":"ECC_SECG_P256K1","Origin":"AWS_KMS"}'
 ```
+
+## 📖 API Documentation
+
+**Interactive API docs (Swagger UI) — served live by the KMS itself, always matching the deployed build:**
+
+> 🔗 **https://kms.aastar.io/docs**
+
+| Resource | Link |
+|---|---|
+| **Live Swagger UI** | <https://kms.aastar.io/docs> |
+| **OpenAPI 3.1 spec** | <https://kms.aastar.io/openapi.yaml> · [in-repo](kms/docs/api/openapi.yaml) |
+| **Test coverage matrix** | [kms/docs/API-TEST-MATRIX.md](kms/docs/API-TEST-MATRIX.md) |
+
+32 endpoints — wallet lifecycle · signing (hash / message / transaction / EIP-712) · WebAuthn
+ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers. Every
+operation carries its test-coverage status (`x-tested`). **Real-device E2E: 39/39 · unit: proto 39 + host 56.**
 
 ## 🏗️ System Architecture
 
