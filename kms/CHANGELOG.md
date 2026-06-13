@@ -1,6 +1,23 @@
 # KMS Changelog
 
-> Updated: 2026-06-12
+> Updated: 2026-06-13
+
+## Unreleased — Beta3 (security)
+
+**Issue #49 (H-2)：WebAuthn challenge binding 下沉到 TA，防 assertion 重放**
+
+之前 TA 的 `verify_passkey_for_wallet` 只验 ECDSA 签名，不校验 clientDataJSON 里的 challenge —— 被攻陷的 CA 可重放一条捕获的 assertion 授权任意 payload。本次把 challenge 校验下沉到 TA。
+
+### 新增 (Features)
+- **`GetChallenge`(cmd 25)**：TA 用 `optee_utee::Random` 生成 32B 一次性 nonce，绑定 wallet_id 存入内存 pending 表（非 secure storage），返回给 host 当作 WebAuthn challenge
+- **TA 侧 challenge 绑定**：`verify_passkey_for_wallet` 现在校验 `SHA-256(clientDataJSON) == client_data_hash` → 提取 challenge → 比对 TA 自己签发的 nonce（常量时间）→ 校验未过期(TTL 300s) → 消费(one-time) → 再验 ECDSA
+- `proto::PasskeyAssertion` 新增 `client_data_json: Option<Vec<u8>>` 字段，host 透传完整 clientDataJSON 给 TA
+- host `TeeHandle::get_challenge` / `webauthn::generate_authentication_options_with_challenge`；`BeginAuthentication` 现在向 TA 取 nonce 作为 challenge
+
+### 安全 (Security)
+- 关闭 H-2 重放窗口：即使 CA 被攻陷，捕获的 assertion 也无法重放（nonce 一次性 + TA 内消费 + JSON↔hash 绑定 + TTL）
+- 过渡兼容：`ENFORCE_TA_CHALLENGE=false` 时，无 `client_data_json` 的旧 assertion 走 legacy ECDSA-only 路径（带告警 + 清除残留 nonce）；迁移完成后翻到 strict
+- ⚠️ proto bincode 线格式变更：host 与 TA 必须同版本一起部署（bincode 非自描述，`serde(default)` 不提供跨版本兼容）
 
 ## 0.20.0 (2026-06-12) — Beta2
 
