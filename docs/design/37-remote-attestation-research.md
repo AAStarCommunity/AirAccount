@@ -1,6 +1,6 @@
 # TEE 远程证明（Remote Attestation）业界方案调研
 
-> 创建时间：2026-06-13（本地机器时间 `date '+%Y-%m-%d'`）
+> 创建时间：2026-06-13
 > 关联 Issue：#37 TEE 远程证明
 > 文档性质：技术调研 / 方案全景 / 对抗性评估
 > 配套文档：`docs/design/37-remote-attestation-design.md`（AirAccount 落地设计）
@@ -69,7 +69,7 @@ OP-TEE 上游 `optee_os` 自带一个 **attestation PTA**。**官方核对结论
   | 命令 | 值 | 作用 |
   |---|---|---|
   | `PTA_ATTESTATION_GET_PUBKEY` | `0x0` | 取 PTA 内部 RSA **公钥** |
-  | `PTA_ATTESTATION_GET_TA_SHDR_DIGEST` | `0x1` | 取运行中某用户态 TA 的 signed-header digest（签名形式） |
+  | `PTA_ATTESTATION_GET_TA_SHDR_DIGEST` | `0x1` | 取**调用该 PTA 的 TA 自身**的 signed-header digest（签名形式）。⚠️ **L-1**：度量对象是 caller 自己，**不能**用来度量「任意另一个用户态 TA」——KMS TA 自度量的用法正确，勿误读为可枚举度量他人 TA |
   | `PTA_ATTESTATION_HASH_TA_MEMORY` | `0x2` | 度量某 TA 的内存 |
   | `PTA_ATTESTATION_HASH_TEE_MEMORY` | `0x3` | 度量 TEE 自身内存 |
 - **签名内容 = `(nonce | 自己算出的 digest / memory hash)`，全部由 PTA 内部那把 key 签。没有任何命令对 caller 传入的外部公钥/外部数据签名。** **[官方源确证 — H-1 的官方依据]**
@@ -124,7 +124,7 @@ OP-TEE 上游 `optee_os` 自带一个 **attestation PTA**。**官方核对结论
 
 - ELE = EdgeLock secure Enclave，NXP 在 i.MX 8ULP/91/93/95/943 上的独立安全子系统（HSM）。i.MX93 上的 Sentinel IP 代号 **S401**（8ULP 是 S400）。**[确证]**
 - 提供：硬件信任根、secure boot、生命周期管理、tamper detection、密钥存储、加解密。**[确证]**
-- **i.MX93 EdgeLock Secure Enclave 已通过 PSA Certified 认证**。⚠️ **务必区分:PSA Certified 是「合规认证等级」,不等于「已有可用的 remote attestation token 接口」**——它说明架构上具备 PSA-RoT 能力、理论上可产出 PSA attestation token（EAT），但**BSP/固件是否真把这条链路暴露给 OP-TEE/应用层调用,是另一回事 [待验证]**。**[确证(认证事实) + 待验证(实际可用性)]**
+- **i.MX93 EdgeLock Secure Enclave 已通过 PSA Certified 认证**。⚠️ **务必区分:PSA Certified（安全鲁棒性 Level 1/2/3 认证）≠ PSA Functional API Certified（后者才认证「暴露可用的 Initial Attestation Token API」），更不等于「BSP 已把可用的 remote attestation token 接口暴露出来」**——它说明架构上具备 PSA-RoT 能力、理论上可产出 PSA attestation token（EAT），但**BSP/固件是否真把这条链路暴露给 OP-TEE/应用层调用,是另一回事 [待验证]**。**[确证(认证事实) + 待验证(实际可用性)]**
 
 ### 3.2 ELE 的 attestation 原语 **[待 RM00284 + 实机验证]**
 
