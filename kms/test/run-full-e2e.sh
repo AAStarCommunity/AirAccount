@@ -155,8 +155,16 @@ WA=$(ceremony "$KEYID")
 chk "POST /kms/SignX402Payment" "$(post_path_code /kms/SignX402Payment SignX402Payment "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"paymentId\":\"0x$KX\",\"amount\":\"1000000\",\"recipient\":\"$ADDR\",\"deadline\":\"9999999999\",\"webAuthnAssertion\":$WA}")" 200
 WA=$(ceremony "$KEYID")
 chk "POST /kms/SignMicropaymentVoucher" "$(post_path_code /kms/SignMicropaymentVoucher SignMicropaymentVoucher "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"verifyingContract\":\"$ADDR\",\"channelId\":\"0x$KY\",\"cumulativeAmount\":\"500000\",\"webAuthnAssertion\":$WA}")" 200
+# #52: GToken `from` MUST equal the real address derived from keyId+default hdPath
+# (cached by CreateKey's background derivation). Fetch it so `from` matches.
 WA=$(ceremony "$KEYID")
-chk "POST /kms/SignGTokenAuthorization" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$ADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 200
+post_code DeriveAddress "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"WebAuthn\":$WA}" >/dev/null
+GADDR=$(jbody "['Address']")
+WA=$(ceremony "$KEYID")
+chk "POST /kms/SignGTokenAuthorization" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$GADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 200
+# #52 negative: a `from` that is NOT the derived address must be rejected pre-sign.
+WA=$(ceremony "$KEYID")
+chk "GTokenAuth wrong from → reject" "$(post_path_code /kms/SignGTokenAuthorization SignGTokenAuthorization "{\"keyId\":\"$KEYID\",\"chainId\":11155111,\"gTokenAddress\":\"$ADDR\",\"from\":\"$ADDR\",\"to\":\"$ADDR\",\"value\":\"500000\",\"validAfter\":\"0\",\"validBefore\":\"9999999999\",\"nonce\":\"0x$KX\",\"webAuthnAssertion\":$WA}")" 400
 # Negative: no auth → reject (same gate as SignTypedData)
 chk "SignX402Payment no-auth → reject" "$(post_path_code /kms/SignX402Payment SignX402Payment "{\"keyId\":\"$KEYID\",\"chainId\":1,\"verifyingContract\":\"$ADDR\",\"paymentId\":\"0x$KX\",\"amount\":\"1\",\"recipient\":\"$ADDR\",\"deadline\":\"9999999999\"}")" 400
 
