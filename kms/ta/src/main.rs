@@ -265,15 +265,22 @@ fn cache_len() -> usize {
 // challenge), checked against the TA's own table, and deleted on first use.
 //
 // Design constraints (see kms memory + issue #49):
-//   * IN-MEMORY only (thread_local), never TEE secure storage. Nonces are
-//     short-lived; losing them on TA restart only forces a re-challenge. This
-//     also avoids the secure-storage-write-then-TLS-access hazard (H-3): we
-//     never touch this table after a storage write inside a single command.
+//   * IN-MEMORY only, never TEE secure storage. Nonces are short-lived; losing
+//     them on TA restart only forces a re-challenge. This also avoids the
+//     secure-storage-write-then-TLS-access hazard (H-3): we never touch this
+//     table after a storage write inside a single command.
 //   * Vec instead of HashMap — std HashMap's SipHasher pulls getrandom, which
 //     panics in the OP-TEE TA. Same rationale as WALLET_CACHE above.
-//   * The TA worker is single-threaded / serial (host enforces a single-worker
-//     queue in ta_client.rs), so a thread_local RefCell is sufficient; there is
-//     no concurrent access to guard against.
+//   * PROCESS-GLOBAL static, NOT thread_local. The host serializes TA calls
+//     (single-worker queue in ta_client.rs) so access is strictly serial — but
+//     OP-TEE may dispatch consecutive InvokeCommands onto DIFFERENT pool
+//     threads. A thread_local nonce issued by GetChallenge would then be
+//     invisible to the verify on the very next call, which showed up as a flaky
+//     "No pending challenge" (#49 / #61). A global UnsafeCell shares the table
+//     across all TA threads; the serial-invocation guarantee makes the unsafe
+//     access sound without a lock or a new crate. Unlike WALLET_CACHE, this
+//     table has NO secure-storage fallback — a lost entry is unrecoverable, so
+//     correctness here must not depend on thread affinity.
 
 /// Challenge nonce lifetime. An assertion whose nonce was issued more than this
 /// many seconds ago is rejected even if the nonce still matches.
@@ -304,8 +311,28 @@ struct PendingChallenge {
     issued_at: i64,
 }
 
-thread_local! {
-    static PENDING_CHALLENGES: RefCell<Vec<PendingChallenge>> = RefCell::new(Vec::new());
+/// Process-global pending-nonce table, shared across ALL TA pool threads.
+/// See the "Design constraints" block above for why this must be a global
+/// static rather than a `thread_local` (flaky "No pending challenge", #49/#61).
+struct GlobalChallenges(core::cell::UnsafeCell<Vec<PendingChallenge>>);
+
+// SAFETY: every TA InvokeCommand is funneled through the host's single-worker
+// queue (ta_client.rs), so invocations are strictly serial — there is never
+// concurrent access to this cell. The only access path is `with_pending`, which
+// confines the `&mut` to a single synchronous closure and never lets it escape
+// across an InvokeCommand boundary, so no aliasing `&mut` can ever exist.
+unsafe impl Sync for GlobalChallenges {}
+
+static PENDING_CHALLENGES: GlobalChallenges =
+    GlobalChallenges(core::cell::UnsafeCell::new(Vec::new()));
+
+/// Run `f` with exclusive access to the global pending-challenge table.
+/// SAFETY: serial TA invocation (see `GlobalChallenges`) guarantees no
+/// concurrent borrow; the `&mut` does not escape this function.
+fn with_pending<R>(f: impl FnOnce(&mut Vec<PendingChallenge>) -> R) -> R {
+    // SAFETY: see GlobalChallenges — serial access, borrow confined to `f`.
+    let tbl = unsafe { &mut *PENDING_CHALLENGES.0.get() };
+    f(tbl)
 }
 
 /// Generate a fresh 32-byte nonce, record it for `wallet_id`, and return it.
@@ -315,8 +342,7 @@ fn challenge_issue(wallet_id: &Uuid) -> [u8; 32] {
     let mut nonce = [0u8; 32];
     Random::generate(&mut nonce);
     let issued_at = tee_unix_secs();
-    PENDING_CHALLENGES.with(|c| {
-        let mut tbl = c.borrow_mut();
+    with_pending(|tbl| {
         // Drop any existing pending challenge for this wallet (one live nonce per wallet).
         tbl.retain(|e| &e.wallet_id != wallet_id);
         // Bound memory: evict the oldest entry if at capacity.
@@ -342,8 +368,7 @@ fn challenge_issue(wallet_id: &Uuid) -> [u8; 32] {
 /// Returns the (nonce, issued_at) if one was present. The removal makes the
 /// nonce strictly one-time: a replayed assertion finds nothing to match.
 fn challenge_consume(wallet_id: &Uuid) -> Option<([u8; 32], i64)> {
-    PENDING_CHALLENGES.with(|c| {
-        let mut tbl = c.borrow_mut();
+    with_pending(|tbl| {
         if let Some(idx) = tbl.iter().position(|e| &e.wallet_id == wallet_id) {
             let e = tbl.swap_remove(idx);
             Some((e.nonce, e.issued_at))
