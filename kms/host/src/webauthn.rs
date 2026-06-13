@@ -498,8 +498,21 @@ pub fn generate_authentication_options(
     rp_id: &str,
     allow_credentials: Vec<CredentialDescriptor>,
 ) -> (String, Vec<u8>, AuthenticationOptionsResponse) {
+    generate_authentication_options_with_challenge(rp_id, allow_credentials, random_challenge())
+}
+
+/// Like `generate_authentication_options` but uses a caller-supplied challenge.
+///
+/// Issue #49: the sign-authentication ceremony passes the TA-issued nonce here so
+/// the value the authenticator signs is the exact nonce the TA will later verify
+/// and consume. The host still stores the challenge in its own DB (for the
+/// existing host-side check) — the nonce is therefore checked at BOTH layers.
+pub fn generate_authentication_options_with_challenge(
+    rp_id: &str,
+    allow_credentials: Vec<CredentialDescriptor>,
+    challenge_bytes: Vec<u8>,
+) -> (String, Vec<u8>, AuthenticationOptionsResponse) {
     let challenge_id = Uuid::new_v4().to_string();
-    let challenge_bytes = random_challenge();
     let challenge_b64 = b64url_encode(&challenge_bytes);
 
     let resp = AuthenticationOptionsResponse {
@@ -651,6 +664,10 @@ pub fn verify_authentication_response(
             client_data_hash,
             signature_r,
             signature_s,
+            // Issue #49: forward the raw clientDataJSON so the TA can
+            // independently parse + verify the challenge nonce (defense-in-depth
+            // against a compromised CA replaying a captured assertion).
+            client_data_json: Some(client_data_bytes),
         },
     })
 }
@@ -760,6 +777,7 @@ mod tests {
             client_data_hash: *client_data_hash,
             signature_r,
             signature_s,
+            client_data_json: None,
         }
     }
 
@@ -845,6 +863,7 @@ mod tests {
             client_data_hash: [0u8; 32],
             signature_r: [1u8; 32],
             signature_s: [1u8; 32],
+            client_data_json: None,
         };
         assert!(verify_ca_style("0xDEADBEEF", &assertion).is_err());
     }

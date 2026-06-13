@@ -1429,6 +1429,11 @@ impl KmsApiServer {
             client_data_hash,
             signature_r,
             signature_s,
+            // Legacy hex path carries no clientDataJSON. The TA treats this as the
+            // transition/legacy case (issue #49): no challenge binding. This path is
+            // already DEPRECATED + gated elsewhere; the WebAuthn ceremony path
+            // (verify_authentication_response) is the one that gets challenge binding.
+            client_data_json: None,
         }))
     }
 
@@ -1664,7 +1669,18 @@ impl KmsApiServer {
         let _ = self
             .db
             .update_wallet_sign_count(key_id, verified.new_counter);
-        Ok(verified.proto_assertion)
+
+        // Issue #49 scope: grant-session uses a purpose-bound HOST challenge (not a
+        // TA-issued nonce), and its challenge binding is already enforced above
+        // (purpose + key + consume_challenge). The TA pending-nonce table is only
+        // populated by the regular sign BeginAuthentication path, so we must NOT
+        // ask the TA to verify a nonce it never issued — strip client_data_json so
+        // the TA takes the legacy/transition path for grant-session. (TODO(#49):
+        // route grant-session begin through TA GetChallenge to extend TA-side
+        // binding here too, once the single-slot pending table supports purposes.)
+        let mut proto_assertion = verified.proto_assertion;
+        proto_assertion.client_data_json = None;
+        Ok(proto_assertion)
     }
 
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
@@ -2250,8 +2266,37 @@ impl KmsApiServer {
         };
 
         let rp_id = self.resolve_rp_id(origin_header);
-        let (challenge_id, challenge_bytes, resp) =
-            webauthn::generate_authentication_options(&rp_id, allow_credentials);
+
+        // Issue #49: source the challenge from the TA so the authenticator signs
+        // the exact nonce the TA will later verify + consume (anti-replay).
+        // key_id is the TA wallet UUID string (see Self::validate_key_id / sign path).
+        // Fallback: if the TA is older (no GetChallenge = 25) or transiently
+        // unavailable, fall back to a host-generated random challenge so the
+        // existing host-side binding still works (transition compatibility).
+        let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
+            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
+                Ok(nonce) => {
+                    println!("🔐 Issue #49: using TA-issued challenge nonce for key_id={}", key_id);
+                    webauthn::generate_authentication_options_with_challenge(
+                        &rp_id,
+                        allow_credentials,
+                        nonce,
+                    )
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️  Issue #49: TA GetChallenge unavailable ({}); falling back to \
+                         host-random challenge (TA will use legacy/transition path)",
+                        e
+                    );
+                    webauthn::generate_authentication_options(&rp_id, allow_credentials)
+                }
+            },
+            Err(_) => {
+                // key_id is not a UUID (should not happen for TA wallets) — keep legacy behavior.
+                webauthn::generate_authentication_options(&rp_id, allow_credentials)
+            }
+        };
 
         self.db.store_challenge(
             &challenge_id,
