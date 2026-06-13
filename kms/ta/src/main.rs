@@ -1696,8 +1696,19 @@ fn verify_jwt_wallet_claims(
     // now > 0 so a mock/uninitialized clock (returns 0) skips the check rather than
     // rejecting every token; on real hardware ree_time is a valid unix timestamp.
     let now = tee_unix_secs();
-    if now > 0 && now as u64 >= exp {
-        return Err(anyhow!("JWT expired (now {} >= exp {})", now, exp));
+    if now > 0 {
+        if now as u64 >= exp {
+            return Err(anyhow!("JWT expired (now {} >= exp {})", now, exp));
+        }
+    } else {
+        // Observability: the REE clock returned <= 0 (mock/uninitialized or a
+        // fault). We skip the runtime expiry check rather than reject every
+        // token, but surface it — a PERSISTENT now<=0 on real hardware means JWT
+        // expiry is silently NOT being enforced and must be investigated.
+        trace_println!(
+            "[!] #15: TEE REE clock returned {} (<=0); JWT runtime expiry NOT enforced this call",
+            now
+        );
     }
 
     Ok(())
