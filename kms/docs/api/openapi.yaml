@@ -157,6 +157,16 @@ paths:
         '200': { description: Scheduled, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteKeyResponse' } } } }
         '400': { $ref: '#/components/responses/Error' }
       x-tested: { e2e: "run-full-e2e.sh §8", unit: "delete_key_request_minimal_webauthn", status: "✅ verified (34/34)" }
+  /UnfreezeKey:
+    post:
+      tags: [Wallet Lifecycle]
+      summary: Unfreeze a dormant (frozen) key — owner WebAuthn ceremony required (issue #42)
+      description: "A key auto-frozen by the dormant-key sweep rejects signing until unfrozen. Verifies the owner via the same strict WebAuthn ceremony as DeleteKey; ownership is checked even when the key is already active, so this cannot be used as an unauthenticated key-state probe."
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [KeyId], properties: { KeyId: { type: string }, WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' } } } } } }
+      responses:
+        '200': { description: "Unfrozen (or already active)", content: { application/json: { schema: { type: object, properties: { KeyId: { type: string }, LifecycleStatus: { type: string } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { e2e: "test-freeze-unfreeze.sh (frozen→reject-sign, owner-ceremony unfreeze→200, no-auth→400)", status: "✅ verified 5/5 on FRDM-IMX93" }
 
   # ───────────────────────── Metadata ─────────────────────────
   /ListKeys:
