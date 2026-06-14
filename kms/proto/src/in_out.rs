@@ -522,24 +522,13 @@ pub struct GetChallengeInput {
     /// Wallet the challenge is bound to. A nonce issued for wallet A cannot be
     /// consumed by an assertion against wallet B.
     pub wallet_id: Uuid,
-    /// Issue #68 — payload-bound challenge (closes V4: CA swaps payload).
-    ///
-    /// The 32-byte digest of the message the client intends to sign with the
-    /// resulting assertion (e.g. the userOpHash, the SignHash hash, or the
-    /// EIP-712 digest). The TA stores `(wallet_id, nonce, payload_digest)` and,
-    /// at signing time, requires the ACTUAL payload being signed to hash to this
-    /// value — so an assertion authorised for one payload cannot be redirected
-    /// by a compromised CA to sign a different one.
-    ///
-    /// `None` = legacy / non-payload operations (handled per the TA's strict
-    /// policy). NOTE: `#[serde(default)]` is honored by the self-describing
-    /// serde_json API layer, but bincode is NOT self-describing and does NOT
-    /// tolerate a missing trailing field across the host<->TA boundary — so
-    /// cross-version safety relies on host+TA being deployed in lockstep from the
-    /// same proto revision (they always are), NOT on serde(default). The
-    /// attribute is retained for the JSON layer + ergonomic construction.
-    #[serde(default)]
-    pub payload_digest: Option<[u8; 32]>,
+    // Issue #68 note: there is deliberately NO payload field here. Payload binding
+    // is rooted in the CLIENT's challenge derivation — the client sets the WebAuthn
+    // challenge to SHA-256(nonce || payload_digest) and the TA recomputes that
+    // commitment at signing time (verify_challenge_binding). A side payload field
+    // here would be CA-controllable plaintext (the host relays this request) and
+    // would NOT be bound into the user's signature — exactly the V4 substitute hole
+    // flagged in PR #75 review. So GetChallenge stays payload-free; nonce is plain.
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

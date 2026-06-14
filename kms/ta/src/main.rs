@@ -320,11 +320,6 @@ struct PendingChallenge {
     wallet_id: Uuid,
     nonce: [u8; 32],
     issued_at: i64,
-    /// Issue #68: digest the client declared it will sign when requesting this
-    /// challenge. `Some` → the assertion may ONLY be used to sign this exact
-    /// payload (TA rejects a mismatch, defeating CA payload-swap / V4). `None` →
-    /// not payload-bound (e.g. a challenge issued before the payload is known).
-    payload_digest: Option<[u8; 32]>,
 }
 
 /// Process-global pending-nonce table, shared across ALL TA pool threads.
@@ -368,7 +363,7 @@ fn with_pending<R>(f: impl FnOnce(&mut Vec<PendingChallenge>) -> R) -> R {
 /// Generate a fresh 32-byte nonce, record it for `wallet_id`, and return it.
 /// Replaces any previously-pending nonce for the same wallet (only the latest
 /// challenge is valid — requesting a new one invalidates the old).
-fn challenge_issue(wallet_id: &Uuid, payload_digest: Option<[u8; 32]>) -> [u8; 32] {
+fn challenge_issue(wallet_id: &Uuid) -> [u8; 32] {
     let mut nonce = [0u8; 32];
     Random::generate(&mut nonce);
     let issued_at = tee_unix_secs();
@@ -389,7 +384,6 @@ fn challenge_issue(wallet_id: &Uuid, payload_digest: Option<[u8; 32]>) -> [u8; 3
             wallet_id: *wallet_id,
             nonce,
             issued_at,
-            payload_digest,
         });
     });
     nonce
@@ -400,11 +394,11 @@ fn challenge_issue(wallet_id: &Uuid, payload_digest: Option<[u8; 32]>) -> [u8; 3
 /// request carrying a wrong/expired challenge must NOT burn a victim's still-
 /// valid pending nonce (DoS-on-nonce). The nonce is consumed (challenge_consume)
 /// only after every binding/length/match/TTL check has passed.
-fn challenge_peek(wallet_id: &Uuid) -> Option<([u8; 32], i64, Option<[u8; 32]>)> {
+fn challenge_peek(wallet_id: &Uuid) -> Option<([u8; 32], i64)> {
     with_pending(|tbl| {
         tbl.iter()
             .find(|e| &e.wallet_id == wallet_id)
-            .map(|e| (e.nonce, e.issued_at, e.payload_digest))
+            .map(|e| (e.nonce, e.issued_at))
     })
 }
 
@@ -1000,24 +994,9 @@ fn verify_challenge_binding(
     // (3) PEEK (do not yet consume) the TA's pending nonce for this wallet. We
     // only remove it once every check below passes, so a request with a wrong or
     // expired challenge cannot burn a victim's still-valid nonce (DoS-on-nonce).
-    let (nonce, issued_at, bound_payload) = challenge_peek(wallet_id).ok_or_else(|| {
+    let (nonce, issued_at) = challenge_peek(wallet_id).ok_or_else(|| {
         anyhow!("No pending challenge for this wallet (replay, expired, or GetChallenge not called)")
     })?;
-
-    if challenge_bytes.len() != nonce.len() {
-        return Err(anyhow!(
-            "challenge length mismatch: got {}B, expected {}B",
-            challenge_bytes.len(),
-            nonce.len()
-        ));
-    }
-    let mut cdiff = 0u8;
-    for i in 0..nonce.len() {
-        cdiff |= challenge_bytes[i] ^ nonce[i];
-    }
-    if cdiff != 0 {
-        return Err(anyhow!("challenge does not match the TA-issued nonce"));
-    }
 
     // Freshness: reject a nonce that, while matching, was issued too long ago.
     // tee_unix_secs uses REE time (TA SystemTime::now() panics — see kms memory).
@@ -1031,53 +1010,67 @@ fn verify_challenge_binding(
         ));
     }
 
-    // (4) Issue #68 — payload binding. Four cases over (bound_payload, expected_payload):
-    //   * (Some, Some): the nonce was issued bound to a digest AND this op declares
-    //     what it signs → require an exact (constant-time) match, else refuse. This
-    //     defeats redirect-of-an-already-bound nonce.
-    //   * (Some, None): payload-bound nonce handed to an op that supplies no payload
-    //     → fail closed (refuse), never silently skip.
-    //   * (None, Some): a SIGNING op (declares a payload) consuming an UNBOUND nonce.
-    //     This is the strip-then-redirect bypass — a compromised CA strips
-    //     `PayloadDigest` from BeginAuthentication so `get_challenge` issues an
-    //     unbound nonce, then redirects the resulting assertion to sign anything.
-    //     In STRICT mode this MUST be rejected (the mandatory-binding gate that
-    //     actually closes V4). In transition it is allowed (no regression vs pre-#68;
-    //     V4 was already open) so not-yet-migrated clients keep working.
-    //   * (None, None): a non-signing passkey op (derive/register/remove/…) with an
-    //     unbound nonce → no payload binding applies; #49 challenge binding still held.
-    // Checked BEFORE consuming so a failed attempt never burns the victim's nonce.
-    match (bound_payload, expected_payload) {
-        (Some(bound), Some(actual)) => {
-            let mut pdiff = 0u8;
-            for i in 0..32 {
-                pdiff |= bound[i] ^ actual[i];
-            }
-            if pdiff != 0 {
+    // (3.5) Issue #68 — payload-COMMITMENT binding (closes V4: CA payload-swap).
+    //
+    // The flaw a side "payload_digest" field has: the user's authenticator only
+    // signs the challenge inside clientDataJSON, NOT the payload — so a compromised
+    // CA (the host) can substitute the payload it declared to the TA and the user's
+    // signature can't tell. The fix roots the payload in what the user actually
+    // signs: the client sets the WebAuthn challenge to a COMMITMENT
+    //     challenge = SHA-256(nonce || payload_digest)
+    // The TA recomputes that commitment here from its OWN stored `nonce` and the
+    // payload THIS operation will actually sign, and compares it to the challenge
+    // the authenticator signed. A compromised CA therefore cannot:
+    //   * strip the binding — a signing op presenting the plain nonce is rejected
+    //     in strict mode (must commit);
+    //   * substitute the payload — changing the digest changes the required
+    //     commitment, which it cannot reproduce inside the user's signed
+    //     clientDataJSON (it has no fresh user assertion over the new commitment).
+    // Non-signing ops (no payload) keep the plain-nonce challenge (#49 behaviour).
+    // Constant-time compares; all operands are fixed 32 bytes.
+    fn ct_eq32(a: &[u8], b: &[u8; 32]) -> bool {
+        if a.len() != 32 {
+            return false;
+        }
+        let mut d = 0u8;
+        for i in 0..32 {
+            d |= a[i] ^ b[i];
+        }
+        d == 0
+    }
+
+    match expected_payload {
+        Some(payload) => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(nonce);
+            hasher.update(payload);
+            let committed: [u8; 32] = hasher.finalize().into();
+
+            if ct_eq32(&challenge_bytes, &committed) {
+                // Good: the user's signature commits to exactly this payload.
+            } else if !ENFORCE_TA_CHALLENGE && ct_eq32(&challenge_bytes, &nonce) {
+                // Transition only: a legacy client used the plain nonce (not yet
+                // computing the commitment). Allowed for migration — V4 stays open
+                // on this path until clients commit AND the strict image ships
+                // (no regression vs pre-#68). Rejected in strict mode (else branch).
+                trace_println!(
+                    "[!] Issue #68 TRANSITION: signing op used plain nonce (no payload \
+                     commitment); migrate client to challenge = SHA256(nonce||payload)"
+                );
+            } else {
                 return Err(anyhow!(
-                    "Issue #68: payload does not match the challenge-bound digest \
-                     (possible CA payload-swap — refusing to sign)"
+                    "Issue #68: challenge does not commit to the payload (expected \
+                     SHA256(nonce||payload); possible CA payload-swap — refusing to sign)"
                 ));
             }
         }
-        (Some(_), None) => {
-            return Err(anyhow!(
-                "Issue #68: challenge is payload-bound but this operation provides no \
-                 payload to verify (refusing to sign)"
-            ));
-        }
-        (None, Some(_)) => {
-            if ENFORCE_TA_CHALLENGE {
-                return Err(anyhow!(
-                    "Issue #68 strict mode: signing operation requires a payload-bound \
-                     challenge; obtain one via BeginAuthentication with PayloadDigest \
-                     (refusing to sign an unbound challenge)"
-                ));
+        None => {
+            // Non-signing passkey op: plain-nonce binding (#49).
+            if !ct_eq32(&challenge_bytes, &nonce) {
+                return Err(anyhow!("challenge does not match the TA-issued nonce"));
             }
-            // Transition: allowed (legacy, no regression — V4 remains open until
-            // clients send PayloadDigest and the strict image is deployed).
         }
-        (None, None) => {}
     }
 
     // All checks passed — NOW consume the nonce (strictly one-time). Consuming
@@ -1086,9 +1079,9 @@ fn verify_challenge_binding(
     let _ = challenge_consume(wallet_id);
 
     trace_println!(
-        "[+] Issue #49/#68: challenge verified + consumed (age {}s, payload-bound={})",
+        "[+] Issue #49/#68: challenge verified + consumed (age {}s, payload-committed={})",
         age,
-        bound_payload.is_some()
+        expected_payload.is_some()
     );
     Ok(())
 }
@@ -1532,8 +1525,11 @@ fn get_challenge(input: &proto::GetChallengeInput) -> Result<proto::GetChallenge
     // Ensure the wallet exists before issuing a nonce. load_wallet_cached errors
     // if the wallet is unknown.
     let _wallet = load_wallet_cached(&input.wallet_id)?;
-    // Issue #68: bind the nonce to the digest the client declared it will sign.
-    let nonce = challenge_issue(&input.wallet_id, input.payload_digest);
+    // Issue #68: the nonce stays a plain random value. Payload binding is rooted
+    // in the CLIENT's challenge derivation (challenge = SHA256(nonce||payload)),
+    // verified at signing time in verify_challenge_binding — so the TA needs no
+    // payload at issue time and there is no CA-controllable bound field.
+    let nonce = challenge_issue(&input.wallet_id);
     Ok(proto::GetChallengeOutput {
         nonce: nonce.to_vec(),
     })
