@@ -54,6 +54,14 @@ pub enum Command {
     /// The returned nonce becomes the WebAuthn challenge; the TA verifies + consumes
     /// it on the next signing assertion to defeat assertion replay by a compromised CA.
     GetChallenge = 25,
+    /// Issue #37 (remote attestation MVP): produce a TEE attestation evidence
+    /// blob proving "this TA, with this measured signed-header digest, is running
+    /// inside a real OP-TEE on this device" and binding it to a caller-supplied
+    /// nonce. Implemented by invoking the OP-TEE attestation PTA
+    /// (`39800861-182a-4720-9b67-2bcd622bc0b5`) GET_TA_SHDR_DIGEST + GET_PUBKEY.
+    /// No auth required — the evidence contains no secrets and is meant to be
+    /// verified by anyone holding the (TOFU-registered) attestation public key.
+    GetAttestation = 26,
     #[default]
     Unknown,
 }
@@ -104,6 +112,7 @@ mod tests {
         assert_eq!(u32::from(Command::ForceRemoveWallet), 23);
         assert_eq!(u32::from(Command::ReadRollbackCounter), 24);
         assert_eq!(u32::from(Command::GetChallenge), 25);
+        assert_eq!(u32::from(Command::GetAttestation), 26);
     }
 
     #[test]
@@ -131,6 +140,7 @@ mod tests {
         assert!(matches!(Command::from(23u32), Command::ForceRemoveWallet));
         assert!(matches!(Command::from(24u32), Command::ReadRollbackCounter));
         assert!(matches!(Command::from(25u32), Command::GetChallenge));
+        assert!(matches!(Command::from(26u32), Command::GetAttestation));
     }
 
     #[test]
@@ -144,6 +154,7 @@ mod tests {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
         let valid_ids: &[u32] = &[
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -797,6 +808,23 @@ mod tests {
         });
         bincode_roundtrip(&GetChallengeOutput {
             nonce: vec![0xab; 32],
+        });
+    }
+
+    #[test]
+    fn get_attestation_roundtrip() {
+        bincode_roundtrip(&GetAttestationInput {
+            nonce: vec![0x5a; 32],
+        });
+        bincode_roundtrip(&GetAttestationOutput {
+            nonce: vec![0x5a; 32],
+            ta_uuid: vec![0x11; 16],
+            ta_measurement: vec![0x22; 32],
+            signature: vec![0x33; 384],
+            attest_pubkey_exp: vec![0x01, 0x00, 0x01],
+            attest_pubkey_mod: vec![0x44; 384],
+            sig_alg: 0x7041_4930,
+            ree_time_secs: 1_700_000_000,
         });
     }
 
