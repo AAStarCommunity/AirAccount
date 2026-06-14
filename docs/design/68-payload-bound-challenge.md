@@ -48,8 +48,25 @@
 - 反例（V4）：`GetChallenge(W, D_legit)` 拿 assertion，提交签 `D_evil` → **拒**（payload 绑定不符）。
 - 反例：无 payload_digest（strict）→ 拒。
 
+## 强制绑定门（strict mandatory gate）—— 真正闭合 V4 的关键
+
+仅「绑定存在时才校验」**不够**：被攻陷的 CA 可以**剥掉 `PayloadDigest`**，让 `get_challenge` 发一个**未绑定**的 nonce，用户对它做 WebAuthn（看不出绑没绑），CA 再拿这个 assertion 去签 `D_evil` —— `bound_payload==None` 时若跳过检查，V4 就没闭合（strip-then-redirect，PR #75 review BLOCKING）。
+
+修法：`verify_challenge_binding` 按 `(bound_payload, expected_payload)` 四象限处理，**strict 模式下签名 op 必须消费 payload-bound 的 nonce**：
+
+| bound_payload | expected_payload | 行为 |
+|:---:|:---:|:---|
+| Some | Some | 常量时间比对，不符则拒（防 redirect-of-bound）|
+| Some | None | 拒（payload-bound nonce 给了无 payload 的 op，fail-closed）|
+| **None** | **Some**（签名 op）| **strict：拒**「signing op requires payload-bound challenge」（关 strip 旁路）；transition：放行（不回归）|
+| None | None | 非签名 passkey op，无 payload 绑定（#49 challenge 绑定仍在）|
+
+**为什么不在 `get_challenge` 处强制拒绝未绑定 nonce**：非签名 passkey op（derive/register/remove/export/create-agent）也走 `verify_passkey_for_wallet` → 需要 challenge，但它们没有 payload。若 `get_challenge` 在 strict 下一律拒缺 `payload_digest`，会把这些 op 一并 brick。把门放在**签名 op 的消费点**（`expected_payload.is_some()`）既关掉 strip 旁路，又不影响非签名 op。
+
+**当前生效范围**：门对 `expected_payload.is_some()` 的 op 生效；目前只有 **SignHash** 传 `Some`，故 strict 下 **SignHash 路径已真正闭合 V4**。其余 5 个 sign op 仍传 `None`，在 strict 下走 `(None,None)` 分支即「非 payload 绑定」，**不被 brick**，但 V4 对它们仍开放（follow-up，非阻塞）。
+
 ## 兼容/顺序
 
-- 与 #63 strict 协同：strict 镜像下，缺 `clientDataJSON` 或缺 payload 绑定都拒。
+- 与 #63 strict 协同：strict 镜像下，缺 `clientDataJSON` 或（签名 op）缺 payload 绑定都拒。
 - 依赖 SDK #58 把新流程（GetChallenge 带 digest）发出来。生产无老客户（用户确认），可直接上。
 - bincode 跨版本：host+TA 同版部署（一贯如此）。

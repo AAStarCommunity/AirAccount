@@ -302,8 +302,7 @@ const MAX_PENDING_CHALLENGES: usize = 256;
 /// regardless of this flag — there is no downgrade once a client opts in.
 ///
 /// `true` (STRICT): every assertion MUST carry `client_data_json` and pass nonce
-/// binding. Flip this (and rebuild/re-flash the TA) once all clients are
-/// migrated. TODO(#49): switch to strict for GA after Beta3 soak.
+/// binding. Select it at build time once all clients are migrated (see #63 below).
 ///
 /// Issue #63: the mode is selected by the `strict-challenge` cargo feature
 /// rather than a hand-edited literal, so a strict TA image can be produced for
@@ -1032,29 +1031,53 @@ fn verify_challenge_binding(
         ));
     }
 
-    // (4) Issue #68 — payload binding. If the nonce was issued bound to a specific
-    // payload digest, the operation must be signing exactly that payload. This is
-    // what defeats a compromised CA redirecting a user's assertion (authorised for
-    // payload D_legit) to sign a different payload D_evil: the bound digest will
-    // not match. Checked BEFORE consuming so a mismatched attempt leaves the
-    // legitimate nonce intact for the real client. Constant-time compare.
-    if let Some(bound) = bound_payload {
-        let actual = expected_payload.ok_or_else(|| {
-            anyhow!(
+    // (4) Issue #68 — payload binding. Four cases over (bound_payload, expected_payload):
+    //   * (Some, Some): the nonce was issued bound to a digest AND this op declares
+    //     what it signs → require an exact (constant-time) match, else refuse. This
+    //     defeats redirect-of-an-already-bound nonce.
+    //   * (Some, None): payload-bound nonce handed to an op that supplies no payload
+    //     → fail closed (refuse), never silently skip.
+    //   * (None, Some): a SIGNING op (declares a payload) consuming an UNBOUND nonce.
+    //     This is the strip-then-redirect bypass — a compromised CA strips
+    //     `PayloadDigest` from BeginAuthentication so `get_challenge` issues an
+    //     unbound nonce, then redirects the resulting assertion to sign anything.
+    //     In STRICT mode this MUST be rejected (the mandatory-binding gate that
+    //     actually closes V4). In transition it is allowed (no regression vs pre-#68;
+    //     V4 was already open) so not-yet-migrated clients keep working.
+    //   * (None, None): a non-signing passkey op (derive/register/remove/…) with an
+    //     unbound nonce → no payload binding applies; #49 challenge binding still held.
+    // Checked BEFORE consuming so a failed attempt never burns the victim's nonce.
+    match (bound_payload, expected_payload) {
+        (Some(bound), Some(actual)) => {
+            let mut pdiff = 0u8;
+            for i in 0..32 {
+                pdiff |= bound[i] ^ actual[i];
+            }
+            if pdiff != 0 {
+                return Err(anyhow!(
+                    "Issue #68: payload does not match the challenge-bound digest \
+                     (possible CA payload-swap — refusing to sign)"
+                ));
+            }
+        }
+        (Some(_), None) => {
+            return Err(anyhow!(
                 "Issue #68: challenge is payload-bound but this operation provides no \
                  payload to verify (refusing to sign)"
-            )
-        })?;
-        let mut pdiff = 0u8;
-        for i in 0..32 {
-            pdiff |= bound[i] ^ actual[i];
-        }
-        if pdiff != 0 {
-            return Err(anyhow!(
-                "Issue #68: payload does not match the challenge-bound digest \
-                 (possible CA payload-swap — refusing to sign)"
             ));
         }
+        (None, Some(_)) => {
+            if ENFORCE_TA_CHALLENGE {
+                return Err(anyhow!(
+                    "Issue #68 strict mode: signing operation requires a payload-bound \
+                     challenge; obtain one via BeginAuthentication with PayloadDigest \
+                     (refusing to sign an unbound challenge)"
+                ));
+            }
+            // Transition: allowed (legacy, no regression — V4 remains open until
+            // clients send PayloadDigest and the strict image is deployed).
+        }
+        (None, None) => {}
     }
 
     // All checks passed — NOW consume the nonce (strictly one-time). Consuming
