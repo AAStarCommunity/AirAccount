@@ -36,6 +36,7 @@ H_CA_OUT="$PROJECT_ROOT/kms/$CA_OUT_REL"
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${YELLOW}[mx93-build]${NC} $*"; }
 ok()   { echo -e "${GREEN}[ok]${NC} $*"; }
+warn() { echo -e "${YELLOW}[warn]${NC} $*" >&2; }
 die()  { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 
 docker ps --format '{{.Names}}' | grep -qx "$CONTAINER" \
@@ -55,7 +56,16 @@ if [[ ! -f "$TA_SIGN_KEY" ]]; then
 fi
 
 build_ta() {
-    log "Building TA (aarch64-unknown-optee, nightly-2024-05-15)..."
+    # Issue #63: TA feature set. Default = transition (production-safe). Set
+    # MX93_STRICT_CHALLENGE=1 to build a STRICT image (rejects assertions without
+    # TA-issued challenge binding). Only build strict AFTER the SDK ships the
+    # GetChallenge flow (#58) — otherwise every not-yet-migrated client is rejected.
+    local TA_FEATURES="ree-fs-only"
+    if [[ "${MX93_STRICT_CHALLENGE:-0}" == "1" ]]; then
+        TA_FEATURES="ree-fs-only,strict-challenge"
+        warn "STRICT challenge mode ON — legacy (no-clientDataJSON) clients will be REJECTED. Ensure SDK #58 is deployed."
+    fi
+    log "Building TA (aarch64-unknown-optee, nightly-2024-05-15, features: $TA_FEATURES)..."
     docker exec "$CONTAINER" bash -c '
       set -e
       export PATH=/root/.cargo/bin:$PATH
@@ -80,7 +90,7 @@ build_ta() {
       # syscall, otherwise RPMB access faults and kills the TA. Remove this
       # feature once the RPMB key is programmed in production to enable
       # hardware anti-rollback.
-      xargo build --release --target aarch64-unknown-optee --features ree-fs-only
+      xargo build --release --target aarch64-unknown-optee --features '"$TA_FEATURES"'
       file $OUT/ta | grep -q "ARM aarch64" || { echo "TA is not aarch64!"; exit 1; }
       aarch64-linux-gnu-objcopy --strip-unneeded $OUT/ta $OUT/stripped_ta
       # MX93 OP-TEE 4.8 (NXP LF 6.18) trusts an RSA-4096 TA signing key, NOT the
