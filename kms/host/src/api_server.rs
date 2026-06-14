@@ -5289,6 +5289,25 @@ pub async fn start_kms_server() -> Result<()> {
     // Health check
     let health = warp::path("health").and(warp::get()).and_then(health_check);
 
+    // Issue #12 — signed attestation measurement manifest at
+    // GET /.well-known/attestation-measurements.json. Compiled in (include_str!)
+    // so it always ships with this build. Clients fetch it, verify its Ed25519
+    // signature against the pinned publisher key, and use the listed
+    // `ta_measurement` values when verifying GET /attestation evidence.
+    const ATTESTATION_MEASUREMENTS_MANIFEST: &str =
+        include_str!("../attestation-measurements.json");
+    let measurements_manifest = warp::path(".well-known")
+        .and(warp::path("attestation-measurements.json"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            warp::reply::with_header(
+                ATTESTATION_MEASUREMENTS_MANIFEST,
+                "content-type",
+                "application/json; charset=utf-8",
+            )
+        });
+
     // Live API docs — Swagger UI at GET /docs, OpenAPI 3.1 spec at GET /openapi.yaml.
     // The spec is compiled into the binary (include_str!) so it always matches this build.
     // Pinned swagger-ui-dist@5.32.6 with SRI integrity hashes (supply-chain hardening).
@@ -5751,6 +5770,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     let group1 = index
         .or(test_ui)
         .or(health)
+        .or(measurements_manifest)
         .or(api_docs)
         .or(openapi_spec)
         .or(version)

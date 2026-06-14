@@ -55,5 +55,48 @@ the verifier emits a warning telling you it did not enforce a trust root.
 ```bash
 pnpm install
 pnpm build      # tsc -> dist/
-pnpm test       # node --test (simulates PTA signing, validates the crypto path)
+pnpm test       # node --test (simulates PTA signing + manifest verification)
 ```
+
+## Signed measurement manifest (issue #12)
+
+Instead of hard-coding `expectedMeasurementsHex`, fetch the **signed manifest**
+and verify it against a pinned publisher key:
+
+```ts
+import { verifyMeasurementManifest, verifyAttestation, freshNonceHex } from "@aastar/attestation-verifier";
+
+// Pin the AirAccount measurement-manifest publisher key (Ed25519, raw 32-byte hex).
+const PUBLISHER_KEY = "d0c380e835db4a7accff631961eb860980491af069278933037f970d5801711b";
+const TA_UUID = "4319f3510b244097b65980ee4f824cdd";
+
+const manifest = await (await fetch("https://kms.aastar.io/.well-known/attestation-measurements.json")).json();
+const m = verifyMeasurementManifest(manifest, PUBLISHER_KEY, TA_UUID);
+if (!m.ok) throw new Error("manifest invalid: " + m.errors.join("; "));
+
+const nonceHex = freshNonceHex();
+const evidence = await (await fetch(`https://kms.aastar.io/attestation?nonce=${nonceHex}`)).json();
+const v = verifyAttestation(evidence, {
+  expectedNonceHex: nonceHex,
+  expectedMeasurementsHex: m.currentMeasurementsHex, // ← from the verified manifest
+  pinnedKeyFingerprintsHex: ["<sha256(modulus) hex>"],
+});
+```
+
+Trust ladder (design doc §7.1):
+- **tier-2 (this manifest)**: the measurement list is signed by the AirAccount
+  publisher key (pin it once); tamper-evident, single source of truth.
+- **tier-3 (reproducible build)**: anyone recomputes a listed measurement from
+  public source with `scripts/ta-measurement.sh <signed.ta>` and confirms it
+  equals the manifest entry — so the manifest is verifiable, not blindly trusted.
+
+### Publishing a manifest (maintainers)
+
+```bash
+# Edit manifest-body.json (version → ta_measurement, status). Then sign:
+node scripts/sign-manifest.mjs manifest-body.json manifest-signing-key.pem out.json
+# → prints the publisher_key to pin. Keep manifest-signing-key.pem OFFLINE (gitignored).
+# Publish out.json as kms/host/attestation-measurements.json (served at /.well-known/).
+```
+The Ed25519 **private** signing key is the publishing trust anchor — keep it
+offline; only the public key is distributed/pinned.

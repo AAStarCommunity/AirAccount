@@ -233,3 +233,119 @@ export function freshNonceHex(): string {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   return Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("hex");
 }
+
+// ===========================================================================
+// Issue #12 — signed measurement manifest (reference-value distribution §7.1 tier-2)
+// ===========================================================================
+//
+// Instead of hard-coding `expectedMeasurementsHex`, a verifier fetches a signed
+// manifest (e.g. https://kms.aastar.io/.well-known/attestation-measurements.json),
+// verifies its Ed25519 signature against a PINNED publisher key, and uses the
+// `ta_measurement` values it lists. Combined with reproducible builds (§7.1
+// tier-3, `scripts/ta-measurement.sh`) anyone can independently recompute a
+// listed measurement from public source — so the manifest is a convenient,
+// tamper-evident registry, not a new thing to blindly trust.
+
+/** One measured TA build in the manifest body. */
+export interface ManifestMeasurement {
+  /** Human version label, e.g. "v0.21.0-strict". */
+  version: string;
+  /** 32-byte TA signed-header digest (hex) — the value GET /attestation returns. */
+  ta_measurement: string;
+  /** "current" | "previous" | "revoked" — verifier may reject non-current. */
+  status: string;
+  /** Free-form build provenance (features, toolchain, git commit). */
+  build?: Record<string, string>;
+}
+
+/** The signed portion of the manifest. `signature` is computed over JSON.stringify(this). */
+export interface ManifestBody {
+  schema: string;
+  updated: string;
+  /** 16-byte TA UUID (hex) these measurements belong to. */
+  ta_uuid: string;
+  measurements: ManifestMeasurement[];
+}
+
+export interface MeasurementManifest {
+  body: ManifestBody;
+  /** Ed25519 public key of the publisher, raw 32 bytes (hex). */
+  publisher_key: string;
+  /** Ed25519 signature (hex) over `JSON.stringify(body)` (UTF-8). */
+  signature: string;
+}
+
+export interface ManifestVerifyResult {
+  ok: boolean;
+  errors: string[];
+  /** Measurements (hex) from a verified manifest — feed into verifyAttestation. */
+  measurementsHex: string[];
+  /** Only the `status:"current"` measurements. */
+  currentMeasurementsHex: string[];
+}
+
+/** Build a Node Ed25519 public key from a raw 32-byte hex key (JWK / OKP). */
+function ed25519PublicKeyFromRawHex(hex: string) {
+  const raw = hexToBuf(hex, "publisher_key");
+  if (raw.length !== 32) throw new Error("publisher_key must be 32 bytes (Ed25519)");
+  return createPublicKey({
+    key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+    format: "jwk",
+  });
+}
+
+/** Stable serialization of the signed body — MUST match the signer (sign-manifest). */
+export function canonicalManifestBody(body: ManifestBody): string {
+  return JSON.stringify(body);
+}
+
+/**
+ * Verify a measurement manifest: the publisher key must equal a pinned trusted
+ * key, AND the Ed25519 signature over the body must be valid. Returns the listed
+ * measurements only on success.
+ *
+ * @param manifest               parsed manifest JSON
+ * @param pinnedPublisherKeyHex  the publisher Ed25519 raw pubkey (hex) you trust
+ * @param expectedTaUuidHex      optional: require body.ta_uuid to match
+ */
+export function verifyMeasurementManifest(
+  manifest: MeasurementManifest,
+  pinnedPublisherKeyHex: string,
+  expectedTaUuidHex?: string,
+): ManifestVerifyResult {
+  const errors: string[] = [];
+  let measurementsHex: string[] = [];
+  let currentMeasurementsHex: string[] = [];
+
+  try {
+    if (!hexEq(manifest.publisher_key, pinnedPublisherKeyHex)) {
+      errors.push(
+        `manifest publisher_key ${manifest.publisher_key} is not the pinned trusted key`,
+      );
+    }
+
+    const key = ed25519PublicKeyFromRawHex(manifest.publisher_key);
+    const msg = Buffer.from(canonicalManifestBody(manifest.body), "utf8");
+    const sig = hexToBuf(manifest.signature, "signature");
+    const sigValid = cryptoVerify(null, msg, key, sig);
+    if (!sigValid) errors.push("manifest Ed25519 signature is INVALID");
+
+    if (expectedTaUuidHex && !hexEq(manifest.body.ta_uuid, expectedTaUuidHex)) {
+      errors.push(
+        `manifest ta_uuid ${manifest.body.ta_uuid} != expected ${expectedTaUuidHex}`,
+      );
+    }
+
+    // Only expose measurements if every check above held.
+    if (errors.length === 0) {
+      measurementsHex = manifest.body.measurements.map((m) => m.ta_measurement);
+      currentMeasurementsHex = manifest.body.measurements
+        .filter((m) => m.status === "current")
+        .map((m) => m.ta_measurement);
+    }
+  } catch (e) {
+    errors.push((e as Error).message);
+  }
+
+  return { ok: errors.length === 0, errors, measurementsHex, currentMeasurementsHex };
+}
