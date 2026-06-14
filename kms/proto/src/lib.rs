@@ -805,6 +805,12 @@ mod tests {
     fn get_challenge_roundtrip() {
         bincode_roundtrip(&GetChallengeInput {
             wallet_id: test_uuid(),
+            payload_digest: None,
+        });
+        // Issue #68: payload-bound form.
+        bincode_roundtrip(&GetChallengeInput {
+            wallet_id: test_uuid(),
+            payload_digest: Some([0x5c; 32]),
         });
         bincode_roundtrip(&GetChallengeOutput {
             nonce: vec![0xab; 32],
