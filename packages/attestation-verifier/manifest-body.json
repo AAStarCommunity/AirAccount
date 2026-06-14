@@ -1,5 +1,6 @@
 {
   "schema": "airaccount.attestation-measurements.v1",
+  "sequence": 1,
   "updated": "2026-06-14",
   "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
   "measurements": [
@@ -21,6 +22,14 @@
         "features": "ree-fs-only",
         "toolchain": "nightly-2024-05-15",
         "note": "#37 attestation only (transition challenge mode)"
+      }
+    },
+    {
+      "version": "v0.20.x-example-revoked",
+      "ta_measurement": "00000000000000000000000000000000000000000000000000000000deadbeef",
+      "status": "revoked",
+      "build": {
+        "note": "example of a revoked build — verifiers MUST NOT accept this measurement"
       }
     }
   ]

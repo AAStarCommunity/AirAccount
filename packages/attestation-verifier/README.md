@@ -71,8 +71,12 @@ const PUBLISHER_KEY = "d0c380e835db4a7accff631961eb860980491af069278933037f970d5
 const TA_UUID = "4319f3510b244097b65980ee4f824cdd";
 
 const manifest = await (await fetch("https://kms.aastar.io/.well-known/attestation-measurements.json")).json();
-const m = verifyMeasurementManifest(manifest, PUBLISHER_KEY, TA_UUID);
+// minSequence = the highest sequence you have previously accepted (persist it) →
+// rejects a replayed OLD manifest that re-lists a since-revoked measurement.
+const m = verifyMeasurementManifest(manifest, PUBLISHER_KEY, { expectedTaUuidHex: TA_UUID, minSequence: lastSeenSequence });
 if (!m.ok) throw new Error("manifest invalid: " + m.errors.join("; "));
+saveLastSeenSequence(m.sequence); // anti-downgrade floor for next time
+// m.measurementsHex excludes any "revoked" entries.
 
 const nonceHex = freshNonceHex();
 const evidence = await (await fetch(`https://kms.aastar.io/attestation?nonce=${nonceHex}`)).json();
