@@ -224,6 +224,22 @@ impl Wallet {
         Ok(signature)
     }
 
+    /// Issue #68: the exact 32-byte digest `sign_transaction` will sign (the
+    /// legacy-tx RLP keccak hash). Used to payload-bind the WebAuthn challenge.
+    /// MUST mirror the `LegacyTransaction` built in `sign_transaction`.
+    pub fn tx_signing_hash(transaction: &EthTransaction) -> [u8; 32] {
+        ethereum_tx_sign::LegacyTransaction {
+            chain: transaction.chain_id,
+            nonce: transaction.nonce,
+            gas_price: transaction.gas_price,
+            gas: transaction.gas,
+            to: transaction.to,
+            value: transaction.value,
+            data: transaction.data.clone(),
+        }
+        .hash()
+    }
+
     pub fn sign_message(&self, hd_path: &str, message: &[u8]) -> Result<Vec<u8>> {
         let derived = self.derive_key(hd_path)?;
 
