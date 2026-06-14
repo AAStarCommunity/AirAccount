@@ -1350,14 +1350,20 @@ fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddr
 
 fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTransactionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // Issue #68: bind the challenge to the exact tx digest (RLP keccak) that will
+    // be signed — mirrors the LegacyTransaction sign_transaction builds.
+    let tx_hash = Wallet::tx_signing_hash(&input.transaction);
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&tx_hash))?;
     let signature = wallet.sign_transaction(&input.hd_path, &input.transaction)?;
     Ok(proto::SignTransactionOutput { signature })
 }
 
 fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // Issue #68: bind to keccak256(message) — exactly what sign_message signs.
+    let mut msg_hash = [0u8; 32];
+    msg_hash.copy_from_slice(&hash::keccak_hash_to_bytes(input.message.as_slice())[..32]);
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&msg_hash))?;
     let signature = wallet.sign_message(&input.hd_path, &input.message)?;
     Ok(proto::SignMessageOutput { signature })
 }
@@ -2060,13 +2066,23 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
+    // Issue #68: resolve the primary type + compute the EIP-712 digest BEFORE the
+    // auth gate, so the passkey path can bind the challenge to exactly what is signed.
+    let primary_type_def = input
+        .types
+        .iter()
+        .find(|td| td.name == input.primary_type)
+        .ok_or_else(|| anyhow!("Primary type '{}' not found in types list", input.primary_type))?;
+    let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
+
     // TA-side auth gate (defense-in-depth): independently verifies the caller's authorization.
     // Host has already validated, but TA confirms using TEE-resident secrets that cannot be
     // forged by a compromised host. Exactly one auth proof must be present.
     match (&input.passkey_assertion, &input.jwt_kid) {
         (Some(_), None) => {
             // WebAuthn path: verify passkey signature against wallet's stored public key.
-            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+            // Issue #68: bind the challenge to the EIP-712 digest being signed.
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&digest))?;
         }
         (None, Some(kid)) => {
             // Agent JWT path: all three JWT proof fields must be present.
@@ -2107,16 +2123,7 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
         }
     }
 
-    // Resolve the primary type definition from the provided type list
-    let primary_type_def = input
-        .types
-        .iter()
-        .find(|td| td.name == input.primary_type)
-        .ok_or_else(|| anyhow!("Primary type '{}' not found in types list", input.primary_type))?;
-
-    // Compute EIP-712 digest entirely inside TEE
-    let digest = eip712::eip712_digest(&input.domain, primary_type_def, &input.message)?;
-
+    // (primary_type_def + digest already computed above for payload binding.)
     let private_key = wallet.export_private_key(&input.hd_path)?;
 
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
@@ -2303,10 +2310,12 @@ fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
 
 fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
+    // Issue #68: compute the exact digest this op signs and bind the challenge to it.
     let inner = build_grant_session_inner(input);
     let final_hash = eip191_hash(&inner);
+
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&final_hash))?;
 
     let private_key = wallet.export_private_key(&input.hd_path)?;
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
@@ -2324,10 +2333,12 @@ fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::Sig
 
 fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<proto::SignP256GrantSessionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
+    // Issue #68: compute the exact digest this op signs and bind the challenge to it.
     let inner = build_p256_grant_session_inner(input);
     let final_hash = eip191_hash(&inner);
+
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&final_hash))?;
 
     let private_key = wallet.export_private_key(&input.hd_path)?;
     let secret_key = secp256k1::SecretKey::from_slice(&private_key)?;
