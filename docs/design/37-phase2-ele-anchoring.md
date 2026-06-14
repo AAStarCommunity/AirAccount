@@ -70,6 +70,29 @@ TA/CA 初始化(一次性):
 
 ⚠️ **代价**：NVM-Daemon 会抢 ELE → 需**停 KMS 测试窗口**，测完恢复现场（用户已确认无上线/无老客户，可安排）。这是 §3 step 1-3 的实测，**不碰 R-1**。
 
+### 5.1 实测结果（2026-06-14，✅ PASS）—— pub_key_attest 在板子上跑通
+
+停 kms-api → `systemctl start nvm_daemon.service`（conf `/etc/nvmd.conf`：`/etc/ele/ele_nvm_master`, flag 0x80）→ `ele_hsm_test`（imx-secure-enclave 测试套件）：
+
+```
+hsm_open_session PASS                          # i.MX93 A2, Open Lifecycle, LIB/NVM 1.1.1
+hsm_dev_attest exchange Passed.                # 设备 attestation(已知)
+hsm_open_key_store_service ... key_id=0xabcd   # ★ key store 开了(有 nvm_daemon;Phase0 无它报 0x14)
+hsm_generate_key ret:0x0                       # ELE 库内生成 key(= K_sign)
+Persistent key created, Key ID: 0x3fffffff
+Public Key Attestation API Test:
+hsm_do_pub_key_attest err: 0x0                 # ★★ pub_key_attest 成功出证书
+TESTS REPORT ... TOTAL 全 SUCCESS, FAILED 0    # 全套通过
+```
+
+**结论**：Phase 2 的 ELE 机制（开 key store + `hsm_generate_key` 库内生成 + `hsm_pub_key_attest` 出证书）在本板子**确认可用**。Phase 0 遗留的「pub_key_attest 需 NVM-Daemon（无它报 `0x14 HSM Feature Disabled`）」就此收口——装了 nvm_daemon 即通。
+
+**恢复现场已确认**：停 nvm_daemon → 重启 kms-api → worker alive、`/health` healthy、attestation measurement 仍 `18835959…`、**116 个钱包完好**。ELE 库内 key 与 KMS 钱包存储（REE-FS）隔离，实验零影响。
+
+**仍卡 R-1**：上面 `hsm_do_pub_key_attest` 用的 `key_attestation_id` 是测试套件自建的普通库内 key，cert 链不到 NXP 根。**「机制可用」≠「连根可信」**——连根仍需 EL2GO（AN12691）/ SRM 确定 K_endorse 来源。即 Phase 2 工程可落地，但「全信任」价值仍押 R-1。
+
+**备份**：实验前已把板子运行的 TA(`4b434ac9`)+CA 备到 `build/mx93/board-backup-20260614/`（可随时恢复）。
+
 ## 6. 落地顺序
 
 ```
