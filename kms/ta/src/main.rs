@@ -302,8 +302,7 @@ const MAX_PENDING_CHALLENGES: usize = 256;
 /// regardless of this flag — there is no downgrade once a client opts in.
 ///
 /// `true` (STRICT): every assertion MUST carry `client_data_json` and pass nonce
-/// binding. Flip this (and rebuild/re-flash the TA) once all clients are
-/// migrated. TODO(#49): switch to strict for GA after Beta3 soak.
+/// binding. Select it at build time once all clients are migrated (see #63 below).
 ///
 /// Issue #63: the mode is selected by the `strict-challenge` cargo feature
 /// rather than a hand-edited literal, so a strict TA image can be produced for
@@ -823,6 +822,11 @@ const EXPECTED_RP_ID_HASH: [u8; 32] = [
 fn verify_passkey_for_wallet(
     wallet: &Wallet,
     assertion: Option<&proto::PasskeyAssertion>,
+    // Issue #68: the digest of what this operation will actually sign, when the
+    // op is a signing op. Passed to challenge-binding so a payload-bound nonce
+    // can only authorise its declared payload. `None` for non-signing ops (e.g.
+    // derive/register/remove) and for sign ops not yet wired to compute it.
+    expected_payload: Option<&[u8; 32]>,
 ) -> Result<()> {
     let _pubkey = match wallet.get_passkey() {
         Some(pk) => pk,
@@ -890,7 +894,7 @@ fn verify_passkey_for_wallet(
     // without spending the ~320ms p256-m verification. The wallet_id used to
     // consume the nonce is the TA's own (wallet.get_id()), never a CA-supplied
     // value, so a compromised CA cannot redirect the consumption to another slot.
-    verify_challenge_binding(&wallet.get_id(), _assertion)?;
+    verify_challenge_binding(&wallet.get_id(), _assertion, expected_payload)?;
 
     // Build signed_data = authenticator_data || client_data_hash
     let mut signed_data = _assertion.authenticator_data.clone();
@@ -941,7 +945,11 @@ fn verify_passkey_for_wallet(
 ///   * `client_data_json` absent → governed by `ENFORCE_TA_CHALLENGE`:
 ///     transition mode logs a warning and allows (legacy ECDSA-only path);
 ///     strict mode rejects.
-fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertion) -> Result<()> {
+fn verify_challenge_binding(
+    wallet_id: &Uuid,
+    assertion: &proto::PasskeyAssertion,
+    expected_payload: Option<&[u8; 32]>,
+) -> Result<()> {
     let client_data_json = match assertion.client_data_json.as_ref() {
         Some(json) => json,
         None => {
@@ -990,21 +998,6 @@ fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertio
         anyhow!("No pending challenge for this wallet (replay, expired, or GetChallenge not called)")
     })?;
 
-    if challenge_bytes.len() != nonce.len() {
-        return Err(anyhow!(
-            "challenge length mismatch: got {}B, expected {}B",
-            challenge_bytes.len(),
-            nonce.len()
-        ));
-    }
-    let mut cdiff = 0u8;
-    for i in 0..nonce.len() {
-        cdiff |= challenge_bytes[i] ^ nonce[i];
-    }
-    if cdiff != 0 {
-        return Err(anyhow!("challenge does not match the TA-issued nonce"));
-    }
-
     // Freshness: reject a nonce that, while matching, was issued too long ago.
     // tee_unix_secs uses REE time (TA SystemTime::now() panics — see kms memory).
     let now = tee_unix_secs();
@@ -1017,12 +1010,79 @@ fn verify_challenge_binding(wallet_id: &Uuid, assertion: &proto::PasskeyAssertio
         ));
     }
 
+    // (3.5) Issue #68 — payload-COMMITMENT binding (closes V4: CA payload-swap).
+    //
+    // The flaw a side "payload_digest" field has: the user's authenticator only
+    // signs the challenge inside clientDataJSON, NOT the payload — so a compromised
+    // CA (the host) can substitute the payload it declared to the TA and the user's
+    // signature can't tell. The fix roots the payload in what the user actually
+    // signs: the client sets the WebAuthn challenge to a COMMITMENT
+    //     challenge = SHA-256(nonce || payload_digest)
+    // The TA recomputes that commitment here from its OWN stored `nonce` and the
+    // payload THIS operation will actually sign, and compares it to the challenge
+    // the authenticator signed. A compromised CA therefore cannot:
+    //   * strip the binding — a signing op presenting the plain nonce is rejected
+    //     in strict mode (must commit);
+    //   * substitute the payload — changing the digest changes the required
+    //     commitment, which it cannot reproduce inside the user's signed
+    //     clientDataJSON (it has no fresh user assertion over the new commitment).
+    // Non-signing ops (no payload) keep the plain-nonce challenge (#49 behaviour).
+    // Constant-time compares; all operands are fixed 32 bytes.
+    fn ct_eq32(a: &[u8], b: &[u8; 32]) -> bool {
+        if a.len() != 32 {
+            return false;
+        }
+        let mut d = 0u8;
+        for i in 0..32 {
+            d |= a[i] ^ b[i];
+        }
+        d == 0
+    }
+
+    match expected_payload {
+        Some(payload) => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(nonce);
+            hasher.update(payload);
+            let committed: [u8; 32] = hasher.finalize().into();
+
+            if ct_eq32(&challenge_bytes, &committed) {
+                // Good: the user's signature commits to exactly this payload.
+            } else if !ENFORCE_TA_CHALLENGE && ct_eq32(&challenge_bytes, &nonce) {
+                // Transition only: a legacy client used the plain nonce (not yet
+                // computing the commitment). Allowed for migration — V4 stays open
+                // on this path until clients commit AND the strict image ships
+                // (no regression vs pre-#68). Rejected in strict mode (else branch).
+                trace_println!(
+                    "[!] Issue #68 TRANSITION: signing op used plain nonce (no payload \
+                     commitment); migrate client to challenge = SHA256(nonce||payload)"
+                );
+            } else {
+                return Err(anyhow!(
+                    "Issue #68: challenge does not commit to the payload (expected \
+                     SHA256(nonce||payload); possible CA payload-swap — refusing to sign)"
+                ));
+            }
+        }
+        None => {
+            // Non-signing passkey op: plain-nonce binding (#49).
+            if !ct_eq32(&challenge_bytes, &nonce) {
+                return Err(anyhow!("challenge does not match the TA-issued nonce"));
+            }
+        }
+    }
+
     // All checks passed — NOW consume the nonce (strictly one-time). Consuming
     // here rather than before the checks means a failed verification leaves the
     // legitimate nonce intact for the real client to retry.
     let _ = challenge_consume(wallet_id);
 
-    trace_println!("[+] Issue #49: challenge nonce verified + consumed (age {}s)", age);
+    trace_println!(
+        "[+] Issue #49/#68: challenge verified + consumed (age {}s, payload-committed={})",
+        age,
+        expected_payload.is_some()
+    );
     Ok(())
 }
 
@@ -1226,7 +1286,7 @@ fn remove_wallet(input: &proto::RemoveWalletInput) -> Result<proto::RemoveWallet
         .map_err(|e| anyhow!("wallet not found: {:?}", e))?;
 
     // Mandatory passkey verification
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     // H-3: invalidate the LRU cache entry BEFORE the delete syscall. The deleted
     // wallet must not remain signable from a stale cache hit. cache_remove
@@ -1280,7 +1340,7 @@ fn force_remove_wallet(
 
 fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddressOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
     let (address, public_key) = wallet.derive_address(&input.hd_path)?;
     Ok(proto::DeriveAddressOutput {
         address,
@@ -1290,21 +1350,24 @@ fn derive_address(input: &proto::DeriveAddressInput) -> Result<proto::DeriveAddr
 
 fn sign_transaction(input: &proto::SignTransactionInput) -> Result<proto::SignTransactionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
     let signature = wallet.sign_transaction(&input.hd_path, &input.transaction)?;
     Ok(proto::SignTransactionOutput { signature })
 }
 
 fn sign_message(input: &proto::SignMessageInput) -> Result<proto::SignMessageOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
     let signature = wallet.sign_message(&input.hd_path, &input.message)?;
     Ok(proto::SignMessageOutput { signature })
 }
 
 fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    // Issue #68: SignHash is the canonical "sign this exact 32-byte digest" path
+    // (ERC-4337 userOpHash). Bind the challenge to that digest so a payload-bound
+    // assertion can only authorise this hash, not a CA-substituted one.
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&input.hash))?;
     let signature = wallet.sign_hash(&input.hd_path, &input.hash)?;
     Ok(proto::SignHashOutput { signature })
 }
@@ -1383,7 +1446,7 @@ fn export_private_key(
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
     if input.passkey_assertion.is_some() {
-        verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+        verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
     } else {
         dbg_println!("[+] ExportPrivateKey: dev admin mode (no passkey assertion)");
     }
@@ -1422,7 +1485,7 @@ fn register_passkey_ta(
 
     let mut wallet = load_wallet_cached(&input.wallet_id)?;
     // Verify current passkey before allowing change
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
     wallet.set_passkey(input.passkey_pubkey.clone());
     wallet.rollback_epoch = epoch;
 
@@ -1462,6 +1525,10 @@ fn get_challenge(input: &proto::GetChallengeInput) -> Result<proto::GetChallenge
     // Ensure the wallet exists before issuing a nonce. load_wallet_cached errors
     // if the wallet is unknown.
     let _wallet = load_wallet_cached(&input.wallet_id)?;
+    // Issue #68: the nonce stays a plain random value. Payload binding is rooted
+    // in the CLIENT's challenge derivation (challenge = SHA256(nonce||payload)),
+    // verified at signing time in verify_challenge_binding — so the TA needs no
+    // payload at issue time and there is no CA-controllable bound field.
     let nonce = challenge_issue(&input.wallet_id);
     Ok(proto::GetChallengeOutput {
         nonce: nonce.to_vec(),
@@ -1501,7 +1568,7 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
 
     // C-1: TA-side passkey verification — blocks a compromised host from calling this
     // command directly to mint agent credentials without user presence.
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -1999,7 +2066,7 @@ fn sign_typed_data(input: &proto::SignTypedDataInput) -> Result<proto::SignTyped
     match (&input.passkey_assertion, &input.jwt_kid) {
         (Some(_), None) => {
             // WebAuthn path: verify passkey signature against wallet's stored public key.
-            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+            verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
         }
         (None, Some(kid)) => {
             // Agent JWT path: all three JWT proof fields must be present.
@@ -2236,7 +2303,7 @@ fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
 
 fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     let inner = build_grant_session_inner(input);
     let final_hash = eip191_hash(&inner);
@@ -2257,7 +2324,7 @@ fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::Sig
 
 fn sign_p256_grant_session(input: &proto::SignP256GrantSessionInput) -> Result<proto::SignP256GrantSessionOutput> {
     let wallet = load_wallet_cached(&input.wallet_id)?;
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref())?;
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     let inner = build_p256_grant_session_inner(input);
     let final_hash = eip191_hash(&inner);

@@ -522,6 +522,13 @@ pub struct GetChallengeInput {
     /// Wallet the challenge is bound to. A nonce issued for wallet A cannot be
     /// consumed by an assertion against wallet B.
     pub wallet_id: Uuid,
+    // Issue #68 note: there is deliberately NO payload field here. Payload binding
+    // is rooted in the CLIENT's challenge derivation — the client sets the WebAuthn
+    // challenge to SHA-256(nonce || payload_digest) and the TA recomputes that
+    // commitment at signing time (verify_challenge_binding). A side payload field
+    // here would be CA-controllable plaintext (the host relays this request) and
+    // would NOT be bound into the user's signature — exactly the V4 substitute hole
+    // flagged in PR #75 review. So GetChallenge stays payload-free; nonce is plain.
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

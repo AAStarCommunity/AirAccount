@@ -252,6 +252,10 @@ pub struct BeginAuthenticationRequest {
     pub key_id: Option<String>,
     #[serde(rename = "Address", skip_serializing_if = "Option::is_none", default)]
     pub address: Option<String>,
+    // Issue #68: no PayloadDigest field. The client roots payload binding in the
+    // WebAuthn challenge itself — challenge = SHA-256(nonce || payload_digest),
+    // verified by the TA at signing time. A side field here would be CA-mutable
+    // and not bound into the user's signature (the V4 substitute hole, PR #75).
 }
 
 // ========================================
