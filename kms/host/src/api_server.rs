@@ -4646,14 +4646,13 @@ async fn handle_get_attestation(
     query: AttestationQuery,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let nonce_hex = query
-        .nonce
-        .ok_or_else(|| warp::reject::custom(ApiError(
+    let nonce_hex = query.nonce.ok_or_else(|| {
+        warp::reject::custom(ApiError(
             "missing required query parameter: nonce (hex-encoded random challenge)".to_string(),
-        )))?;
-    let nonce = hex::decode(nonce_hex.trim()).map_err(|_| {
-        warp::reject::custom(ApiError("nonce must be valid hex".to_string()))
+        ))
     })?;
+    let nonce = hex::decode(nonce_hex.trim())
+        .map_err(|_| warp::reject::custom(ApiError("nonce must be valid hex".to_string())))?;
     if nonce.is_empty() {
         return Err(warp::reject::custom(ApiError(
             "nonce must be non-empty".to_string(),
