@@ -17,6 +17,7 @@
 
 #![no_main]
 
+mod attestation;
 mod bip32_secp;
 mod eip712;
 mod hash;
@@ -2345,6 +2346,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::ForceRemoveWallet => process(serialized_input, force_remove_wallet),
         Command::ReadRollbackCounter => process(serialized_input, read_rollback_counter),
         Command::GetChallenge => process(serialized_input, get_challenge),
+        Command::GetAttestation => process(serialized_input, attestation::get_attestation),
         _ => bail!("Unsupported command"),
     }
 }

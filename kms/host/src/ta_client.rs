@@ -875,6 +875,21 @@ impl TeeHandle {
         Ok(output)
     }
 
+    /// Issue #37 — fetch a remote-attestation evidence blob from the TA.
+    ///
+    /// The TA invokes the OP-TEE attestation PTA to measure itself and sign the
+    /// caller-supplied `nonce`. Requires a TA with `GetAttestation = 26`; older
+    /// TAs return "Unsupported command". No secrets are involved — the evidence
+    /// is meant to be verified by anyone holding the attestation public key.
+    pub async fn get_attestation(&self, nonce: Vec<u8>) -> Result<proto::GetAttestationOutput> {
+        let input = bincode::serialize(&proto::GetAttestationInput { nonce })
+            .context("Failed to serialize GetAttestationInput")?;
+        let out = self.call(proto::Command::GetAttestation, input).await?;
+        let output: proto::GetAttestationOutput =
+            bincode::deserialize(&out).context("Failed to deserialize GetAttestationOutput")?;
+        Ok(output)
+    }
+
     /// Read the current RPMB anti-rollback counter value (diagnostic endpoint).
     pub async fn read_rollback_counter(&self) -> Result<u64> {
         let input = bincode::serialize(&proto::ReadRollbackCounterInput {})
