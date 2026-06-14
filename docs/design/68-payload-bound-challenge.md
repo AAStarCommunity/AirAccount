@@ -1,72 +1,64 @@
 # #68 — Payload-Bound Challenge（闭合 V4：CA 偷换 payload）
 
-> 创建时间：2026-06-14 16:10 +07（本机时间）
+> 创建时间：2026-06-14 16:10 +07 · 重构：2026-06-14 19:30（commitment 方案，PR #75 review round-2）
 > 关联：威胁模型 `threat-model-ca-adversary.md` 向量 V4 · 安全路线图 A 线 · #49（challenge binding 基础）/ #63（strict）
 
 ## 问题（V4）
 
-#49/#63 的 challenge binding 证明「用户在场 + 批准了一次带 challenge `C` 的 WebAuthn ceremony」，但 `C` 只是绑 `wallet_id` 的随机 nonce，**不绑「签的是什么」**。一个被攻陷的 CA 可以：拿到用户对 `C`（本应签 `D_legit`）的合法 assertion，转手提交 `SignHash(wallet, D_evil, assertion(C))` —— TA 只校验 challenge 匹配，**不校验 payload**，于是签了用户没批准的 `D_evil`。
+#49/#63 的 challenge binding 证明「用户在场 + 批准了一次带 challenge `C` 的 WebAuthn ceremony」，但 `C` 只是绑 `wallet_id` 的随机 nonce，**不绑「签的是什么」**。被攻陷的 CA 可拿用户对 `C`（本应签 `D_legit`）的合法 assertion，转手 `SignHash(wallet, D_evil, assertion(C))` → 签了用户没批准的 `D_evil`。
 
-## 方案：把 challenge 绑定到 payload 摘要
+## 为什么「把 D 存进 TA 表」不够（PR #75 review 抓到的两个变体）
 
-1. 客户端调 `GetChallenge` 时附带**本次要签的摘要 `D`**（如 userOpHash / SignHash 的 hash / typed-data hash）。
-2. TA 签发 nonce `C`，在 pending 表里存 `(wallet_id, C, D, issued_at)`。
-3. 签名时，TA 取**实际待签的摘要 `H`**，校验：`assertion.challenge == C` **且** `H == D`（绑定的摘要）。不符即拒。
+第一版尝试：`GetChallenge(wallet, D)` 把 `D` 存进 TA pending 表，签名时校验实际 payload == 表里的 `D`。两个 V4 变体都绕得过：
 
-**为什么闭合 V4**：恶意 CA 即便调 `GetChallenge(wallet, D_evil)` 拿到为 `D_evil` 绑定的 `C'`，也**拿不到用户对 `C'` 的 WebAuthn 授权**（用户只在可信客户端里对 `D_legit` 的 `C` 授权过）。CA 想用 `D_legit` 的 assertion(`C`) 去签 `D_evil` → TA 查 `C` 绑的是 `D_legit ≠ D_evil` → 拒。assertion 从此**只能签它被授权的那一个 payload**。
+- **strip 变体**：CA 剥掉 `PayloadDigest` → TA 发未绑定 nonce → 检查被跳过。（round-1 加 strict 强制门挡住了。）
+- **substitute 变体（round-2 BLOCKING）**：用户的 authenticator **只签 clientDataJSON 里的 challenge `C`，`D` 根本不在用户签的内容里**。`C↔D` 绑定只存在 TA 表里、由 **CA 可控的明文 `PayloadDigest`** 设定。CA 直接把 `D_legit` 改成 `D_evil`（它就是 host）→ TA 绑 `C↔D_evil` → 用户对 `C` 签名（不知情）→ `SignHash(D_evil, assertion(C))` → 匹配 → 签了 `D_evil`。
 
-信任假设：`GetChallenge` 的 `D` 来自可信客户端（用户的 app/SDK），用户的 WebAuthn 批准对应该 ceremony。CA 不可信但绕不过「用户没给 `C'` 签名」这一点。
+**根因**：`D` 没有进入用户可证完整性的签名内容。任何「靠 CA 转发的明文字段建立的绑定」都不可信。
 
-## 实现计划
+## 方案：commitment —— 把 D 塞进用户签的 challenge
 
-**proto（`kms/proto`）**
-- `GetChallengeInput` 增 `payload_digest: Option<[u8;32]>`（`#[serde(default)]` 保 bincode 兼容）。strict 下要求 `Some`。
-- `PendingChallenge`（TA 内部结构）增 `payload_digest: Option<[u8;32]>`。
+让 `D` 成为用户 authenticator 实际签名内容的一部分：
 
-**TA（`kms/ta/src/main.rs`）**
-- `challenge_issue(wallet_id, payload_digest)` 存绑定。
-- `challenge_peek/consume` 返回 `(nonce, issued_at, payload_digest)`。
-- `verify_challenge_binding(wallet_id, assertion, actual_payload_digest)`：在现有 nonce 校验后，若绑定表有 `payload_digest`，则要求 `actual_payload_digest == 绑定值`；strict 下要求绑定必须存在。
-- `verify_passkey_for_wallet` 增 `payload_digest: Option<&[u8;32]>` 参数，透传给 `verify_challenge_binding`。
-- 各签名 handler 计算自己的待签摘要并传入：
-  - `sign_hash` → `input.hash`
-  - `sign_transaction` → 待签 txn 的哈希
-  - `sign_message` → 消息哈希
-  - `sign_typed_data` → EIP-712 digest
-  - `sign_grant_session` / `sign_p256_grant_session` → grant 摘要
-  - agent / p256 userOp 路径 → userOpHash
-  - 非签名敏感操作（如 derive/register/remove）可传 `None`（无 payload 概念；strict 仍要求 challenge 但不绑 payload，或单列策略）
+```
+客户端（可信）：  challenge = SHA-256(nonce ‖ D)      ← 用这个做 WebAuthn ceremony
+TA（签名时）：    expected  = SHA-256(stored_nonce ‖ 实际待签payload)
+                 require  assertion.clientDataJSON.challenge == expected
+```
 
-**host（`kms/host`）**
-- `TeeHandle::get_challenge(wallet_id, payload_digest)` + handler/路由把 payload digest 传进去。
+- `nonce`：TA `GetChallenge` 发的**纯随机值**（提供新鲜度 + 一次性，防重放）。
+- `D`：本次要签的摘要（userOpHash 等）。
+- 用户 authenticator 签的 clientDataJSON 含 `challenge = H(nonce‖D)` → **D 进了用户签名**。
 
-**SDK（#58 / A3）**
-- 升级流程：先算 payload 摘要 → `GetChallenge(wallet, digest)` → 用返回 nonce 做 WebAuthn challenge → 签名请求带 assertion。
+**为什么同时关掉两个变体**：
+- **substitute**：CA 把 `D_legit` 改成 `D_evil`，则 TA 重算 `H(nonce‖D_evil)` ≠ 用户签的 `H(nonce‖D_legit)` → 拒。CA 没有用户对新 commitment 的 assertion，造不出来。
+- **strip**：CA 不让客户端 commit、改用 plain nonce 作 challenge → strict 下 TA 要求签名 op 的 challenge 必须等于 commitment（不接受 plain nonce）→ 拒。
+- **GetChallenge 无 payload 字段**：没有 CA 可篡改的明文绑定字段，从源头消除 substitute 面。
 
-**测试（真机 E2E）**
-- 正例：`GetChallenge(W, D)` → 对 D 的签名通过。
-- 反例（V4）：`GetChallenge(W, D_legit)` 拿 assertion，提交签 `D_evil` → **拒**（payload 绑定不符）。
-- 反例：无 payload_digest（strict）→ 拒。
+## 实现（已落地）
 
-## 强制绑定门（strict mandatory gate）—— 真正闭合 V4 的关键
+**proto（`kms/proto`）**：`GetChallengeInput` **无 payload 字段**（注释说明为何）；`GetChallenge` 仍只返回随机 nonce。
 
-仅「绑定存在时才校验」**不够**：被攻陷的 CA 可以**剥掉 `PayloadDigest`**，让 `get_challenge` 发一个**未绑定**的 nonce，用户对它做 WebAuthn（看不出绑没绑），CA 再拿这个 assertion 去签 `D_evil` —— `bound_payload==None` 时若跳过检查，V4 就没闭合（strip-then-redirect，PR #75 review BLOCKING）。
+**TA（`kms/ta/src/main.rs`）**：`verify_challenge_binding(wallet_id, assertion, expected_payload)`：
+- `expected_payload = Some(D)`（签名 op）：算 `committed = SHA256(nonce‖D)`；
+  - `challenge == committed` → 通过（用户签名 commit 到此 payload）；
+  - `challenge == nonce`（plain）：strict **拒**（必须 commit）/ transition 放行（迁移态，不回归）；
+  - 都不等 → 拒「does not commit to the payload」。
+- `expected_payload = None`（非签名 op）：`challenge == nonce`（#49 行为）。
+- 常量时间比较（`ct_eq32`，定长 32B）；在 consume 之前校验（不烧 victim nonce）。
+- `verify_passkey_for_wallet` 增 `expected_payload`；`sign_hash` 传 `Some(&input.hash)`，其余 sign op 暂传 `None`（见剩余项）。
 
-修法：`verify_challenge_binding` 按 `(bound_payload, expected_payload)` 四象限处理，**strict 模式下签名 op 必须消费 payload-bound 的 nonce**：
+**host（`kms/host`）**：`BeginAuthentication` 无 `PayloadDigest` 字段；`get_challenge` 无 payload 参数。host 只返回 nonce，commitment 由客户端算。
 
-| bound_payload | expected_payload | 行为 |
-|:---:|:---:|:---|
-| Some | Some | 常量时间比对，不符则拒（防 redirect-of-bound）|
-| Some | None | 拒（payload-bound nonce 给了无 payload 的 op，fail-closed）|
-| **None** | **Some**（签名 op）| **strict：拒**「signing op requires payload-bound challenge」（关 strip 旁路）；transition：放行（不回归）|
-| None | None | 非签名 passkey op，无 payload 绑定（#49 challenge 绑定仍在）|
+**SDK（#58 / A3，aastar-sdk 仓库）**：签名流程 = 算 `D`(userOpHash) → `BeginAuthentication(wallet)` 拿 `nonce` → **challenge = SHA256(nonce‖D)** 做 WebAuthn → `SignHash(hash=D, assertion{…含 client_data_json})`。契约已在 aastar-sdk #58 更新。
 
-**为什么不在 `get_challenge` 处强制拒绝未绑定 nonce**：非签名 passkey op（derive/register/remove/export/create-agent）也走 `verify_passkey_for_wallet` → 需要 challenge，但它们没有 payload。若 `get_challenge` 在 strict 下一律拒缺 `payload_digest`，会把这些 op 一并 brick。把门放在**签名 op 的消费点**（`expected_payload.is_some()`）既关掉 strip 旁路，又不影响非签名 op。
+## 剩余（非阻塞，follow-up）
 
-**当前生效范围**：门对 `expected_payload.is_some()` 的 op 生效；目前只有 **SignHash** 传 `Some`，故 strict 下 **SignHash 路径已真正闭合 V4**。其余 5 个 sign op 仍传 `None`，在 strict 下走 `(None,None)` 分支即「非 payload 绑定」，**不被 brick**，但 V4 对它们仍开放（follow-up，非阻塞）。
+- **5 个 sign op 未接线**（`sign_transaction/message/typed_data/grant×2` 传 `None`）：各自待签摘要在 `wallet.sign_*` 内部计算，需提取后传入。SDK 实际走 SignHash，已覆盖；其余是机械 follow-up。**fail-safe**：strict 下这些 op 走 `None` 分支（plain nonce），不被 commitment 门拦（也即对它们 V4 仍开放，跟踪中）。
+- **正向 E2E**：需真 WebAuthn assertion（passkey 签 `H(nonce‖D)`）→ 靠 SDK（#58）。负例 E2E（CA 改 D → SignHash 拒）同样需 assertion。
+- transition 模式 V4 仍开放（可接受，迁移态）；**mainnet 必须 strict 镜像 + commitment**。
 
 ## 兼容/顺序
 
-- 与 #63 strict 协同：strict 镜像下，缺 `clientDataJSON` 或（签名 op）缺 payload 绑定都拒。
-- 依赖 SDK #58 把新流程（GetChallenge 带 digest）发出来。生产无老客户（用户确认），可直接上。
+- 与 #63 strict 协同：strict 镜像下，缺 `clientDataJSON`、或签名 op 的 challenge 不是 commitment（含改用 plain nonce）都拒。
 - bincode 跨版本：host+TA 同版部署（一贯如此）。

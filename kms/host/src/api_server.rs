@@ -2423,33 +2423,19 @@ impl KmsApiServer {
 
         let rp_id = self.resolve_rp_id(origin_header);
 
-        // Issue #68: parse the optional payload digest the client intends to sign.
-        // When present, the TA binds the issued challenge to it so the resulting
-        // assertion can only authorise signing this exact payload (defeats V4).
-        let payload_digest: Option<[u8; 32]> = match req.payload_digest.as_deref() {
-            Some(hex_str) => {
-                let bytes = hex::decode(hex_str.trim())
-                    .map_err(|_| anyhow!("PayloadDigest must be valid hex"))?;
-                if bytes.len() != 32 {
-                    return Err(anyhow!("PayloadDigest must be exactly 32 bytes"));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Some(arr)
-            }
-            None => None,
-        };
-
         // Issue #49: source the challenge from the TA so the authenticator signs
         // the exact nonce the TA will later verify + consume (anti-replay).
         // key_id is the TA wallet UUID string (see Self::validate_key_id / sign path).
         // Fallback: if the TA is older (no GetChallenge = 25) or transiently
         // unavailable, fall back to a host-generated random challenge so the
         // existing host-side binding still works (transition compatibility).
+        //
+        // Issue #68: the TA returns a plain random nonce. For a signing op the
+        // client must use challenge = SHA-256(nonce || payload_digest) in the
+        // WebAuthn ceremony; the TA recomputes + verifies that commitment at
+        // signing time. The challenge issuance itself is payload-free.
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
-            // Issue #68: pass the (optional) payload digest so the TA binds the
-            // challenge to it. None = not payload-bound (legacy behaviour).
-            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid, payload_digest).await {
+            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
                 Ok(nonce) => {
                     println!(
                         "🔐 Issue #49: using TA-issued challenge nonce for key_id={}",
