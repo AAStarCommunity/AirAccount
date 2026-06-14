@@ -303,6 +303,17 @@ const MAX_PENDING_CHALLENGES: usize = 256;
 /// `true` (STRICT): every assertion MUST carry `client_data_json` and pass nonce
 /// binding. Flip this (and rebuild/re-flash the TA) once all clients are
 /// migrated. TODO(#49): switch to strict for GA after Beta3 soak.
+///
+/// Issue #63: the mode is selected by the `strict-challenge` cargo feature
+/// rather than a hand-edited literal, so a strict TA image can be produced for
+/// mainnet/testing without touching source — and the default build stays
+/// TRANSITION so production (kms.aastar.io) keeps accepting not-yet-migrated
+/// clients until the SDK ships the GetChallenge flow (#58). Build the strict
+/// image with `--features strict-challenge` only AFTER #58 is deployed,
+/// otherwise every legacy client is rejected.
+#[cfg(feature = "strict-challenge")]
+const ENFORCE_TA_CHALLENGE: bool = true;
+#[cfg(not(feature = "strict-challenge"))]
 const ENFORCE_TA_CHALLENGE: bool = false;
 
 struct PendingChallenge {
