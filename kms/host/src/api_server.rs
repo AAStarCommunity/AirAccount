@@ -2429,6 +2429,11 @@ impl KmsApiServer {
         // Fallback: if the TA is older (no GetChallenge = 25) or transiently
         // unavailable, fall back to a host-generated random challenge so the
         // existing host-side binding still works (transition compatibility).
+        //
+        // Issue #68: the TA returns a plain random nonce. For a signing op the
+        // client must use challenge = SHA-256(nonce || payload_digest) in the
+        // WebAuthn ceremony; the TA recomputes + verifies that commitment at
+        // signing time. The challenge issuance itself is payload-free.
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
             Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
                 Ok(nonce) => {
