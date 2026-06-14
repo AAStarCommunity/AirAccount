@@ -46,7 +46,7 @@ TA（签名时）：    expected  = SHA-256(stored_nonce ‖ 实际待签payload
   - 都不等 → 拒「does not commit to the payload」。
 - `expected_payload = None`（非签名 op）：`challenge == nonce`（#49 行为）。
 - 常量时间比较（`ct_eq32`，定长 32B）；在 consume 之前校验（不烧 victim nonce）。
-- `verify_passkey_for_wallet` 增 `expected_payload`；`sign_hash` 传 `Some(&input.hash)`，其余 sign op 暂传 `None`（见剩余项）。
+- `verify_passkey_for_wallet` 增 `expected_payload`；**全部签名 op 都传各自待签摘要**：`sign_hash`→`input.hash`、`sign_transaction`→`Wallet::tx_signing_hash`(RLP keccak)、`sign_message`→`keccak256(message)`、`sign_typed_data`→`eip712_digest`(提前到 auth gate 前计算)、`sign_grant_session`/`sign_p256_grant_session`→`eip191_hash(inner)`。非签名 op（derive/register/remove/export/create-agent）传 `None`。
 
 **host（`kms/host`）**：`BeginAuthentication` 无 `PayloadDigest` 字段；`get_challenge` 无 payload 参数。host 只返回 nonce，commitment 由客户端算。
 
@@ -54,7 +54,7 @@ TA（签名时）：    expected  = SHA-256(stored_nonce ‖ 实际待签payload
 
 ## 剩余（非阻塞，follow-up）
 
-- **5 个 sign op 未接线**（`sign_transaction/message/typed_data/grant×2` 传 `None`）：各自待签摘要在 `wallet.sign_*` 内部计算，需提取后传入。SDK 实际走 SignHash，已覆盖；其余是机械 follow-up。**fail-safe**：strict 下这些 op 走 `None` 分支（plain nonce），不被 commitment 门拦（也即对它们 V4 仍开放，跟踪中）。
+- ~~5 个 sign op 未接线~~ **✅ 已接线**（feat/68-wire-remaining-signops）：`sign_transaction/message/typed_data/grant×2` 现各自计算待签摘要并传入 commitment 门 → **V4 对全部签名路径在 strict 下闭合**。SDK 须为每个 op 用对应的 D 计算 `challenge=SHA256(nonce‖D)`（D 定义见上 TA 行）。
 - **正向 E2E**：需真 WebAuthn assertion（passkey 签 `H(nonce‖D)`）→ 靠 SDK（#58）。负例 E2E（CA 改 D → SignHash 拒）同样需 assertion。
 - transition 模式 V4 仍开放（可接受，迁移态）；**mainnet 必须 strict 镜像 + commitment**。
 
