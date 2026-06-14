@@ -1,6 +1,7 @@
 {
   "body": {
     "schema": "airaccount.attestation-measurements.v1",
+    "sequence": 1,
     "updated": "2026-06-14",
     "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
     "measurements": [
@@ -23,9 +24,17 @@
           "toolchain": "nightly-2024-05-15",
           "note": "#37 attestation only (transition challenge mode)"
         }
+      },
+      {
+        "version": "v0.20.x-example-revoked",
+        "ta_measurement": "00000000000000000000000000000000000000000000000000000000deadbeef",
+        "status": "revoked",
+        "build": {
+          "note": "example of a revoked build — verifiers MUST NOT accept this measurement"
+        }
       }
     ]
   },
   "publisher_key": "d0c380e835db4a7accff631961eb860980491af069278933037f970d5801711b",
-  "signature": "0a57632036c2d6e57620ed24d982c1755f192eb9c623b9d0015845e6c42a79c41f814eb39af5e6cf676d9165bcee0733c3d8d52f962f431941ca59badfde1c0b"
+  "signature": "092cc0c2dde68b8dbb9954cd03a1cdcadc1521510d09e26ee15aaed601b7f6d4122dac4aaee758c777c9a1576c823f40fd8b4525d3e56146300c5ec6762d0004"
 }
