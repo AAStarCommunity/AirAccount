@@ -91,9 +91,21 @@ if $FIRST_RUN; then
 fi
 ok "Service files updated."
 
-# --- reload TA (restart tee-supplicant on board, wait there for stability) ---
+# --- reload TA (restart tee-supplicant on board, WAIT until it is actually
+#     ready before starting kms-api) ---
+# Root cause of the old flaky deploy: kms-api's TEE worker opens its TA session
+# at startup. If tee-supplicant is not ready yet, that open_session panics and
+# the worker thread dies — but the warp HTTP server stays up, so the service is
+# "active" and /health still passes, masking a dead TEE. We therefore (a) wait
+# for tee-supplicant to reach active state (not a blind sleep) plus a short
+# settle delay, and (b) smoke-test a TA-touching endpoint and restart kms-api on
+# failure (the retry succeeds once supplicant is ready).
 log "Reloading TA (restarting tee-supplicant@teepriv0.service)..."
-board "systemctl restart tee-supplicant@teepriv0.service && sleep 2"
+board "systemctl restart tee-supplicant@teepriv0.service"
+board "for i in \$(seq 1 15); do systemctl is-active tee-supplicant@teepriv0.service >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1" \
+    || warn "tee-supplicant did not report active within 15s — continuing, kms-api retry will cover it"
+# Settle delay: supplicant 'active' can still briefly precede readiness.
+board "sleep 3"
 
 # --- start services (dirf-repair runs first, then kms-api) ---
 log "Starting kms-api.service (dirf-repair.service will run first)..."
@@ -102,7 +114,7 @@ board "systemctl start kms-api.service"
 board "for i in \$(seq 1 15); do systemctl is-active kms-api.service >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1" \
     || { warn "Service did not become active within 15s"; board "journalctl -u kms-api.service -n 20 --no-pager 2>/dev/null || tail -20 /var/log/kms-api.log" || true; die "Deploy failed"; }
 
-# --- smoke test ---
+# --- HTTP smoke test (warp up?) ---
 log "Smoke test: GET /health"
 HEALTH=$(board "curl -sf http://127.0.0.1:3000/health 2>/dev/null || echo FAIL")
 if [[ "$HEALTH" == "FAIL" ]]; then
@@ -110,6 +122,29 @@ if [[ "$HEALTH" == "FAIL" ]]; then
     board "journalctl -u kms-api.service -n 30 --no-pager 2>/dev/null || tail -30 /var/log/kms-api.log" || true
     die "Deploy failed — service not responding on :3000"
 fi
+
+# --- TEE-worker smoke test (TA session alive?) with retry ---
+# /health does NOT touch the TA, so it cannot detect a dead worker. /RollbackCounter
+# does. If the worker died on the startup race, "TEE worker thread has exited"
+# comes back — restart kms-api and re-check (up to 3 attempts, 3s apart).
+log "Smoke test: GET /RollbackCounter (verifies TEE worker session is alive)"
+TEE_OK=false
+for attempt in 1 2 3; do
+    RESP=$(board "curl -s http://127.0.0.1:3000/RollbackCounter 2>/dev/null || echo FAIL")
+    if [[ "$RESP" == *'"counter"'* ]]; then
+        TEE_OK=true
+        break
+    fi
+    warn "TEE worker not ready (attempt $attempt/3): ${RESP:-<empty>} — restarting kms-api in 3s..."
+    board "sleep 3 && systemctl restart kms-api.service"
+    board "for i in \$(seq 1 15); do systemctl is-active kms-api.service >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1" || true
+done
+if [[ "$TEE_OK" != true ]]; then
+    warn "TEE worker still not alive after 3 attempts. Showing logs:"
+    board "journalctl -u kms-api.service -n 30 --no-pager 2>/dev/null || tail -30 /var/log/kms-api.log" || true
+    die "Deploy failed — TEE worker session not established (TA commands would all fail)"
+fi
+ok "TEE worker alive."
 
 ok "Deploy successful!"
 echo ""
