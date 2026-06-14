@@ -36,6 +36,7 @@ H_CA_OUT="$PROJECT_ROOT/kms/$CA_OUT_REL"
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${YELLOW}[mx93-build]${NC} $*"; }
 ok()   { echo -e "${GREEN}[ok]${NC} $*"; }
+warn() { echo -e "${YELLOW}[warn]${NC} $*" >&2; }
 die()  { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 
 docker ps --format '{{.Names}}' | grep -qx "$CONTAINER" \
