@@ -382,10 +382,13 @@ export function verifyMeasurementManifest(
       );
     }
 
-    // Only expose measurements if every check above held. Revoked entries are
-    // NEVER returned (they must not be accepted as known-good).
+    // Only expose measurements if every check above held. Use an ALLOWLIST of
+    // accepted live statuses — fail-closed: an unknown or typo'd status (incl. a
+    // mistyped "revoked") is NOT accepted, so a status typo can never fail-open
+    // and re-admit a measurement that should have been withheld.
     if (errors.length === 0) {
-      const live = manifest.body.measurements.filter((m) => m.status !== "revoked");
+      const ACCEPTED_STATUSES = new Set(["current", "previous"]);
+      const live = manifest.body.measurements.filter((m) => ACCEPTED_STATUSES.has(m.status));
       measurementsHex = live.map((m) => m.ta_measurement);
       currentMeasurementsHex = live
         .filter((m) => m.status === "current")
