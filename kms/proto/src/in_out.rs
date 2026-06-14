@@ -532,7 +532,12 @@ pub struct GetChallengeInput {
     /// by a compromised CA to sign a different one.
     ///
     /// `None` = legacy / non-payload operations (handled per the TA's strict
-    /// policy). `#[serde(default)]` keeps the bincode/JSON wire compatible.
+    /// policy). NOTE: `#[serde(default)]` is honored by the self-describing
+    /// serde_json API layer, but bincode is NOT self-describing and does NOT
+    /// tolerate a missing trailing field across the host<->TA boundary — so
+    /// cross-version safety relies on host+TA being deployed in lockstep from the
+    /// same proto revision (they always are), NOT on serde(default). The
+    /// attribute is retained for the JSON layer + ergonomic construction.
     #[serde(default)]
     pub payload_digest: Option<[u8; 32]>,
 }
