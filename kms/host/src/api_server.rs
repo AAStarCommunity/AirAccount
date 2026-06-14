@@ -2430,7 +2430,10 @@ impl KmsApiServer {
         // unavailable, fall back to a host-generated random challenge so the
         // existing host-side binding still works (transition compatibility).
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(&key_id) {
-            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
+            // Issue #68: payload_digest=None here — BeginAuthentication issues the
+            // challenge before the payload is known. Payload-bound challenges (the
+            // client supplying the intended digest) are wired in the follow-up.
+            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid, None).await {
                 Ok(nonce) => {
                     println!(
                         "🔐 Issue #49: using TA-issued challenge nonce for key_id={}",

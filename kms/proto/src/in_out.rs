@@ -522,6 +522,19 @@ pub struct GetChallengeInput {
     /// Wallet the challenge is bound to. A nonce issued for wallet A cannot be
     /// consumed by an assertion against wallet B.
     pub wallet_id: Uuid,
+    /// Issue #68 — payload-bound challenge (closes V4: CA swaps payload).
+    ///
+    /// The 32-byte digest of the message the client intends to sign with the
+    /// resulting assertion (e.g. the userOpHash, the SignHash hash, or the
+    /// EIP-712 digest). The TA stores `(wallet_id, nonce, payload_digest)` and,
+    /// at signing time, requires the ACTUAL payload being signed to hash to this
+    /// value — so an assertion authorised for one payload cannot be redirected
+    /// by a compromised CA to sign a different one.
+    ///
+    /// `None` = legacy / non-payload operations (handled per the TA's strict
+    /// policy). `#[serde(default)]` keeps the bincode/JSON wire compatible.
+    #[serde(default)]
+    pub payload_digest: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
