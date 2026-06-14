@@ -38,6 +38,16 @@ export-secrets = []
 # hardware anti-rollback. Default (feature off) = RPMB, matching PR#47.
 ree-fs-only = []
 
+# Issue #63: WebAuthn challenge-binding enforcement mode.
+# Off (default) = TRANSITION: assertions without clientDataJSON fall through to
+#   the legacy ECDSA-only path (with a warning). Keeps not-yet-migrated clients
+#   working. Assertions WITH clientDataJSON are ALWAYS strictly verified.
+# On = STRICT: every assertion MUST carry clientDataJSON and pass TA-issued
+#   nonce binding (closes the legacy assertion-replay backdoor, V2). Build the
+#   strict image ONLY after the SDK ships the GetChallenge flow (#58), else all
+#   legacy clients are rejected. Mainnet target.
+strict-challenge = []
+
 [dependencies]
 libc = { path = "../../../../rust/libc" }
 proto = { path = "../proto" }
