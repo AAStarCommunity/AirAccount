@@ -252,6 +252,14 @@ pub struct BeginAuthenticationRequest {
     pub key_id: Option<String>,
     #[serde(rename = "Address", skip_serializing_if = "Option::is_none", default)]
     pub address: Option<String>,
+    /// Issue #68 — payload-bound challenge. Hex-encoded 32-byte digest of the
+    /// message the client intends to sign with the resulting assertion (e.g. the
+    /// ERC-4337 userOpHash for the subsequent SignHash). When present, the TA
+    /// binds the issued challenge to this digest, so the assertion can only
+    /// authorise signing this exact payload (defeats CA payload-swap / V4). When
+    /// omitted, the challenge is not payload-bound (legacy behaviour).
+    #[serde(rename = "PayloadDigest", skip_serializing_if = "Option::is_none", default)]
+    pub payload_digest: Option<String>,
 }
 
 // ========================================
