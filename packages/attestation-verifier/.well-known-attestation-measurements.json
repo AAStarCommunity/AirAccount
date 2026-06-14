@@ -1,0 +1,31 @@
+{
+  "body": {
+    "schema": "airaccount.attestation-measurements.v1",
+    "updated": "2026-06-14",
+    "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
+    "measurements": [
+      {
+        "version": "v0.21.0-strict",
+        "ta_measurement": "188359595eab3c9e25dbd6126f11898a5b8e3fbf8d3a303a1be2676cca6071a1",
+        "status": "current",
+        "build": {
+          "features": "ree-fs-only,strict-challenge",
+          "toolchain": "nightly-2024-05-15",
+          "note": "#37 attestation + #63 strict challenge build; deployed on FRDM-IMX93"
+        }
+      },
+      {
+        "version": "v0.21.0-transition",
+        "ta_measurement": "3b9435d635ce2d3730fd203b22c9e30659cf8414feb08a5a149258465706bd6b",
+        "status": "previous",
+        "build": {
+          "features": "ree-fs-only",
+          "toolchain": "nightly-2024-05-15",
+          "note": "#37 attestation only (transition challenge mode)"
+        }
+      }
+    ]
+  },
+  "publisher_key": "d0c380e835db4a7accff631961eb860980491af069278933037f970d5801711b",
+  "signature": "0a57632036c2d6e57620ed24d982c1755f192eb9c623b9d0015845e6c42a79c41f814eb39af5e6cf676d9165bcee0733c3d8d52f962f431941ca59badfde1c0b"
+}

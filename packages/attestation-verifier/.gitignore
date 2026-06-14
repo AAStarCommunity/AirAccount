@@ -1,3 +1,4 @@
 node_modules/
 dist/
 *.tsbuildinfo
+manifest-signing-key.pem
