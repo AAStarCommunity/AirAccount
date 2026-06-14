@@ -1389,6 +1389,11 @@ impl KmsApiServer {
         self.tee.read_rollback_counter().await
     }
 
+    /// Issue #37 — produce a remote-attestation evidence blob bound to `nonce`.
+    pub async fn get_attestation(&self, nonce: Vec<u8>) -> Result<proto::GetAttestationOutput> {
+        self.tee.get_attestation(nonce).await
+    }
+
     pub async fn change_passkey(&self, req: ChangePasskeyRequest) -> Result<ChangePasskeyResponse> {
         println!("📝 KMS ChangePasskey API called for key: {}", req.key_id);
 
@@ -3985,9 +3990,13 @@ async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
         "service": "kms-api",
         "version": KMS_VERSION,
         "ta_mode": "real",
+        // Issue #37: TA exposes GetAttestation (=26). The route is always wired
+        // in this build; whether the TA on the device supports it depends on the
+        // deployed TA revision (older TAs return "Unsupported command").
+        "attestation_available": true,
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
-            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats"]
+            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats", "/RollbackCounter", "/attestation?nonce=<hex>"]
         }
     })))
 }
@@ -4615,6 +4624,72 @@ async fn handle_rollback_counter(
     }
     match server.read_rollback_counter().await {
         Ok(counter) => Ok(warp::reply::json(&RollbackCounterResponse { counter })),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
+/// Query string for GET /attestation. The caller supplies a fresh random
+/// `nonce` (hex) to bind the evidence and defeat replay.
+#[derive(serde::Deserialize)]
+struct AttestationQuery {
+    nonce: Option<String>,
+}
+
+/// Issue #37 — GET /attestation?nonce=<hex>
+///
+/// Returns a TEE attestation evidence blob. All binary fields are hex-encoded
+/// for transport. A verifier holding the (TOFU-registered) attestation public
+/// key checks: echoed `nonce` == sent nonce; `signature` is a valid RSA-PSS
+/// (SHA-256, salt 32) signature over `SHA256(nonce | ta_measurement)`; and
+/// `ta_measurement` equals the published `kms_ta_measurement` reference value.
+async fn handle_get_attestation(
+    query: AttestationQuery,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let nonce_hex = query
+        .nonce
+        .ok_or_else(|| warp::reject::custom(ApiError(
+            "missing required query parameter: nonce (hex-encoded random challenge)".to_string(),
+        )))?;
+    let nonce = hex::decode(nonce_hex.trim()).map_err(|_| {
+        warp::reject::custom(ApiError("nonce must be valid hex".to_string()))
+    })?;
+    if nonce.is_empty() {
+        return Err(warp::reject::custom(ApiError(
+            "nonce must be non-empty".to_string(),
+        )));
+    }
+
+    #[derive(serde::Serialize)]
+    struct AttestationResponse {
+        /// Evidence schema version (bump on layout changes).
+        schema: &'static str,
+        nonce: String,
+        ta_uuid: String,
+        ta_measurement: String,
+        signature: String,
+        attest_pubkey_exp: String,
+        attest_pubkey_mod: String,
+        /// Signature algorithm id (TEE_ALG_*). 0x70414930 = RSASSA_PKCS1_PSS_MGF1_SHA256.
+        sig_alg: u32,
+        ree_time_secs: u64,
+        /// Honest trust-root disclosure (see design doc §9 / R-1).
+        trust_root: &'static str,
+    }
+
+    match server.get_attestation(nonce).await {
+        Ok(ev) => Ok(warp::reply::json(&AttestationResponse {
+            schema: "airaccount.attestation.v1",
+            nonce: hex::encode(&ev.nonce),
+            ta_uuid: hex::encode(&ev.ta_uuid),
+            ta_measurement: hex::encode(&ev.ta_measurement),
+            signature: hex::encode(&ev.signature),
+            attest_pubkey_exp: hex::encode(&ev.attest_pubkey_exp),
+            attest_pubkey_mod: hex::encode(&ev.attest_pubkey_mod),
+            sig_alg: ev.sig_alg,
+            ree_time_secs: ev.ree_time_secs,
+            trust_root: "tofu-self-signed-optee-key (no NXP chain; see issue #37 R-1)",
+        })),
         Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
     }
 }
@@ -5301,6 +5376,14 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server_rc.clone()))
         .and_then(handle_rollback_counter);
 
+    // Attestation (issue #37) - GET /attestation?nonce=<hex> (no auth; no secrets)
+    let server_attest = server.clone();
+    let attestation = warp::path("attestation")
+        .and(warp::get())
+        .and(warp::query::<AttestationQuery>())
+        .and(warp::any().map(move || server_attest.clone()))
+        .and_then(handle_get_attestation);
+
     // ChangePasskey API (TEE)
     let server_cp = server.clone();
     let change_passkey = warp::path("ChangePasskey")
@@ -5676,6 +5759,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(queue_status)
         .or(stats_json)
         .or(rollback_counter)
+        .or(attestation)
         .or(change_passkey)
         .boxed();
     let group2 = create_key
