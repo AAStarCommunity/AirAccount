@@ -233,3 +233,170 @@ export function freshNonceHex(): string {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   return Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("hex");
 }
+
+// ===========================================================================
+// Issue #12 — signed measurement manifest (reference-value distribution §7.1 tier-2)
+// ===========================================================================
+//
+// Instead of hard-coding `expectedMeasurementsHex`, a verifier fetches a signed
+// manifest (e.g. https://kms.aastar.io/.well-known/attestation-measurements.json),
+// verifies its Ed25519 signature against a PINNED publisher key, and uses the
+// `ta_measurement` values it lists. Combined with reproducible builds (§7.1
+// tier-3, `scripts/ta-measurement.sh`) anyone can independently recompute a
+// listed measurement from public source — so the manifest is a convenient,
+// tamper-evident registry, not a new thing to blindly trust.
+
+/** One measured TA build in the manifest body. */
+export interface ManifestMeasurement {
+  /** Human version label, e.g. "v0.21.0-strict". */
+  version: string;
+  /** 32-byte TA signed-header digest (hex) — the value GET /attestation returns. */
+  ta_measurement: string;
+  /** "current" | "previous" | "revoked" — verifier may reject non-current. */
+  status: string;
+  /** Free-form build provenance (features, toolchain, git commit). */
+  build?: Record<string, string>;
+}
+
+/** Expected manifest schema string (reject anything else). */
+export const MANIFEST_SCHEMA = "airaccount.attestation-measurements.v1";
+
+/** The signed portion of the manifest. `signature` is computed over JSON.stringify(this). */
+export interface ManifestBody {
+  schema: string;
+  updated: string;
+  /**
+   * Monotonic sequence number, bumped on every publish. Anti-downgrade: a verifier
+   * persists the highest sequence it has accepted and rejects any manifest with a
+   * lower one, so a compromised CA can't replay an OLD signed manifest to re-list a
+   * since-revoked measurement (the freshness half of revocation support).
+   */
+  sequence: number;
+  /** 16-byte TA UUID (hex) these measurements belong to. */
+  ta_uuid: string;
+  measurements: ManifestMeasurement[];
+}
+
+export interface MeasurementManifest {
+  body: ManifestBody;
+  /** Ed25519 public key of the publisher, raw 32 bytes (hex). */
+  publisher_key: string;
+  /** Ed25519 signature (hex) over `JSON.stringify(body)` (UTF-8). */
+  signature: string;
+}
+
+export interface ManifestVerifyOptions {
+  /** Require body.ta_uuid to equal this (hex). */
+  expectedTaUuidHex?: string;
+  /**
+   * Anti-downgrade floor: reject if body.sequence < this. Pass the highest
+   * sequence you have previously accepted (persist it). Omit only on first use.
+   */
+  minSequence?: number;
+}
+
+export interface ManifestVerifyResult {
+  ok: boolean;
+  errors: string[];
+  /**
+   * NON-revoked measurements (hex) — `current` + `previous`, EXCLUDING `revoked`.
+   * Feed into verifyAttestation. A revoked measurement is never returned.
+   */
+  measurementsHex: string[];
+  /** Only the `status:"current"` measurements. */
+  currentMeasurementsHex: string[];
+  /** body.sequence on success — persist as the new anti-downgrade floor. */
+  sequence: number;
+}
+
+/** Build a Node Ed25519 public key from a raw 32-byte hex key (JWK / OKP). */
+function ed25519PublicKeyFromRawHex(hex: string) {
+  const raw = hexToBuf(hex, "publisher_key");
+  if (raw.length !== 32) throw new Error("publisher_key must be 32 bytes (Ed25519)");
+  return createPublicKey({
+    key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+    format: "jwk",
+  });
+}
+
+/** Stable serialization of the signed body — MUST match the signer (sign-manifest). */
+export function canonicalManifestBody(body: ManifestBody): string {
+  return JSON.stringify(body);
+}
+
+/**
+ * Verify a measurement manifest: the publisher key must equal a pinned trusted
+ * key, AND the Ed25519 signature over the body must be valid. Returns the listed
+ * measurements only on success.
+ *
+ * @param manifest               parsed manifest JSON
+ * @param pinnedPublisherKeyHex  the publisher Ed25519 raw pubkey (hex) you trust
+ * @param opts                   ta_uuid match + anti-downgrade floor
+ */
+export function verifyMeasurementManifest(
+  manifest: MeasurementManifest,
+  pinnedPublisherKeyHex: string,
+  opts: ManifestVerifyOptions = {},
+): ManifestVerifyResult {
+  const errors: string[] = [];
+  let measurementsHex: string[] = [];
+  let currentMeasurementsHex: string[] = [];
+  let sequence = -1;
+
+  try {
+    // Publisher key must be the pinned one (verify the sig against the PINNED key,
+    // never the key the manifest carries — else an attacker self-signs with their
+    // own key and swaps publisher_key).
+    const keyTrusted = hexEq(manifest.publisher_key, pinnedPublisherKeyHex);
+    if (!keyTrusted) {
+      errors.push(
+        `manifest publisher_key ${manifest.publisher_key} is not the pinned trusted key`,
+      );
+    }
+    const key = ed25519PublicKeyFromRawHex(pinnedPublisherKeyHex);
+    const msg = Buffer.from(canonicalManifestBody(manifest.body), "utf8");
+    const sig = hexToBuf(manifest.signature, "signature");
+    const sigValid = cryptoVerify(null, msg, key, sig);
+    if (!sigValid) errors.push("manifest Ed25519 signature is INVALID");
+
+    // Schema gate: reject unknown schema before trusting the body shape.
+    if (manifest.body.schema !== MANIFEST_SCHEMA) {
+      errors.push(
+        `unexpected manifest schema "${manifest.body.schema}" (expected "${MANIFEST_SCHEMA}")`,
+      );
+    }
+
+    // Anti-downgrade: sequence must be an integer and >= the caller's floor.
+    sequence = manifest.body.sequence;
+    if (!Number.isInteger(sequence)) {
+      errors.push(`manifest sequence is not an integer: ${sequence}`);
+    } else if (opts.minSequence !== undefined && sequence < opts.minSequence) {
+      errors.push(
+        `manifest sequence ${sequence} < accepted floor ${opts.minSequence} (downgrade/replay)`,
+      );
+    }
+
+    if (opts.expectedTaUuidHex && !hexEq(manifest.body.ta_uuid, opts.expectedTaUuidHex)) {
+      errors.push(
+        `manifest ta_uuid ${manifest.body.ta_uuid} != expected ${opts.expectedTaUuidHex}`,
+      );
+    }
+
+    // Only expose measurements if every check above held. Use an ALLOWLIST of
+    // accepted live statuses — fail-closed: an unknown or typo'd status (incl. a
+    // mistyped "revoked") is NOT accepted, so a status typo can never fail-open
+    // and re-admit a measurement that should have been withheld.
+    if (errors.length === 0) {
+      const ACCEPTED_STATUSES = new Set(["current", "previous"]);
+      const live = manifest.body.measurements.filter((m) => ACCEPTED_STATUSES.has(m.status));
+      measurementsHex = live.map((m) => m.ta_measurement);
+      currentMeasurementsHex = live
+        .filter((m) => m.status === "current")
+        .map((m) => m.ta_measurement);
+    }
+  } catch (e) {
+    errors.push((e as Error).message);
+  }
+
+  return { ok: errors.length === 0, errors, measurementsHex, currentMeasurementsHex, sequence };
+}
