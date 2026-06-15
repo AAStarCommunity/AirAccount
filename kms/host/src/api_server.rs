@@ -5094,6 +5094,17 @@ async fn handle_rejection(
             warp::http::StatusCode::TOO_MANY_REQUESTS,
         ));
     }
+    // Issue #73: a malformed query string (an unexpected parameter rejected by
+    // AttestationQuery's deny_unknown_fields, or a wrong-typed field) is a CLIENT
+    // error → 400 with a clear message, not a 500 "Internal server error".
+    if err.find::<warp::reject::InvalidQuery>().is_some() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "error": "invalid query parameters: unexpected or malformed field"
+            })),
+            warp::http::StatusCode::BAD_REQUEST,
+        ));
+    }
     if let Some(api_error) = err.find::<ApiError>() {
         let status = if api_error.0.contains("API key") {
             warp::http::StatusCode::UNAUTHORIZED
