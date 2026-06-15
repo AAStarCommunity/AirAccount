@@ -1,6 +1,6 @@
 # AirAccount KMS — API 测试覆盖矩阵
 
-> 2026-06-13 · v0.20.0 (Beta2) · 配套 OpenAPI: [`api/openapi.yaml`](./api/openapi.yaml) · Swagger UI: [`api/index.html`](./api/index.html)
+> 2026-06-13 · v0.22.0 (Beta4) · 配套 OpenAPI: [`api/openapi.yaml`](./api/openapi.yaml) · Swagger UI: [`api/index.html`](./api/index.html)
 
 ## 测试套件
 
