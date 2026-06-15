@@ -1137,7 +1137,11 @@ impl KmsApiServer {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let last = self.attestation_probe_at.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < ATTESTATION_PROBE_MIN_INTERVAL_SECS {
+        // Skip only when the clock has genuinely advanced but less than the
+        // interval. `now < last` means wall time moved backward (NTP / tz jump);
+        // treat that as probe-due rather than freezing re-probes until wall time
+        // catches up to a stale future timestamp.
+        if now >= last && now.saturating_sub(last) < ATTESTATION_PROBE_MIN_INTERVAL_SECS {
             // Probed recently and still not capable — don't hammer the TEE.
             return false;
         }
