@@ -1048,6 +1048,11 @@ fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
     }
 }
 
+/// Issue #73: minimum seconds between `/health` attestation probes while
+/// capability is not yet confirmed. Bounds TEE load from frequent /health
+/// polling against an older/incapable TA (or during the startup window).
+const ATTESTATION_PROBE_MIN_INTERVAL_SECS: i64 = 30;
+
 pub struct KmsApiServer {
     db: KmsDb,
     tee: TeeHandle,
@@ -1056,11 +1061,16 @@ pub struct KmsApiServer {
     rp_name: String,
     rp_ids: Vec<String>,
     expected_origins: Vec<String>,
-    /// Issue #73 — cached attestation-capability probe (0=unprobed, 1=capable,
-    /// 2=incapable). Reflects whether the *deployed* TA actually supports
-    /// GetAttestation (=26), instead of hardcoding /health's
-    /// `attestation_available` to `true`.
-    attestation_capable: std::sync::atomic::AtomicU8,
+    /// Issue #73 — attestation capability for `/health`, replacing a hardcoded
+    /// `true`. `attestation_capable` is a **monotonic latch**: the first probe
+    /// that proves the deployed TA supports GetAttestation (=26) latches it
+    /// `true` for the process lifetime (a TA that gains/loses the command needs a
+    /// redeploy, which restarts the process and resets this). While unconfirmed,
+    /// `attestation_probe_at` (unix secs of the last probe) rate-limits re-probes
+    /// so a transient startup window OR an older TA cannot trigger a TEE call on
+    /// every `/health`.
+    attestation_capable: std::sync::atomic::AtomicBool,
+    attestation_probe_at: std::sync::atomic::AtomicI64,
 }
 
 impl KmsApiServer {
@@ -1097,34 +1107,48 @@ impl KmsApiServer {
             rp_name,
             rp_ids,
             expected_origins,
-            attestation_capable: std::sync::atomic::AtomicU8::new(0),
+            attestation_capable: std::sync::atomic::AtomicBool::new(false),
+            attestation_probe_at: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
     /// Issue #73 — real attestation capability for `/health`, replacing a
-    /// hardcoded `true`. Probes the TA once (GetAttestation with a fixed,
-    /// non-secret dummy nonce; the evidence is discarded) and caches the
-    /// verdict. A definitive "Unsupported command" (older TA without cmd 26)
-    /// caches *incapable*; a transient error (e.g. TEE worker not ready yet)
-    /// leaves the probe pending so a later `/health` re-probes.
+    /// hardcoded `true`. Capability is a **monotonic latch**: the first probe
+    /// that succeeds (GetAttestation with a fixed, non-secret dummy nonce; the
+    /// evidence is discarded) latches `true` for the process lifetime. While
+    /// unconfirmed, probes are rate-limited (>= `ATTESTATION_PROBE_MIN_INTERVAL_SECS`
+    /// apart) so a transient startup window OR an older TA without cmd 26 cannot
+    /// trigger a TEE call on every `/health`.
+    ///
+    /// There is deliberately **no coupling to any error wording**: any error
+    /// just means "not capable right now", and the next probe (after the
+    /// interval) flips it to `true` the moment a capable TA is ready. This is
+    /// both robust (a reworded TA error can't mislead it) and fail-safe (worst
+    /// case is an extra probe per interval, never a wrong permanent verdict).
     pub async fn attestation_capable(&self) -> bool {
         use std::sync::atomic::Ordering;
-        match self.attestation_capable.load(Ordering::Relaxed) {
-            1 => return true,
-            2 => return false,
-            _ => {}
+        // Monotonic: a TA cannot lose cmd 26 under a running host (that needs a
+        // redeploy, which restarts the process and resets this latch).
+        if self.attestation_capable.load(Ordering::Relaxed) {
+            return true;
         }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let last = self.attestation_probe_at.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < ATTESTATION_PROBE_MIN_INTERVAL_SECS {
+            // Probed recently and still not capable — don't hammer the TEE.
+            return false;
+        }
+        self.attestation_probe_at.store(now, Ordering::Relaxed);
         match self.get_attestation(b"health-probe".to_vec()).await {
             Ok(_) => {
-                self.attestation_capable.store(1, Ordering::Relaxed);
+                self.attestation_capable.store(true, Ordering::Relaxed);
                 true
             }
-            Err(e) if e.to_string().to_lowercase().contains("unsupported") => {
-                self.attestation_capable.store(2, Ordering::Relaxed);
-                false
-            }
-            // Transient failure: do not cache; report not-yet-confirmed and
-            // re-probe on the next /health call.
+            // Transient (worker not ready) OR unsupported (older TA): both mean
+            // "not capable now". Re-probed after the interval — no error-string match.
             Err(_) => false,
         }
     }
