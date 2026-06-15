@@ -1,6 +1,37 @@
 # KMS Changelog
 
-> Updated: 2026-06-13
+> Updated: 2026-06-15
+
+## 0.22.0 (2026-06-15) — Beta4 — 远程证明 MVP + 威胁模型 V4 闭合 + 可复现信任根
+
+**主题：让客户端能密码学验证「签名来自真实 OP-TEE」，并彻底关闭 CA 偷换 payload（V4）。**
+
+### 新增 (Features)
+- **#37 远程证明 MVP（Phase 1）**：`GetAttestation`(cmd 26) —— TA 调 OP-TEE attestation PTA 取 TA signed-header digest，用 RSA-PSS(over `SHA-256(nonce‖ta_measurement)`，MGF1-SHA256，salt 32) 签名；新端点 `GET /attestation?nonce=<hex>`；新包 `@aastar/attestation-verifier`（RSA-PSS 验签 + nonce 防重放 + TOFU pin）。实机 FRDM-IMX93 验证 R-2/R-3 PASS。
+- **#12 签名 measurement manifest**：`GET /.well-known/attestation-measurements.json`（Ed25519 签名，pin publisher key）；verifier 支持 manifest 验证（status allowlist fail-closed + sequence 防降级 + schema 校验）。
+- **#37 / R-4 可复现构建**：`scripts/ta-measurement.sh` 从公开源码 + 同工具链 bit-for-bit 重算 `ta_measurement`（= stripped_ta 的 SHA-256）；信任根从「信 AAStar 登记值」升到「信源码可验」。
+- **#68 payload-bound challenge**：WebAuthn challenge 改 commitment `SHA-256(nonce‖payloadDigest)`，TA 重算比对 —— passkey 不只证「在场」，还证「签的就是这笔 payload」。
+- **#63 strict challenge-binding（cargo feature）**：`strict-challenge` 编译出强制镜像（拒绝无 TA-challenge 绑定的 assertion）；生产 flip 待 SDK #58 发布。
+- **#70 DVT KMS 侧 binding 黄金向量**：新包 `packages/dvt-binding-vector`（可执行 KAT，证明命门 C1：用户授权的 op == DVT 共签的 userOpHash == KMS secp256k1 签的 userOpHash = 同一笔），u0/u1 逐字节对齐 airaccount-contract `HashToG2Golden.t.sol`。
+
+### 安全 (Security)
+- **威胁模型 V4 全闭（#68）**：commitment 方案在**全部签名操作**上关闭 CA payload-swap（strip + substitute 两种变体）；grant-session 也绑定。
+- **#73 attestation 健壮性**：`/health` `attestation_available` 从硬编码 `true` 改**真探针**（单调 latch + ≥30s 限流，无错误字符串耦合，fail-safe）；attestation nonce 上限（≤64B）；query schema 校验（`deny_unknown_fields`，非法参数返回 400 而非 500）。
+- **#70 DVT 误派更正**：协调文档曾把「KMS 闸门 + 校验 BLS 聚合」派给 #70 —— 改正：**KMS 不签 / 不验 / 不打包 BLS**，DVT 强制与验证全在链上 account 合约(#110) + 独立节点(#42)；KMS 跑在 CA 信任域内（正是 V5 要防的），自己把关形同虚设。
+- ⚠️ **proto bincode 线格式变更**（新增 GetAttestation + payload commitment）：host 与 TA 必须同版本一起部署。
+
+### 文档 (Docs)
+- 威胁模型 V5（假 TEE / 伪造签名环境）章节 + MVP 半信任 / 全信任 ASCII 信任图。
+- `docs/design/security-roadmap.md`：V1–V5 缺口拆成 A/B/C/D/E 任务线。
+- #37 远程证明设计 + 硬件实测发现（**R-1：OP-TEE attestation key 设备自签、无 NXP 证书链 → Phase 2/ELE 锚定阻塞，需 NXP 一手资料**）。
+- DVT 跨仓协调记录（hub `YetAnotherAA-Validator#42` + 双向依赖链）。
+
+### 测试 (Testing)
+- 真机 FRDM-IMX93：attestation R-2/R-3 PASS；#73 E2E（/health 真探针、超长 nonce 400、多余参数 400、正常返 evidence）板上 + 公网 kms.aastar.io 验过；binding 向量 `node --test` 绿。
+- 两个 PR（#81 / #82）经 Codex 多轮对抗审查，全部 **APPROVED**（含 alignment 机器校验、探测逻辑重构、时钟回拨守卫）。
+
+### 版本 (Versions)
+- CA(host) `0.21.0 → 0.22.0`；TA `0.4.0 → 0.5.0`；proto `0.4.0 → 0.5.0`；OpenAPI `0.21.0 → 0.22.0`。
 
 ## 0.21.0 (2026-06-13) — Beta3 — 安全加固 + 生态对齐
 
