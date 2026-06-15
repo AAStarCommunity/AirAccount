@@ -1,0 +1,20 @@
+{
+  "purpose": "AirAccount #70 / #68 payload-commitment golden vector. Proves the WebAuthn challenge the user's passkey signs commits to EXACTLY the userOpHash that the DVT nodes co-sign (BLS) and the KMS signs (secp256k1). This is the C1 hard constraint made executable: the user-authorized op, the DVT-co-signed op, and the KMS-signed op are the same op. NOTE: this is NOT a BLS vector and AirAccount is NOT a 4th BLS signer — the BLS hashToG2/pkAgg vectors are owned by node(#42)/SDK(#63)/contract(#110).",
+  "formula": "challenge = SHA-256(nonce || userOpHash)",
+  "source_of_truth": "kms/ta/src/main.rs verify_challenge_binding (#68): hasher.update(nonce); hasher.update(payload); committed = finalize(). payload = userOpHash (32 bytes), nonce = TA-issued one-time challenge (32 bytes).",
+  "nonce_note": "Fixed 32-byte TEST nonce for this known-answer vector ONLY. Real challenges use a random, TA-issued, one-time nonce from GetChallenge — never this constant.",
+  "nonce": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "alignment": "u0/u1 are the SAME canonical userOpHash values as airaccount-contract test/HashToG2Golden.t.sol (vec1/vec2). So the #68 user-authorization binding (this file) and the on-chain BLS hashToG2 vectors refer to byte-identical operations — closing the cross-repo loop on a shared op identity.",
+  "vectors": [
+    {
+      "name": "u0",
+      "userOpHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "expectedChallenge": "0x76dbe77eb07f64b0e10224c4a792f98e97010efa57c830127aacba3c71a73995"
+    },
+    {
+      "name": "u1",
+      "userOpHash": "0x8bb1b199f427dfc49e5fe40f2f3278cb1a48587824b78263051c8c4d81d77a81",
+      "expectedChallenge": "0xe55399716f30622a67c17276e1096869039a92904221fdbd17435e098cc509a1"
+    }
+  ]
+}
