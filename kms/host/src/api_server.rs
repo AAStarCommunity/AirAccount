@@ -1048,6 +1048,11 @@ fn wallet_to_metadata(w: &WalletRow) -> KeyMetadata {
     }
 }
 
+/// Issue #73: minimum seconds between `/health` attestation probes while
+/// capability is not yet confirmed. Bounds TEE load from frequent /health
+/// polling against an older/incapable TA (or during the startup window).
+const ATTESTATION_PROBE_MIN_INTERVAL_SECS: i64 = 30;
+
 pub struct KmsApiServer {
     db: KmsDb,
     tee: TeeHandle,
@@ -1056,6 +1061,16 @@ pub struct KmsApiServer {
     rp_name: String,
     rp_ids: Vec<String>,
     expected_origins: Vec<String>,
+    /// Issue #73 — attestation capability for `/health`, replacing a hardcoded
+    /// `true`. `attestation_capable` is a **monotonic latch**: the first probe
+    /// that proves the deployed TA supports GetAttestation (=26) latches it
+    /// `true` for the process lifetime (a TA that gains/loses the command needs a
+    /// redeploy, which restarts the process and resets this). While unconfirmed,
+    /// `attestation_probe_at` (unix secs of the last probe) rate-limits re-probes
+    /// so a transient startup window OR an older TA cannot trigger a TEE call on
+    /// every `/health`.
+    attestation_capable: std::sync::atomic::AtomicBool,
+    attestation_probe_at: std::sync::atomic::AtomicI64,
 }
 
 impl KmsApiServer {
@@ -1092,6 +1107,53 @@ impl KmsApiServer {
             rp_name,
             rp_ids,
             expected_origins,
+            attestation_capable: std::sync::atomic::AtomicBool::new(false),
+            attestation_probe_at: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    /// Issue #73 — real attestation capability for `/health`, replacing a
+    /// hardcoded `true`. Capability is a **monotonic latch**: the first probe
+    /// that succeeds (GetAttestation with a fixed, non-secret dummy nonce; the
+    /// evidence is discarded) latches `true` for the process lifetime. While
+    /// unconfirmed, probes are rate-limited (>= `ATTESTATION_PROBE_MIN_INTERVAL_SECS`
+    /// apart) so a transient startup window OR an older TA without cmd 26 cannot
+    /// trigger a TEE call on every `/health`.
+    ///
+    /// There is deliberately **no coupling to any error wording**: any error
+    /// just means "not capable right now", and the next probe (after the
+    /// interval) flips it to `true` the moment a capable TA is ready. This is
+    /// both robust (a reworded TA error can't mislead it) and fail-safe (worst
+    /// case is an extra probe per interval, never a wrong permanent verdict).
+    pub async fn attestation_capable(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        // Monotonic: a TA cannot lose cmd 26 under a running host (that needs a
+        // redeploy, which restarts the process and resets this latch).
+        if self.attestation_capable.load(Ordering::Relaxed) {
+            return true;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let last = self.attestation_probe_at.load(Ordering::Relaxed);
+        // Skip only when the clock has genuinely advanced but less than the
+        // interval. `now < last` means wall time moved backward (NTP / tz jump);
+        // treat that as probe-due rather than freezing re-probes until wall time
+        // catches up to a stale future timestamp.
+        if now >= last && now.saturating_sub(last) < ATTESTATION_PROBE_MIN_INTERVAL_SECS {
+            // Probed recently and still not capable — don't hammer the TEE.
+            return false;
+        }
+        self.attestation_probe_at.store(now, Ordering::Relaxed);
+        match self.get_attestation(b"health-probe".to_vec()).await {
+            Ok(_) => {
+                self.attestation_capable.store(true, Ordering::Relaxed);
+                true
+            }
+            // Transient (worker not ready) OR unsupported (older TA): both mean
+            // "not capable now". Re-probed after the interval — no error-string match.
+            Err(_) => false,
         }
     }
 
@@ -3989,16 +4051,17 @@ fn render_stats_page(server: &KmsApiServer) -> String {
     )
 }
 
-async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
+async fn health_check(server: Arc<KmsApiServer>) -> Result<impl warp::Reply, warp::Rejection> {
+    // Issue #73: report the *real* capability instead of a hardcoded `true`.
+    // The route is always wired in this build, but whether the deployed TA
+    // revision supports GetAttestation (=26) is probed once and cached.
+    let attestation_available = server.attestation_capable().await;
     Ok(warp::reply::json(&serde_json::json!({
         "status": "healthy",
         "service": "kms-api",
         "version": KMS_VERSION,
         "ta_mode": "real",
-        // Issue #37: TA exposes GetAttestation (=26). The route is always wired
-        // in this build; whether the TA on the device supports it depends on the
-        // deployed TA revision (older TAs return "Unsupported command").
-        "attestation_available": true,
+        "attestation_available": attestation_available,
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
             "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats", "/RollbackCounter", "/attestation?nonce=<hex>"]
@@ -4636,9 +4699,16 @@ async fn handle_rollback_counter(
 /// Query string for GET /attestation. The caller supplies a fresh random
 /// `nonce` (hex) to bind the evidence and defeat replay.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)] // Issue #73: reject unexpected query params (schema validation)
 struct AttestationQuery {
     nonce: Option<String>,
 }
+
+/// Issue #73 — upper bound on the attestation nonce. The nonce is a random
+/// freshness challenge (32 bytes is the conventional size); anything past this
+/// is rejected so an oversized input can't waste decode/compute. Hex input is
+/// capped first (≤ 2× the byte cap) to avoid decoding a huge string at all.
+const MAX_ATTESTATION_NONCE_BYTES: usize = 64;
 
 /// Issue #37 — GET /attestation?nonce=<hex>
 ///
@@ -4656,12 +4726,29 @@ async fn handle_get_attestation(
             "missing required query parameter: nonce (hex-encoded random challenge)".to_string(),
         ))
     })?;
-    let nonce = hex::decode(nonce_hex.trim())
+    let nonce_hex = nonce_hex.trim();
+    // Issue #73: cap raw hex length before decoding (≤ 2 hex chars per byte).
+    if nonce_hex.len() > MAX_ATTESTATION_NONCE_BYTES * 2 {
+        return Err(warp::reject::custom(ApiError(format!(
+            "nonce too long: max {} bytes ({} hex chars)",
+            MAX_ATTESTATION_NONCE_BYTES,
+            MAX_ATTESTATION_NONCE_BYTES * 2
+        ))));
+    }
+    let nonce = hex::decode(nonce_hex)
         .map_err(|_| warp::reject::custom(ApiError("nonce must be valid hex".to_string())))?;
     if nonce.is_empty() {
         return Err(warp::reject::custom(ApiError(
             "nonce must be non-empty".to_string(),
         )));
+    }
+    // Issue #73: enforce the byte-length upper bound (defends against odd-length
+    // hex that slips under the char cap but decodes within range anyway).
+    if nonce.len() > MAX_ATTESTATION_NONCE_BYTES {
+        return Err(warp::reject::custom(ApiError(format!(
+            "nonce too long: max {} bytes",
+            MAX_ATTESTATION_NONCE_BYTES
+        ))));
     }
 
     #[derive(serde::Serialize)]
@@ -5035,6 +5122,17 @@ async fn handle_rejection(
             warp::http::StatusCode::TOO_MANY_REQUESTS,
         ));
     }
+    // Issue #73: a malformed query string (an unexpected parameter rejected by
+    // AttestationQuery's deny_unknown_fields, or a wrong-typed field) is a CLIENT
+    // error → 400 with a clear message, not a 500 "Internal server error".
+    if err.find::<warp::reject::InvalidQuery>().is_some() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "error": "invalid query parameters: unexpected or malformed field"
+            })),
+            warp::http::StatusCode::BAD_REQUEST,
+        ));
+    }
     if let Some(api_error) = err.find::<ApiError>() {
         let status = if api_error.0.contains("API key") {
             warp::http::StatusCode::UNAUTHORIZED
@@ -5291,8 +5389,12 @@ pub async fn start_kms_server() -> Result<()> {
             warp::reply::html(html)
         });
 
-    // Health check
-    let health = warp::path("health").and(warp::get()).and_then(health_check);
+    // Health check (Issue #73: probes real attestation capability)
+    let server_health = server.clone();
+    let health = warp::path("health")
+        .and(warp::get())
+        .and(warp::any().map(move || server_health.clone()))
+        .and_then(health_check);
 
     // Issue #12 — signed attestation measurement manifest at
     // GET /.well-known/attestation-measurements.json. Compiled in (include_str!)
