@@ -1,0 +1,10 @@
+{
+  "name": "@aastar/dvt-binding-vector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AirAccount #70/#68 payload-commitment golden vector — proves the user-authorized payload == the userOpHash DVT co-signs. Executable known-answer test; CI red on drift.",
+  "scripts": {
+    "test": "node --test"
+  }
+}
