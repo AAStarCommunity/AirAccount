@@ -1056,6 +1056,11 @@ pub struct KmsApiServer {
     rp_name: String,
     rp_ids: Vec<String>,
     expected_origins: Vec<String>,
+    /// Issue #73 — cached attestation-capability probe (0=unprobed, 1=capable,
+    /// 2=incapable). Reflects whether the *deployed* TA actually supports
+    /// GetAttestation (=26), instead of hardcoding /health's
+    /// `attestation_available` to `true`.
+    attestation_capable: std::sync::atomic::AtomicU8,
 }
 
 impl KmsApiServer {
@@ -1092,6 +1097,35 @@ impl KmsApiServer {
             rp_name,
             rp_ids,
             expected_origins,
+            attestation_capable: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    /// Issue #73 — real attestation capability for `/health`, replacing a
+    /// hardcoded `true`. Probes the TA once (GetAttestation with a fixed,
+    /// non-secret dummy nonce; the evidence is discarded) and caches the
+    /// verdict. A definitive "Unsupported command" (older TA without cmd 26)
+    /// caches *incapable*; a transient error (e.g. TEE worker not ready yet)
+    /// leaves the probe pending so a later `/health` re-probes.
+    pub async fn attestation_capable(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self.attestation_capable.load(Ordering::Relaxed) {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+        match self.get_attestation(b"health-probe".to_vec()).await {
+            Ok(_) => {
+                self.attestation_capable.store(1, Ordering::Relaxed);
+                true
+            }
+            Err(e) if e.to_string().to_lowercase().contains("unsupported") => {
+                self.attestation_capable.store(2, Ordering::Relaxed);
+                false
+            }
+            // Transient failure: do not cache; report not-yet-confirmed and
+            // re-probe on the next /health call.
+            Err(_) => false,
         }
     }
 
@@ -3989,16 +4023,17 @@ fn render_stats_page(server: &KmsApiServer) -> String {
     )
 }
 
-async fn health_check() -> Result<impl warp::Reply, warp::Rejection> {
+async fn health_check(server: Arc<KmsApiServer>) -> Result<impl warp::Reply, warp::Rejection> {
+    // Issue #73: report the *real* capability instead of a hardcoded `true`.
+    // The route is always wired in this build, but whether the deployed TA
+    // revision supports GetAttestation (=26) is probed once and cached.
+    let attestation_available = server.attestation_capable().await;
     Ok(warp::reply::json(&serde_json::json!({
         "status": "healthy",
         "service": "kms-api",
         "version": KMS_VERSION,
         "ta_mode": "real",
-        // Issue #37: TA exposes GetAttestation (=26). The route is always wired
-        // in this build; whether the TA on the device supports it depends on the
-        // deployed TA revision (older TAs return "Unsupported command").
-        "attestation_available": true,
+        "attestation_available": attestation_available,
         "endpoints": {
             "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
             "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats", "/RollbackCounter", "/attestation?nonce=<hex>"]
@@ -4636,9 +4671,16 @@ async fn handle_rollback_counter(
 /// Query string for GET /attestation. The caller supplies a fresh random
 /// `nonce` (hex) to bind the evidence and defeat replay.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)] // Issue #73: reject unexpected query params (schema validation)
 struct AttestationQuery {
     nonce: Option<String>,
 }
+
+/// Issue #73 — upper bound on the attestation nonce. The nonce is a random
+/// freshness challenge (32 bytes is the conventional size); anything past this
+/// is rejected so an oversized input can't waste decode/compute. Hex input is
+/// capped first (≤ 2× the byte cap) to avoid decoding a huge string at all.
+const MAX_ATTESTATION_NONCE_BYTES: usize = 64;
 
 /// Issue #37 — GET /attestation?nonce=<hex>
 ///
@@ -4656,12 +4698,29 @@ async fn handle_get_attestation(
             "missing required query parameter: nonce (hex-encoded random challenge)".to_string(),
         ))
     })?;
-    let nonce = hex::decode(nonce_hex.trim())
+    let nonce_hex = nonce_hex.trim();
+    // Issue #73: cap raw hex length before decoding (≤ 2 hex chars per byte).
+    if nonce_hex.len() > MAX_ATTESTATION_NONCE_BYTES * 2 {
+        return Err(warp::reject::custom(ApiError(format!(
+            "nonce too long: max {} bytes ({} hex chars)",
+            MAX_ATTESTATION_NONCE_BYTES,
+            MAX_ATTESTATION_NONCE_BYTES * 2
+        ))));
+    }
+    let nonce = hex::decode(nonce_hex)
         .map_err(|_| warp::reject::custom(ApiError("nonce must be valid hex".to_string())))?;
     if nonce.is_empty() {
         return Err(warp::reject::custom(ApiError(
             "nonce must be non-empty".to_string(),
         )));
+    }
+    // Issue #73: enforce the byte-length upper bound (defends against odd-length
+    // hex that slips under the char cap but decodes within range anyway).
+    if nonce.len() > MAX_ATTESTATION_NONCE_BYTES {
+        return Err(warp::reject::custom(ApiError(format!(
+            "nonce too long: max {} bytes",
+            MAX_ATTESTATION_NONCE_BYTES
+        ))));
     }
 
     #[derive(serde::Serialize)]
@@ -5291,8 +5350,12 @@ pub async fn start_kms_server() -> Result<()> {
             warp::reply::html(html)
         });
 
-    // Health check
-    let health = warp::path("health").and(warp::get()).and_then(health_check);
+    // Health check (Issue #73: probes real attestation capability)
+    let server_health = server.clone();
+    let health = warp::path("health")
+        .and(warp::get())
+        .and(warp::any().map(move || server_health.clone()))
+        .and_then(health_check);
 
     // Issue #12 — signed attestation measurement manifest at
     // GET /.well-known/attestation-measurements.json. Compiled in (include_str!)
