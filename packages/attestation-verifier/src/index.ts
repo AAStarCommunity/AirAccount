@@ -400,3 +400,8 @@ export function verifyMeasurementManifest(
 
   return { ok: errors.length === 0, errors, measurementsHex, currentMeasurementsHex, sequence };
 }
+
+// ── Issue #87 (B): transparency-log verification ─────────────────────────────
+// RFC 6962 Merkle inclusion-proof core. Sigsum wire formats (checkpoint /
+// cosignature / leaf) land next, with real sigsum-go vectors.
+export * from "./transparency.js";
