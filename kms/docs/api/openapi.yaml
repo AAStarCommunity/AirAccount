@@ -1,11 +1,11 @@
 # AirAccount KMS — OpenAPI 3.1 specification
-# Generated: 2026-06-15 · Version 0.22.0 (Beta4)
+# Generated: 2026-06-16 · Version 0.23.0 (Beta5)
 # Render with Swagger UI: open kms/docs/api/index.html
 # Test coverage per endpoint: see `x-tested` + kms/docs/API-TEST-MATRIX.md
 openapi: 3.1.0
 info:
   title: AirAccount KMS API
-  version: 0.22.0
+  version: 0.23.0
   summary: TEE private-key management · WebAuthn · AWS KMS-compatible
   description: |
     AirAccount KMS manages secp256k1 / P-256 keys inside an OP-TEE TrustZone secure world.

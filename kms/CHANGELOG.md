@@ -1,6 +1,31 @@
 # KMS Changelog
 
-> Updated: 2026-06-15
+> Updated: 2026-06-16
+
+## 0.23.0 (2026-06-16) — Beta5 — 可验证信任：透明日志上线
+
+**主题：去掉「单一发布者私钥」信任点。** measurement 清单现在被公开记录在 Sigsum 透明日志里（见证人共签），客户端可验证"这份清单确实被公开登记过"——AAStar 改不了已公开承诺的 TA，任何滥用公开可查。问责制（与 Certificate Transparency 同源）。
+
+### 新增 (Features)
+- **#87 (B) 透明日志 —— 端到端上线**：
+  - `@aastar/attestation-verifier` 新增 RFC 6962 Merkle inclusion 验证（`transparency.ts`）+ 完整 Sigsum proof 验证（`sigsum.ts`，leaf/checkpoint/cosignature 线格式从 sigsum-go 转写）+ `parseSigsumProof`。
+  - `verifyMeasurementManifest` 新增 **Tier-2 gate**（`transparency` 选项）：验清单在公开日志、≥quorum 见证人共签，并**绑定**（proof 记录的 == SHA-256(清单 body)，防张冠李戴）。
+  - host 新增 `GET /.well-known/attestation-measurements-proof.json`（Sigsum proof sidecar，静态、运行时不连日志）。
+  - 发版 publish CI（`submit-manifest-to-sigsum.mjs` + workflow）+ **B-4 定时监控**（`monitor-manifest.mjs` + cron workflow，复验 live 端点 + 比对仓库源）。
+  - **对公共日志 `test.sigsum.org/barreleye`（policy sigsum-test1-2025）端到端验通**；真 proof 进 fixtures、离线可复现；已部署 kms.aastar.io。
+- **OpenAPI 补全**：`/attestation`、`/.well-known/attestation-measurements.json`、`/.well-known/attestation-measurements-proof.json` 三端点（v0.22.0 漏记，本版补回）+ `Attestation` tag。
+
+### 安全 (Security)
+- **信任根战略落定**：NXP NDA 对个人申请被拒（需法律实体）→ 信任根定为 **(B) 可复现+透明 ⊕ (C) 去中心化/DVT 为主、(A) 厂商根为可选**。
+- publish CI 加固：secret 走 `env:`（不进命令行）、verify-before-commit fail-closed、提交开 PR 不直推。
+
+### 文档 (Docs)
+- **`docs/TRUST.md`** —— 信任模型总文档（NDA 决策 + 三类信任锚 + 透明日志解决什么 + 用户怎么验 + 运维 + 诚实边界），README 加人话「信任增强」段链接。
+- `attestation-trust-root-decision.md` / `measurement-provenance-design.md` / `transparency-log-ops.md`；issue #87/#88 跟踪 B/C。
+- `RELEASE-CHECKLIST.md`：补"openapi 必须补新端点、不是只 bump 版本号"。
+
+### 版本 (Versions)
+- CA(host) `0.22.0 → 0.23.0`；KMS_VERSION/OpenAPI 同步。**TA `0.5.0`、proto `0.5.0` 不变**（本版无 TA/proto 改动，纯 host + 验证器 + 文档）。
 
 ## 0.22.0 (2026-06-15) — Beta4 — 远程证明 MVP + 威胁模型 V4 闭合 + 可复现信任根
 
