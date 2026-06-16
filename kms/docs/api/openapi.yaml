@@ -44,6 +44,8 @@ servers:
 tags:
   - name: Infrastructure
     description: Health, version, diagnostics, dashboards (no auth)
+  - name: Attestation
+    description: TEE remote-attestation evidence + signed/transparency-logged measurement manifest (no auth)
   - name: Wallet Lifecycle
     description: Create / status / delete keys
   - name: Metadata
@@ -126,6 +128,42 @@ paths:
       responses:
         '200': { description: HTML page, content: { text/html: {} } }
       x-tested: { e2e: "run-full-e2e.sh §1 (added v0.20.0)", status: "✅ verified (39/39)" }
+
+  # ─────────────── Remote Attestation & Transparency (#37 / #12 / #87) ───────────────
+  /attestation:
+    get:
+      tags: [Attestation]
+      summary: TEE remote-attestation evidence bound to a caller nonce (#37)
+      description: >
+        RSA-PSS-signed evidence over SHA-256(nonce ‖ ta_measurement), produced inside
+        OP-TEE. Verify with @aastar/attestation-verifier. No secrets, no auth.
+      security: []
+      parameters:
+        - { name: nonce, in: query, required: true, schema: { type: string }, description: "Fresh random challenge, hex (≤64 bytes); binds the evidence + defeats replay" }
+      responses:
+        '200': { description: Attestation evidence, content: { application/json: { schema: { type: object, properties: { schema: { type: string }, nonce: { type: string }, ta_uuid: { type: string }, ta_measurement: { type: string }, signature: { type: string }, attest_pubkey_exp: { type: string }, attest_pubkey_mod: { type: string }, sig_alg: { type: integer }, ree_time_secs: { type: integer, format: int64 }, trust_root: { type: string } } } } } }
+        '400': { description: Missing / invalid / oversized nonce, or unexpected query param }
+      x-tested: { e2e: "real-device FRDM-IMX93 (R-2/R-3 PASS) + public-endpoint E2E", status: "✅ verified" }
+  /.well-known/attestation-measurements.json:
+    get:
+      tags: [Attestation]
+      summary: Ed25519-signed measurement manifest (version → ta_measurement) (#12)
+      security: []
+      responses:
+        '200': { description: Signed manifest, content: { application/json: { schema: { type: object, properties: { body: { type: object }, publisher_key: { type: string }, signature: { type: string } } } } } }
+      x-tested: { unit: "attestation-verifier verifyMeasurementManifest", status: "✅ verified" }
+  /.well-known/attestation-measurements-proof.json:
+    get:
+      tags: [Attestation]
+      summary: Sigsum transparency proof for the measurement manifest (#87, B)
+      description: >
+        Proves the manifest above was publicly logged (witness-cosigned) in a Sigsum
+        transparency log. Feed `proof` to verifyMeasurementManifest's `transparency`
+        option (Tier-2). Static; refreshed at release time, never queried at runtime.
+      security: []
+      responses:
+        '200': { description: Sigsum proof sidecar, content: { application/json: { schema: { type: object, properties: { proof: { type: object } } } } } }
+      x-tested: { unit: "attestation-verifier verifySigsumProof (incl. real public-log proof)", e2e: "monitor-manifest.mjs vs kms.aastar.io", status: "✅ verified" }
 
   # ───────────────────────── Wallet Lifecycle ─────────────────────────
   /CreateKey:
