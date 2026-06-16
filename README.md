@@ -39,6 +39,16 @@ curl -X POST https://kms.aastar.io/ \
 ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers. Every
 operation carries its test-coverage status (`x-tested`). **Real-device E2E: 39/39 · unit: proto 39 + host 56.**
 
+## 🔒 Trust & Verifiability (信任增强)
+
+**你不用"相信 AAStar 不作恶"。** AirAccount 把"我在跑哪个 TEE 程序"公开钉死在一个**谁都改不了、谁都能查的公共透明日志**里——想偷偷换成后门版本做不到、且会被立刻发现。三道叠加把"信任一家公司"降级成"信任公开的数学和记录"：
+
+- **可复现构建** — 任何人用开源源码重算 TA 的 measurement，比对线上值（`scripts/ta-measurement.sh`）。
+- **透明日志（Sigsum）** — 每份 measurement 清单都进公开 append-only 日志、多见证人共签；客户端经 `@aastar/attestation-verifier` 验"这份清单确实被公开登记过"。**已上线**：`/.well-known/attestation-measurements.json` + `…-proof.json`。
+- **DVT 独立门限共签** — 大额操作要独立第三方节点共签，不依赖单点（也不依赖信任 AAStar）。
+
+> 诚实边界：当前是**半去中心化、可独立验证**的信任模型（TOFU/可复现 + 透明 + DVT）；尚未锚定 NXP 硬件根（受 NDA 阻塞）。完整分析、判断、验证方法、运维方案见 **[docs/TRUST.md](docs/TRUST.md)**。
+
 ## 🏗️ System Architecture
 
 ```mermaid
