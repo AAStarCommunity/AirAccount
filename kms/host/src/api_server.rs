@@ -5415,6 +5415,26 @@ pub async fn start_kms_server() -> Result<()> {
             )
         });
 
+    // Issue #87 (B) — Sigsum transparency proof for the manifest above, at
+    // GET /.well-known/attestation-measurements-proof.json. Compiled in so it
+    // ships with the manifest. Clients pass this to verifyMeasurementManifest's
+    // `transparency` option (Tier-2): it proves the manifest was publicly logged
+    // (witness-cosigned), closing the single-publisher-key gap. Static — the host
+    // never talks to the log at runtime; it is refreshed at release time.
+    const ATTESTATION_MEASUREMENTS_PROOF: &str =
+        include_str!("../attestation-measurements-proof.json");
+    let measurements_manifest_proof = warp::path(".well-known")
+        .and(warp::path("attestation-measurements-proof.json"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            warp::reply::with_header(
+                ATTESTATION_MEASUREMENTS_PROOF,
+                "content-type",
+                "application/json; charset=utf-8",
+            )
+        });
+
     // Live API docs — Swagger UI at GET /docs, OpenAPI 3.1 spec at GET /openapi.yaml.
     // The spec is compiled into the binary (include_str!) so it always matches this build.
     // Pinned swagger-ui-dist@5.32.6 with SRI integrity hashes (supply-chain hardening).
@@ -5878,6 +5898,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(test_ui)
         .or(health)
         .or(measurements_manifest)
+        .or(measurements_manifest_proof)
         .or(api_docs)
         .or(openapi_spec)
         .or(version)

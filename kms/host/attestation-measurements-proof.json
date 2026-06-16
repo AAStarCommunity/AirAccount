@@ -1,0 +1,80 @@
+{
+  "_note": "Sigsum transparency proof for /.well-known/attestation-measurements.json. Logged SHA-256(canonical body) to public log test.sigsum.org/barreleye (policy sigsum-test1-2025). Verify with @aastar/attestation-verifier verifyMeasurementManifest opts.transparency.",
+  "policy_ref": "sigsum-test1-2025 (test.sigsum.org/barreleye)",
+  "submitter_key": "ebe0db284f7fc0b424a6d6a97c2428f89bf793c224cbcc72ef148152f52fb674",
+  "proof": {
+    "msgHex": "50553ef4baec4a3165120afc400a08e4164c2b5ae0c34ca0ba79f20047bc21c1",
+    "submitterKeyHex": "ebe0db284f7fc0b424a6d6a97c2428f89bf793c224cbcc72ef148152f52fb674",
+    "leaf": {
+      "keyHashHex": "69f0bc0a0527773cce503928a7f5b932270b0590e673378c2b7f53cc1813bbe3",
+      "signatureHex": "ba329af201fc4a8b129f7ac0937cbab95a6ca1a4b13e1902996c76da3c1aed96025dc9a13334eaa7857b71f8383c77a71274565b436fd396d8f6d2f390100b0f"
+    },
+    "sth": {
+      "size": 181505,
+      "rootHashHex": "35f400d56c57bd648b5c1ae0162e3ea890b2fb74699eaf97aea27995f549d9a4",
+      "signatureHex": "164ae481da15b57cf21219019b70b7cc746d0b94a214235e504a6555a52bf06617efb2aa9dae4a4a093a651f620d6511fa2218824bf6aef6a8553159f4995007"
+    },
+    "cosignatures": [
+      {
+        "keyHashHex": "f308ac5bf00ef954f70fbe5e769258203cc792469154a1b9cf3003a6286a138d",
+        "timestamp": 1781591910,
+        "signatureHex": "db735128af9b641619b9c8a48f3dcd70b2547b81aef90cb75cc49ea58948cf982faa76893daa6891446fb50f6ba2f0835b62d67737742e8612a809701431b901"
+      },
+      {
+        "keyHashHex": "c1d2d6935c2fb43bef395792b1f3c1dfe4072d4c6cadd05e0cc90b28d7141ed3",
+        "timestamp": 1781591910,
+        "signatureHex": "868781487759d6e6e1390b6d3d1d8f46cf416d8f9fff1fa1a4ecb02a3788dafd9154940720deae083fcc6857e7c38567467662fb69390ed7f594f5cbeaee5408"
+      },
+      {
+        "keyHashHex": "70b861a010f25030de6ff6a5267e0b951e70c04b20ba4a3ce41e7fba7b9b7dfc",
+        "timestamp": 1781591910,
+        "signatureHex": "230e7956b2ed8238b02db72579bd55fa1c52bc35a70c5d06b1d25e8b1fac56e55864b85585d81161dcbdec315d64a09280300eca7a11f1f0f41df67f6c560c07"
+      },
+      {
+        "keyHashHex": "49c4cd6124b7c572f3354d854d50b2a4b057a750f786cf03103c09de339c4ea3",
+        "timestamp": 1781591910,
+        "signatureHex": "51bb8e73e894a5d10c605c815a5a621042f9552caf6038aee50f3b143238d09b1182cdb72581d2cac32c27881822dfc95f20afc979ccc6182449034d6fd85704"
+      },
+      {
+        "keyHashHex": "42351ad474b29c04187fd0c8c7670656386f323f02e9a4ef0a0055ec061ecac8",
+        "timestamp": 1781591910,
+        "signatureHex": "410e32995e5984c53eb1cd3fe673e4d3a374864dcd1ae55881ec068b2ba9b45de9363490f6158bfe23cc9b294d69bac8817173b1954b2f56982b53ab2ef40007"
+      },
+      {
+        "keyHashHex": "e4a6a1e4657d8d7a187cc0c20ed51055d88c72f340d29534939aee32d86b4021",
+        "timestamp": 1781591910,
+        "signatureHex": "27af868d1da76b60a64baa2630449ac3575607cf62f58bf06f4909e87287c81d2ca54d143dc9cf1cebf81cacd97e0a7f9e485440115cc5df0e844cb26cd9ab03"
+      },
+      {
+        "keyHashHex": "1c997261f16e6e81d13f420900a2542a4b6a049c2d996324ee5d82a90ca3360c",
+        "timestamp": 1781591910,
+        "signatureHex": "6e47ff83d36916ac9716e5e17b0fc91f77f95adcdeac89cc901e76e5486f36ebddbc7c7ea5468c3ba5564f4ad753bed4e968850e41d355d12227814b9f038105"
+      },
+      {
+        "keyHashHex": "86b5414ae57f45c2953a074640bb5bedebad023925d4dc91a31de1350b710089",
+        "timestamp": 1781591910,
+        "signatureHex": "3297a798a44a6441c201a5e5d7625c3d00b2dfa6c2745d14cc393d44bb612685b80ac57e437f564f643a94260578ecb14371fb70f64284f1f79ac7a1a82c5e00"
+      },
+      {
+        "keyHashHex": "26983895bdf491838dd4885848670562e7b728b6efa15fd9047b5b97a9a0618f",
+        "timestamp": 1781591910,
+        "signatureHex": "4a9242ee3cf65a9a75e0822fb6012c2d8e47bed1c922c8e06bd0a953058a5d0bd6e2aed72b3285035bef16024bfef4b2d6176427f7d251258ecba9f576fad70d"
+      },
+      {
+        "keyHashHex": "d960fcff859a34d677343e4789c6843e897c9ff195ea7140a6ef382566df3b65",
+        "timestamp": 1781591910,
+        "signatureHex": "2ad4857c9fc0b9a02a9d32b7bf14fe57e1e1a2b92b52cee6cffbb9b7105a8beeadef84eb6d80025cfe4d0bc66625006d511bc363ca3a9f63a935100b58395f06"
+      }
+    ],
+    "inclusion": {
+      "leafIndex": 181504,
+      "pathHex": [
+        "e6a096a2ebff4f1be5382071aad0165700c45fdf1d940770158596788fd46a9e",
+        "949ac3f5b05b77be5933f36798a35c45b5584c83fbad0ff89837751c2fd301e8",
+        "84b0f8a1d9c6e04ab627cde4506c9a7105683a935e8a3d988176d12b191e3f28",
+        "20065aca59c5b73c0fd5cf20ddeecc66b5f054b6bcf13c6a05bc0e374ab8423c",
+        "43bd28c79dec46786a85bdf0fe72eac3985a8fa172979cdbf7dc04d6c506d43d"
+      ]
+    }
+  }
+}
