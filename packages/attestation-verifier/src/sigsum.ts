@@ -183,3 +183,46 @@ export function verifySigsumProof(
   }
   return { ok: errors.length === 0, errors, validCosigners };
 }
+
+/**
+ * Parse a Sigsum proof (the ASCII `.proof` format that `sigsum-submit -p`
+ * emits, version 2) into a SigsumProofInput. The logged message and the
+ * submitter public key are NOT in the proof, so the caller supplies them
+ * (the publisher knows what it submitted). Throws on a malformed proof.
+ */
+export function parseSigsumProof(
+  proofText: string,
+  ctx: { msgHex: string; submitterKeyHex: string },
+): SigsumProofInput {
+  const lines = proofText.split("\n").map((l) => l.replace(/\r$/, ""));
+  const get1 = (k: string): string => {
+    const l = lines.find((x) => x.startsWith(k + "="));
+    if (l === undefined) throw new Error(`sigsum proof: missing "${k}" line`);
+    return l.slice(k.length + 1).trim();
+  };
+  const leaf = get1("leaf").split(/\s+/);
+  if (leaf.length !== 2) throw new Error("sigsum proof: malformed leaf line (want keyHash + signature)");
+  const cosignatures = lines
+    .filter((l) => l.startsWith("cosignature="))
+    .map((l) => {
+      const v = l.slice("cosignature=".length).trim().split(/\s+/);
+      if (v.length !== 3) throw new Error("sigsum proof: malformed cosignature line");
+      return { keyHashHex: v[0], timestamp: Number(v[1]), signatureHex: v[2] };
+    });
+  const size = Number(get1("size"));
+  if (!Number.isInteger(size) || size < 1) throw new Error("sigsum proof: invalid size");
+  const input: SigsumProofInput = {
+    msgHex: ctx.msgHex,
+    submitterKeyHex: ctx.submitterKeyHex,
+    leaf: { keyHashHex: leaf[0], signatureHex: leaf[1] },
+    sth: { size, rootHashHex: get1("root_hash"), signatureHex: get1("signature") },
+    cosignatures,
+  };
+  if (size > 1) {
+    input.inclusion = {
+      leafIndex: Number(get1("leaf_index")),
+      pathHex: lines.filter((l) => l.startsWith("node_hash=")).map((l) => l.slice("node_hash=".length).trim()),
+    };
+  }
+  return input;
+}
