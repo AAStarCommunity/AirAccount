@@ -405,3 +405,7 @@ export function verifyMeasurementManifest(
 // RFC 6962 Merkle inclusion-proof core. Sigsum wire formats (checkpoint /
 // cosignature / leaf) land next, with real sigsum-go vectors.
 export * from "./transparency.js";
+
+// Sigsum proof verification (issue #87 B, step 2). Wire formats transcribed from
+// sigsum-go and validated against sigsum-go-generated vectors (test/fixtures/).
+export * from "./sigsum.js";
