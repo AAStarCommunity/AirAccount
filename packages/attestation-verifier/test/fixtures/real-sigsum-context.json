@@ -1,0 +1,15 @@
+{
+  "_note": "REAL proof from the public Sigsum test log test.sigsum.org/barreleye (policy sigsum-test1-2025), produced 2026-06-16 by submitting SHA-256(canonical manifest body) via sigsum-submit --raw-hash. Self-contained: verifiable offline with the pinned keys below. The submitter key is a throwaway test key (only its public half is recorded).",
+  "msgHex": "7d54ae12fc21085793483fed400e2afe1fbae298cba0ba302b1dc6a6469c1fda",
+  "submitterKeyHex": "ebe0db284f7fc0b424a6d6a97c2428f89bf793c224cbcc72ef148152f52fb674",
+  "manifestBodyJSON": "{\"schema\":\"airaccount.attestation-measurements.v1\",\"updated\":\"2026-06-16\",\"sequence\":1,\"ta_uuid\":\"4319f3510b244097b65980ee4f824cdd\",\"measurements\":[{\"version\":\"v0.22.0\",\"ta_measurement\":\"aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899\",\"status\":\"current\"}]}",
+  "policy": {
+    "logKeyHex": "4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6",
+    "witnessKeysHex": [
+      "1c25f8a44c635457e2e391d1efbca7d4c2951a0aef06225a881e46b98962ac6c",
+      "28c92a5a3a054d317c86fc2eeb6a7ab2054d6217100d0be67ded5b74323c5806",
+      "f4855a0f46e8a3e23bb40faf260ee57ab8a18249fa402f2ca2d28a60e1a3130e"
+    ],
+    "threshold": 2
+  }
+}
