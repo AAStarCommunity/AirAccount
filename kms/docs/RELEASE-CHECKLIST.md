@@ -19,7 +19,7 @@
 | 2 | `kms/ta/Cargo.toml` | `^version =` | TA 版本 |
 | 3 | `kms/proto/Cargo.toml` | `^version =` | proto 版本 |
 | 4 | `kms/host/src/api_server.rs` | `const KMS_VERSION` | **运行时 `/version` + `/health` 上报**（最易漏，必改） |
-| 5 | `kms/docs/api/openapi.yaml` | `version:`（约 line 8）+ 头注释 `# Generated: <日期> · Version X (BetaN)`（line 2） | OpenAPI |
+| 5 | `kms/docs/api/openapi.yaml` | `version:`（约 line 8）+ 头注释（line 2）**+ ⚠️ 本版新增/改动的端点必须补进 `paths:`（不是只 bump 版本号——v0.22.0 曾漏掉 `/attestation` + `/.well-known/*`，事后补）** | OpenAPI |
 | 6 | `kms/docs/api/index.html` | `<title>`（line 6）+ `<h1>` 里 `BETAN · vX.Y.Z`（line 30） | Swagger UI 页 |
 | 7 | `kms/docs/API-TEST-MATRIX.md` | 头部 `> <日期> · vX.Y.Z (BetaN)` | 测试矩阵 |
 | 8 | **`README.md`** | **version 徽章（line 7）`version-vX.Y.Z%20BetaN`**（`%20`=空格 URL 编码） | **仓库首页徽章（最易漏，必改）** |
