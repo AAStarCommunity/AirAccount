@@ -34,7 +34,13 @@ func main() {
 	w2Pub, w2Sig := seedSigner(0x44)
 
 	data := []byte("airaccount attestation-measurements manifest (test vector)")
-	msg := crypto.HashBytes(data)            // what proof.Verify takes as msg
+	var msg crypto.Hash
+	if mh := os.Getenv("MSG_HEX"); mh != "" {
+		b, _ := hex.DecodeString(mh)
+		copy(msg[:], b)
+	} else {
+		msg = crypto.HashBytes(data)
+	}
 	checksum := crypto.HashBytes(msg[:])     // leaf checksum
 	sig, _ := types.SignLeafChecksum(subSig, &checksum)
 	leaf := types.Leaf{Checksum: checksum, Signature: sig, KeyHash: crypto.HashBytes(subPub[:])}
