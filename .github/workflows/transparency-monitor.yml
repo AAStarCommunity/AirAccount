@@ -1,0 +1,39 @@
+# B-4 transparency monitor (issue #87). Scheduled — NOT a daemon.
+# Re-verifies the LIVE served measurement manifest + Sigsum proof and cross-checks
+# it against the repo-committed reference. A red run = the served manifest was
+# swapped, is not publicly logged, or failed Tier-2 → investigate.
+name: Transparency Monitor
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: Verify live transparency proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build attestation-verifier
+        working-directory: packages/attestation-verifier
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile || pnpm install
+          pnpm build
+
+      - name: Verify live manifest + transparency proof
+        working-directory: packages/attestation-verifier
+        run: |
+          node scripts/monitor-manifest.mjs \
+            --base-url https://kms.aastar.io \
+            --ref-manifest ../../kms/host/attestation-measurements.json \
+            --ref-proof ../../kms/host/attestation-measurements-proof.json
