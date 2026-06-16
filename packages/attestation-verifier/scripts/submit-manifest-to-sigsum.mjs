@@ -59,9 +59,12 @@ execFileSync(sigsumSubmit, ["--raw-hash", "-k", submitKey, "-p", policy, "-o", p
 });
 
 // The submitter public key (hex) — verifier needs it to check the leaf keyHash.
-const submitterKeyHex = execFileSync("sigsum-key", ["to-hex", "-k", `${submitKey}.pub`])
-  .toString()
-  .trim();
+// The submitter PUBLIC key (hex) the verifier needs to check the leaf keyHash.
+// Prefer an explicitly-supplied hex (--submitter-key-hex; it is public, so CI can
+// pass it without needing the .pub file); otherwise derive it from <key>.pub.
+const submitterKeyHex =
+  arg("submitter-key-hex") ??
+  execFileSync("sigsum-key", ["to-hex", "-k", `${submitKey}.pub`]).toString().trim();
 
 const proofText = readFileSync(proofFile, "utf8");
 const proof = parseSigsumProof(proofText, { msgHex: msg.toString("hex"), submitterKeyHex });
