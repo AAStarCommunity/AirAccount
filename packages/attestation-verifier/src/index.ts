@@ -38,6 +38,11 @@
  */
 
 import { createHash, createPublicKey, verify as cryptoVerify, constants } from "node:crypto";
+import {
+  verifySigsumProof,
+  type SigsumProofInput,
+  type SigsumWitnessPolicy,
+} from "./sigsum.js";
 
 /** Raw evidence as returned by `GET /attestation` (all binary fields hex). */
 export interface AttestationEvidence {
@@ -293,6 +298,14 @@ export interface ManifestVerifyOptions {
    * sequence you have previously accepted (persist it). Omit only on first use.
    */
   minSequence?: number;
+  /**
+   * Tier-2 (issue #87 B): require this manifest to be publicly logged in a
+   * Sigsum transparency log. When set, the proof MUST cover THIS manifest body
+   * (its logged message equals SHA-256 of the canonical body) AND verify under
+   * the witness policy — closing the single-publisher-key gap (a manifest the
+   * publisher signed but did not publicly log cannot satisfy this).
+   */
+  transparency?: { proof: SigsumProofInput; policy: SigsumWitnessPolicy };
 }
 
 export interface ManifestVerifyResult {
@@ -364,6 +377,24 @@ export function verifyMeasurementManifest(
       errors.push(
         `unexpected manifest schema "${manifest.body.schema}" (expected "${MANIFEST_SCHEMA}")`,
       );
+    }
+
+    // Tier-2 (#87 B): transparency-log gate. The proof must cover THIS manifest
+    // (logged message == SHA-256 of the exact bytes the publisher signed) and
+    // verify under the witness policy. Binding first, so a valid proof for a
+    // DIFFERENT manifest can't be replayed onto this one.
+    if (opts.transparency) {
+      const expectedMsg = createHash("sha256")
+        .update(Buffer.from(canonicalManifestBody(manifest.body), "utf8"))
+        .digest("hex");
+      if (!hexEq(opts.transparency.proof.msgHex, expectedMsg)) {
+        errors.push(
+          "transparency proof does not cover this manifest (logged message != SHA-256(canonical body))",
+        );
+      } else {
+        const t = verifySigsumProof(opts.transparency.proof, opts.transparency.policy);
+        if (!t.ok) errors.push(...t.errors.map((e) => `transparency: ${e}`));
+      }
     }
 
     // Anti-downgrade: sequence must be an integer and >= the caller's floor.
