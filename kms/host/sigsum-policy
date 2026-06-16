@@ -1,0 +1,9 @@
+# Sigsum trust policy — public test deployment "sigsum-test1-2025".
+# Used by the release publish step (submit) and pinned in the verifier/monitor.
+# Transparency-only use; sufficient per docs/design/transparency-log-ops.md.
+log 4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6 https://test.sigsum.org/barreleye
+witness nisse 1c25f8a44c635457e2e391d1efbca7d4c2951a0aef06225a881e46b98962ac6c
+witness rgdd 28c92a5a3a054d317c86fc2eeb6a7ab2054d6217100d0be67ded5b74323c5806
+witness smartit f4855a0f46e8a3e23bb40faf260ee57ab8a18249fa402f2ca2d28a60e1a3130e
+group test1 2 nisse rgdd smartit
+quorum test1
