@@ -1,6 +1,27 @@
 # KMS Changelog
 
-> Updated: 2026-06-16
+> Updated: 2026-06-19
+
+## 0.23.1 (2026-06-19) — Beta5 — 运营硬化：API key 强制 + 运营商可配置 RP
+
+**主题：把已建好但未启用的能力接通，并让 fork 运营商无需改代码即可换域名。** 无运行时行为新增，是一次运营/部署/文档补强 + API key 鉴权在生产上线。
+
+### 安全 (Security)
+- **API key 鉴权在生产启用**：kms.aastar.io 从开放模式切到强制——所有敏感路由（CreateKey / Sign / SignHash / ListKeys / DeleteKey / ChangePasskey / UnfreezeKey / WebAuthn Begin*/Complete* / agent 端点）需 `x-api-key` header；开放只读端点（/health、/version、/stats、/.well-known/* 等）不变。机制早已在 `db_api_key_filter` 实现，本次仅在 DB 注册首个 key 并重启激活（实测无 key→401 / 有 key→200，本地与公网双向验证）。
+
+### 新增 (Features)
+- **运营商可配置 WebAuthn 相对方（无需重编）**：`kms-api.service` 增加 `EnvironmentFile=-/etc/airaccount/kms.env`（可选，缺省不报错）；新增 `kms/deploy/mx93/kms.env.example`（覆盖 `KMS_RP_ID`/`KMS_RP_NAME`/`KMS_ORIGIN`/API key/限流/存储），fork 者改一行即可切到自有域名。生产仍走代码默认 `aastar.io`（板上无此文件）。
+- **本地调试配置**：`kms/deploy/local/kms.env`（`rpId=localhost`，浏览器安全上下文，http 即可跑 passkey；生产勿用）。
+
+### 测试 (Test)
+- `kms/test-full-api.sh` 支持 `KMS_API_KEY` 环境变量（所有请求自动注入 `x-api-key`）+ 公网 host 自动加 `https://`，鉴权启用后仍可一键跑通。
+
+### 文档 (Docs)
+- 新增 `docs/design/backend-decomposition-kms-capacity.md`：YAA 自起后端的 5 职责拆解（各归 KMS/客户端/SuperRelay/subgraph）+ i.MX93 实测承载能力评估（2GB/8GB 足支 ~100 用户 @ 5–10% 并发；瓶颈是磁盘余量与 TEE 吞吐而非内存；扩展走横向加节点）。
+
+### 运营 (Ops)
+- 板子磁盘 83% → 54%：清理可重建的开发/测试残留（`.rustup` 1.3G + `.cargo` 170M + 旧二进制备份 + LTP/GoPoint/unit_tests 822M），不可替代数据（`kms.db`）已备份到 Mac。
+- 新增 `/etc/logrotate.d/kms-api`（weekly / 50M / keep 4 / copytruncate）防 `kms-api.log` 无限增长。
 
 ## 0.23.0 (2026-06-16) — Beta5 — 可验证信任：透明日志上线
 
