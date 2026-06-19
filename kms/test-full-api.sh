@@ -2,11 +2,23 @@
 # KMS Full API Chain Test — measures timing for every endpoint
 # Usage: ./test-full-api.sh [host:port]
 # Default: 192.168.7.2:3000
+#
+# API key: if the target server has API-key auth enabled (DB has keys, or
+# KMS_REQUIRE_API_KEY=1), every protected route needs an `x-api-key` header.
+# Export it before running, e.g.:
+#   KMS_API_KEY=kms_xxxx ./test-full-api.sh kms.aastar.io
+# Leave KMS_API_KEY unset for an open-mode (dev) server.
 
 set -eo pipefail
 
 HOST="${1:-192.168.7.2:3000}"
-BASE="http://$HOST"
+# Auto-prefix https:// for the public host, http:// otherwise.
+case "$HOST" in
+    http://*|https://*) BASE="$HOST" ;;
+    kms.aastar.io*)     BASE="https://$HOST" ;;
+    *)                  BASE="http://$HOST" ;;
+esac
+API_KEY="${KMS_API_KEY:-}"
 HDR_JSON="Content-Type: application/json"
 LAST_BODY=""
 
@@ -24,8 +36,12 @@ declare -a API_STATUS=()
 timed_curl() {
     local label="$1"; shift
     local start end elapsed body
+    # Inject API key on every call when configured. Open routes (/health, …)
+    # ignore the extra header, so this is safe to send unconditionally.
+    local auth=()
+    [ -n "$API_KEY" ] && auth=(-H "x-api-key: $API_KEY")
     start=$(now_ms)
-    body=$(curl -s -w '\n%{http_code}' --max-time 300 "$@" 2>&1)
+    body=$(curl -s -w '\n%{http_code}' --max-time 300 "${auth[@]}" "$@" 2>&1)
     end=$(now_ms)
     body=$(echo "$body" | sed '$d')
     elapsed=$(( end - start ))
@@ -89,7 +105,7 @@ POLL_COUNT=0
 DERIVED_ADDR=""
 while true; do
     POLL_COUNT=$((POLL_COUNT + 1))
-    RESP=$(curl -s --max-time 10 "$BASE/KeyStatus?KeyId=$KEY_ID" 2>/dev/null || echo '{"status":"error"}')
+    RESP=$(curl -s --max-time 10 ${API_KEY:+-H "x-api-key: $API_KEY"} "$BASE/KeyStatus?KeyId=$KEY_ID" 2>/dev/null || echo '{"status":"error"}')
     STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Status',d.get('status','unknown')))" 2>/dev/null || echo "unknown")
 
     if [ "$STATUS" = "ready" ]; then

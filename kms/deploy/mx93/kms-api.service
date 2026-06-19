@@ -10,6 +10,12 @@ Requires=tee-supplicant@teepriv0.service dirf-repair.service
 
 [Service]
 Environment=KMS_ENABLE_CREATEKEY=1
+# Operator config (optional). Drop a kms.env here to set your own WebAuthn
+# relying party (KMS_RP_ID / KMS_RP_NAME / KMS_ORIGIN), API-key enforcement
+# (KMS_REQUIRE_API_KEY), rate limits, etc. — no recompile needed. The leading
+# `-` makes it optional: if the file is absent the service uses built-in
+# defaults (rpId=aastar.io). See deploy/mx93/kms.env.example for the template.
+EnvironmentFile=-/etc/airaccount/kms.env
 Type=simple
 User=root
 WorkingDirectory=/root/AirAccount
