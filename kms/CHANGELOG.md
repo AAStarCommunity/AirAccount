@@ -1,6 +1,13 @@
 # KMS Changelog
 
-> Updated: 2026-06-19
+> Updated: 2026-06-20
+
+## 0.23.2 (2026-06-20) — Beta5 — api-key CLI 输出可脚本化
+
+### 修复 (Fix)
+- `KmsDb::open` 的 `📦 SQLite DB opened: …` 诊断从 **stdout 改到 stderr**（`db.rs:306`）。`api-key generate` 把新 key 打到 stdout，之前该诊断混在 stdout 里污染了 key 捕获；现在可干净地 `KEY=$(api-key generate --label svc)`。API 服务端 stdout+stderr 同写一个日志文件，服务端行为不变。
+
+> 双轨版本：CA(host) 0.23.2 · TA 0.5.0（不变）· proto 0.5.0（不变）。仅 host 一行 I/O 流向改动，无接口/行为变更。
 
 ## 0.23.1 (2026-06-19) — Beta5 — 运营硬化：API key 强制 + 运营商可配置 RP
 

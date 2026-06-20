@@ -303,7 +303,11 @@ impl KmsDb {
                 }
             }
         }
-        println!("📦 SQLite DB opened: {}", path);
+        // stderr, not stdout: the `api-key generate` CLI prints the new key to
+        // stdout, so keep this diagnostic off stdout to allow clean capture,
+        // e.g. `KEY=$(api-key generate --label svc)`. The API server logs both
+        // streams to the same file, so server-side behavior is unchanged.
+        eprintln!("📦 SQLite DB opened: {}", path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
