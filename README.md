@@ -39,6 +39,37 @@ curl -X POST https://kms.aastar.io/ \
 ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers. Every
 operation carries its test-coverage status (`x-tested`). **Real-device E2E: 39/39 · unit: proto 39 + host 56.**
 
+### 🔑 API Key 认证与管理
+
+**敏感路由**（CreateKey / Sign / SignHash / DeleteKey / ChangePasskey / UnfreezeKey / ListKeys / DescribeKey / GetPublicKey / DeriveAddress / WebAuthn `Begin*`·`Complete*` / agent 端点）需带 HTTP header **`x-api-key: <key>`**，否则 `401`。**开放只读端点**（`/health` `/version` `/stats` `/QueueStatus` `/RollbackCounter` `/attestation?nonce=` `/.well-known/*` `/docs` `/openapi.yaml`）无需 key。
+
+```bash
+curl -X POST https://kms.aastar.io/Sign \
+  -H "x-amz-target: TrentService.Sign" \
+  -H "x-api-key: kms_xxxxxxxx" -d '{ … }'
+```
+
+**强制规则**：DB 中存在 ≥1 个 key（或设 `KMS_API_KEY` / `KMS_REQUIRE_API_KEY=1`）即开启强制。生产 `kms.aastar.io` 已开启。
+
+**密钥管理命令**（在 KMS 主机上运行，CLI 直接读写 SQLite，比暴露网络端点更安全）：
+
+```bash
+# 新建（自动 insert 并打印 key；v0.23.2 起诊断走 stderr，可脚本捕获）
+KMS_DB_PATH=/data/kms/kms.db /path/to/api-key generate --label "service-name"
+KEY=$(KMS_DB_PATH=/data/kms/kms.db /path/to/api-key generate --label svc)   # 干净捕获
+
+# 列出（key 中段打码）
+/path/to/api-key list
+
+# 吊销
+/path/to/api-key revoke kms_xxxxxxxx
+```
+
+- 新建/吊销**即时生效，无需重启**（`validate_api_key` 每请求查 DB）。
+- key 明文仅存 DB、只在 `generate` 时打印一次，丢失只能 `revoke` 重发。
+- ⚠️ 浏览器侧切勿把 key 打进前端 bundle；用 `浏览器 → 应用后端(持 key) → KMS` 的代理模式。
+- 默认 DB 路径：`/data/kms/kms.db`（存在时）否则工作目录 `./kms.db`，可用 `KMS_DB_PATH` 覆盖。
+
 ## 🔒 Trust & Verifiability (信任增强)
 
 **你不用"相信 AAStar 不作恶"。** AirAccount 把"我在跑哪个 TEE 程序"公开钉死在一个**谁都改不了、谁都能查的公共透明日志**里——想偷偷换成后门版本做不到、且会被立刻发现。三道叠加把"信任一家公司"降级成"信任公开的数学和记录"：
