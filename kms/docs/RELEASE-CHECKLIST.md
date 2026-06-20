@@ -37,8 +37,9 @@
 
 ## 3. 构建 + 部署 + 验证
 - [ ] 交叉编译：`./scripts/mx93-build.sh ca`（仅 host 变）/ `all`（TA 也变）—— aarch64 green。
+  - ⚠️ `mx93-build.sh ca` **只编 `--bin kms-api-server`**。若改动在**共享 lib**（`db.rs`/`webauthn.rs`/`agent_jwt.rs` 等）→ CLI 二进制（`api-key`/`kms-admin`）也变了，须**单独重编 + 一起部署**（容器内 `cargo build --release --target aarch64-unknown-linux-gnu --bin api-key`），否则板上 CLI 行为停留在旧版（v0.23.2 复盘：只部署 kms-api-server，`api-key` stdout 修复没生效）。
 - [ ] 部署（板子走 WiFi/DHCP，IP 会变 → 自己扫 `192.168.2.0/24:22`，别假设 IP）：
-  - CA-only：备份 → scp → 原子替换 → `systemctl restart kms-api.service` → `/RollbackCounter` 烟测。
+  - CA-only：备份 → scp → 原子替换 → `systemctl restart kms-api.service` → `/RollbackCounter` 烟测。（lib 变时连 `api-key`/`kms-admin` 一并 scp 替换。）
   - TA 也变：走 `mx93-deploy.sh`（重启 tee-supplicant）+ **重算 measurement manifest（位置 #11）**。
 - [ ] **验证 `/version` 上报新版本**：板上 `curl 127.0.0.1:3000/version` **且** 公网 `curl https://kms.aastar.io/version` 都 = `vX.Y.Z`。（这步能抓到漏改 `KMS_VERSION`。）
 - [ ] E2E 冒烟：关键端点 + 本次新增/改动的功能。
