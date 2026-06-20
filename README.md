@@ -4,7 +4,7 @@
 [![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://kms.aastar.io/health)
 [![API Compatibility](https://img.shields.io/badge/AWS%20KMS-Compatible-orange.svg)](#aws-kms-compatibility)
 [![API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-85ea2d.svg)](https://kms.aastar.io/docs)
-[![Version](https://img.shields.io/badge/version-v0.23.1%20Beta5-blue.svg)](kms/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.23.2%20Beta5-blue.svg)](kms/CHANGELOG.md)
 
 A production-ready private key management system built on Trusted Execution Environment (TEE) using the eth_wallet sample from Teaclave TrustZone SDK. Provides enterprise-grade security with AWS KMS API compatibility.
 
@@ -38,6 +38,37 @@ curl -X POST https://kms.aastar.io/ \
 32 endpoints — wallet lifecycle · signing (hash / message / transaction / EIP-712) · WebAuthn
 ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers. Every
 operation carries its test-coverage status (`x-tested`). **Real-device E2E: 39/39 · unit: proto 39 + host 56.**
+
+### 🔑 API Key 认证与管理
+
+**敏感路由**（CreateKey / Sign / SignHash / DeleteKey / ChangePasskey / UnfreezeKey / ListKeys / DescribeKey / GetPublicKey / DeriveAddress / WebAuthn `Begin*`·`Complete*` / agent 端点）需带 HTTP header **`x-api-key: <key>`**，否则 `401`。**开放只读端点**（`/health` `/version` `/stats` `/QueueStatus` `/RollbackCounter` `/attestation?nonce=` `/.well-known/*` `/docs` `/openapi.yaml`）无需 key。
+
+```bash
+curl -X POST https://kms.aastar.io/Sign \
+  -H "x-amz-target: TrentService.Sign" \
+  -H "x-api-key: kms_xxxxxxxx" -d '{ … }'
+```
+
+**强制规则**：DB 中存在 ≥1 个 key（或设 `KMS_API_KEY` / `KMS_REQUIRE_API_KEY=1`）即开启强制。生产 `kms.aastar.io` 已开启。
+
+**密钥管理命令**（在 KMS 主机上运行，CLI 直接读写 SQLite，比暴露网络端点更安全）：
+
+```bash
+# 新建（自动 insert 并打印 key；v0.23.2 起诊断走 stderr，可脚本捕获）
+KMS_DB_PATH=/data/kms/kms.db /path/to/api-key generate --label "service-name"
+KEY=$(KMS_DB_PATH=/data/kms/kms.db /path/to/api-key generate --label svc)   # 干净捕获
+
+# 列出（key 中段打码）
+/path/to/api-key list
+
+# 吊销
+/path/to/api-key revoke kms_xxxxxxxx
+```
+
+- 新建/吊销**即时生效，无需重启**（`validate_api_key` 每请求查 DB）。
+- key 明文仅存 DB、只在 `generate` 时打印一次，丢失只能 `revoke` 重发。
+- ⚠️ 浏览器侧切勿把 key 打进前端 bundle；用 `浏览器 → 应用后端(持 key) → KMS` 的代理模式。
+- 默认 DB 路径：`/data/kms/kms.db`（存在时）否则工作目录 `./kms.db`，可用 `KMS_DB_PATH` 覆盖。
 
 ## 🔒 Trust & Verifiability (信任增强)
 
