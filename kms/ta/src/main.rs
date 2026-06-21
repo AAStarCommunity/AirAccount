@@ -813,6 +813,22 @@ const EXPECTED_RP_ID_HASH: [u8; 32] = [
     0x86, 0x31, 0x08, 0x3b, 0x20, 0x9a, 0xa6, 0x3a,
 ];
 
+/// DEV/TEST ONLY — compiled in **only** under `--features dev-rpid`.
+/// SHA-256("localhost"). Accepted *in addition to* aastar.io so a locally
+/// served dev frontend (browser forces rpId=localhost on localhost) can
+/// exercise the real TA. This is the **only** rpId difference between the
+/// production TA (aastar.io only) and the test TA (aastar.io + localhost).
+/// NEVER ship a `dev-rpid` TA to a production board: it widens the
+/// anti-credential-substitution guarantee to include localhost.
+/// Computed: echo -n "localhost" | sha256sum
+#[cfg(feature = "dev-rpid")]
+const DEV_LOCALHOST_RP_ID_HASH: [u8; 32] = [
+    0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68,
+    0x74, 0x34, 0x17, 0x0f, 0x64, 0x76, 0x60, 0x5b,
+    0x8f, 0xe4, 0xae, 0xb9, 0xa2, 0x86, 0x32, 0xc7,
+    0x99, 0x5c, 0xf3, 0xba, 0x83, 0x1d, 0x97, 0x63,
+];
+
 /// Verify passkey assertion against the passkey bound to this wallet.
 /// All wallets MUST have a passkey bound — rejects if missing.
 ///
@@ -856,7 +872,19 @@ fn verify_passkey_for_wallet(
     for i in 0..32 {
         diff |= EXPECTED_RP_ID_HASH[i] ^ actual_rp_id_hash[i];
     }
-    if diff != 0 {
+    let mut rp_id_ok = diff == 0;
+    // DEV/TEST builds (feature dev-rpid) additionally accept SHA-256("localhost")
+    // so a locally served dev frontend can exercise the real TA. Production
+    // builds never compile this branch → aastar.io is the only accepted rpId.
+    #[cfg(feature = "dev-rpid")]
+    {
+        let mut diff_dev = 0u8;
+        for i in 0..32 {
+            diff_dev |= DEV_LOCALHOST_RP_ID_HASH[i] ^ actual_rp_id_hash[i];
+        }
+        rp_id_ok |= diff_dev == 0;
+    }
+    if !rp_id_ok {
         return Err(anyhow!(
             "WebAuthn rpId hash mismatch: expected SHA-256(\"aastar.io\"), got different value"
         ));

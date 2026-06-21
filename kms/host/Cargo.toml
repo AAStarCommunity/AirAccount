@@ -17,7 +17,7 @@
 
 [package]
 name = "kms"
-version = "0.23.2"
+version = "0.24.0"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
@@ -44,6 +44,13 @@ path = "src/bin/kms_admin.rs"
 [features]
 default = ["tee"]
 tee = ["optee-teec"]
+# DEV/TEST ONLY — never enable in production builds.
+# Bakes localhost into the default WebAuthn rpId/origin allow-list so a test
+# build is self-contained (KMS_RP_ID / KMS_ORIGIN env still override). Must be
+# paired with the TA `dev-rpid` feature, which is what actually lets a
+# localhost assertion pass the in-TEE re-verification. Production builds omit
+# it → default rpId is aastar.io only.
+dev-rpid = []
 # DEV/TEST ONLY — gates mnemonic export and passkey-less ExportPrivateKey CLI.
 # Never enable in production builds or CI release pipelines.
 export-secrets = []

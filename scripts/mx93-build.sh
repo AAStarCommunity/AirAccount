@@ -65,6 +65,12 @@ build_ta() {
         TA_FEATURES="ree-fs-only,strict-challenge"
         warn "STRICT challenge mode ON — legacy (no-clientDataJSON) clients will be REJECTED. Ensure SDK #58 is deployed."
     fi
+    # PROFILE: production (default) accepts rpId aastar.io only. Test build
+    # (MX93_DEV_RPID=1) ALSO accepts localhost — for a DEV BOARD ONLY, never prod.
+    if [[ "${MX93_DEV_RPID:-0}" == "1" ]]; then
+        TA_FEATURES="$TA_FEATURES,dev-rpid"
+        warn "DEV-RPID (TEST) TA — accepts rpId=localhost in addition to aastar.io. DO NOT flash to a production board."
+    fi
     log "Building TA (aarch64-unknown-optee, nightly-2024-05-15, features: $TA_FEATURES)..."
     docker exec "$CONTAINER" bash -c '
       set -e
@@ -109,7 +115,14 @@ build_ta() {
 }
 
 build_ca() {
-    log "Building CA (aarch64-unknown-linux-gnu, stable 1.88)..."
+    # PROFILE: production (default) defaults rpId to aastar.io only. Test build
+    # (MX93_DEV_RPID=1) bakes localhost into the default rpId/origin allow-list.
+    local CA_FEAT_ARG=""
+    if [[ "${MX93_DEV_RPID:-0}" == "1" ]]; then
+        CA_FEAT_ARG="--features dev-rpid"
+        warn "DEV-RPID (TEST) CA — localhost in default rpId/origin. DO NOT deploy to a production board."
+    fi
+    log "Building CA (aarch64-unknown-linux-gnu, stable 1.88, features arg: '${CA_FEAT_ARG:-<none>}')..."
     docker exec "$CONTAINER" bash -c '
       set -e
       export PATH=/root/.cargo/bin:$PATH
@@ -128,7 +141,7 @@ build_ca() {
       # so /admin/purge-key (the "admin-purge" compile-time feature) is NOT built in.
       # For a beta/test image that needs admin force-delete, add: --features admin-purge
       # (still requires KMS_ADMIN_TOKEN at runtime). See kms/docs/RELEASE-PLAN.md.
-      cargo build --release --target aarch64-unknown-linux-gnu --bin kms-api-server
+      cargo build --release --target aarch64-unknown-linux-gnu --bin kms-api-server '"$CA_FEAT_ARG"'
       file target/aarch64-unknown-linux-gnu/release/kms-api-server | grep -q "ARM aarch64" \
         || { echo "CA is not aarch64!"; exit 1; }
     ' || die "CA build failed (see kms/docs/BUILD-MX93.md pitfall 4 if it is a dependency/manifest error)"
