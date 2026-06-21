@@ -17,7 +17,7 @@
 
 [package]
 name = "ta"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
@@ -28,6 +28,14 @@ edition = "2018"
 # DEV/TEST ONLY — never enable in production builds.
 # Allows mnemonic export from CreateWallet and passkey-less ExportPrivateKey.
 export-secrets = []
+
+# DEV/TEST ONLY — never enable on a production board.
+# Makes the TA accept WebAuthn assertions whose rpId is "localhost" (i.e.
+# SHA-256("localhost")) IN ADDITION to "aastar.io", so a locally served dev
+# frontend can exercise the real TA. This is the single rpId-scope difference
+# between the production TA (aastar.io only) and the test TA. Pair with the CA
+# `dev-rpid` feature. Production/release builds MUST be built WITHOUT it.
+dev-rpid = []
 
 # Storage backend selector. When enabled, the TA uses REE-FS
 # (TEE_STORAGE_PRIVATE) for all wallet storage and skips every RPMB operation

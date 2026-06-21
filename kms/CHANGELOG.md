@@ -1,6 +1,26 @@
 # KMS Changelog
 
-> Updated: 2026-06-20
+> Updated: 2026-06-21
+
+## 0.24.0 (2026-06-21) — Beta5 — 生产/测试双 profile：测试 build 支持 localhost rpId
+
+**主题：引入编译期 profile，区分生产与本地调试。** 此前 TA 把 rpId 硬编码为 `aastar.io`（`ta/src/main.rs`），host 配 `KMS_RP_ID=localhost` 也绕不过——TA 在 TEE 内强制再校验时拒掉非 aastar.io 的 assertion（500）。本版用 `dev-rpid` feature 做成两套 build。
+
+### 新增 (Features)
+- **`dev-rpid` 编译期 feature（TA + CA）**：
+  - **生产 build（默认，不带 feature）**：rpId 只认 `aastar.io`（TA 硬编码 + CA 默认）。行为与 0.23.2 一致。
+  - **测试 build（`MX93_DEV_RPID=1`）**：TA 额外接受 `SHA-256("localhost")`，CA 默认 rpId/origin 含 `localhost` / `*.aastar.io` / `localhost:*`。**仅供开发板**，让本地前端（浏览器强制 rpId=localhost）能跑通真实 TA。
+  - 两套 build 的**唯一差异 = rpId 接受范围**。`KMS_RP_ID`/`KMS_ORIGIN` 仍可运行时覆盖 CA 默认；但 TA 的 rpId 白名单是编译期固定的硬门（决定性）。
+- **`/version` 新增 `profile` 字段**（`"dev"` / `"prod"`）——一眼区分开发板与生产板。
+- 构建：`MX93_DEV_RPID=1 ./scripts/mx93-build.sh all` 产出测试 build（TA+CA 同时带 feature）。
+
+### 安全 (Security)
+- 测试 TA 接受 localhost 会**扩大**「防 rpId 替换」面（localhost 凭证可用）——**严禁刷到生产板**。`dev-rpid` 默认关闭，生产 build/CI 不得开启。`/version` profile + 启动日志 `⚠️ DEV-RPID build` 双重标记。
+
+### 发布流程 (Release)
+- RELEASE-CHECKLIST §0 新增 **profile 决策**：发版前必须确认「生产 or 测试」；测试 build 用 `MX93_DEV_RPID=1`，且 measurement 不进生产透明日志。
+
+> 双轨版本：CA(host) **0.24.0** · TA **0.6.0**（rpId 校验逻辑变更）· proto 0.5.0（不变）。
 
 ## 0.23.2 (2026-06-20) — Beta5 — api-key CLI 输出可脚本化
 
