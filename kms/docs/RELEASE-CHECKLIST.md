@@ -12,6 +12,12 @@
 - [ ] **proto**：仅当 proto 线格式（命令/结构）变更才 bump。
 - [ ] ⚠️ proto bincode 非自描述 → **proto 变 = host + TA 必须同版本一起部署**。
 
+## 0.5 决定 PROFILE（生产 / 测试）⚠️ 发版前必问
+- [ ] **生产 build（默认）**：rpId 只认 `aastar.io`。命令 `./scripts/mx93-build.sh all`。刷生产板。
+- [ ] **测试 build**：rpId 额外认 `localhost`（TA+CA 带 `dev-rpid` feature）。命令 `MX93_DEV_RPID=1 ./scripts/mx93-build.sh all`。**仅刷开发板**，严禁刷生产板。
+- [ ] 两者唯一差异 = rpId 接受范围；`/version` 的 `profile` 字段（`prod`/`dev`）+ 启动日志 `⚠️ DEV-RPID build` 标记当前 build 是哪种。
+- [ ] ⚠️ **测试 build 的 TA measurement 不得发布到生产透明日志**（位置 #11 只对生产 build 的 TA 重算/发布）。生产板与开发板用**不同物理板子**。
+
 ## 1. 版本号必改位置（逐个 grep 确认无旧版本残留）
 | # | 文件 | 位置 / 模式 | 内容 |
 |---|---|---|---|

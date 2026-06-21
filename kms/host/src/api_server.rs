@@ -1075,13 +1075,37 @@ pub struct KmsApiServer {
 
 impl KmsApiServer {
     pub fn new(db: KmsDb) -> Self {
+        // DEV/TEST builds (feature dev-rpid) bake localhost into the defaults so
+        // a test image is self-contained; production builds default to aastar.io
+        // only. KMS_RP_ID / KMS_ORIGIN env always override either default.
+        // NOTE: the host default/env only governs what the CA advertises and
+        // pre-checks; the TA's compiled-in rpId allow-list is the binding gate
+        // (the TA must also be a dev-rpid build to accept localhost assertions).
         let rp_ids: Vec<String> = std::env::var("KMS_RP_ID")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec!["aastar.io".to_string()]);
+            .unwrap_or_else(|_| {
+                if cfg!(feature = "dev-rpid") {
+                    vec!["aastar.io".to_string(), "localhost".to_string()]
+                } else {
+                    vec!["aastar.io".to_string()]
+                }
+            });
         let rp_name = std::env::var("KMS_RP_NAME").unwrap_or_else(|_| "AirAccount KMS".to_string());
         let expected_origins: Vec<String> = std::env::var("KMS_ORIGIN")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec![format!("https://{}", rp_ids[0])]);
+            .unwrap_or_else(|_| {
+                if cfg!(feature = "dev-rpid") {
+                    vec![
+                        "https://aastar.io".to_string(),
+                        "https://*.aastar.io".to_string(),
+                        "http://localhost:*".to_string(),
+                    ]
+                } else {
+                    vec![format!("https://{}", rp_ids[0])]
+                }
+            });
+        #[cfg(feature = "dev-rpid")]
+        println!("⚠️  DEV-RPID build: localhost rpId/origin accepted — NOT a production image");
         println!("🌐 Allowed origins: {:?}", expected_origins);
         println!("🔑 Allowed rpIds: {:?}", rp_ids);
         let rate_limiter = RateLimiter::from_env();
@@ -3900,7 +3924,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.23.2";
+const KMS_VERSION: &str = "0.24.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -4070,9 +4094,14 @@ async fn health_check(server: Arc<KmsApiServer>) -> Result<impl warp::Reply, war
 }
 
 async fn version_check() -> Result<impl warp::Reply, warp::Rejection> {
+    // `profile` lets ops tell a production board (rpId aastar.io only) from a
+    // test board (also accepts localhost) at a glance. Driven by the CA
+    // dev-rpid feature; pair with a dev-rpid TA for localhost to actually work.
+    let profile = if cfg!(feature = "dev-rpid") { "dev" } else { "prod" };
     Ok(warp::reply::json(&serde_json::json!({
         "version": KMS_VERSION,
         "build": env!("CARGO_PKG_VERSION"),
+        "profile": profile,
     })))
 }
 
