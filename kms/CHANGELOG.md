@@ -2,6 +2,15 @@
 
 > Updated: 2026-06-21
 
+## 0.24.1 (2026-06-21) — Beta5 — 每请求 access log
+
+### 新增 (Features)
+- **HTTP access log**：routes 加 `warp::log("kms::access")`，每个请求一行（method / path / 状态码 / 耗时），经 `log` crate 输出、受 `RUST_LOG` 控制（`info` 即显示），写入 `/var/log/kms-api.log`。补齐了此前「只有 operation 级日志、无完整请求日志」的缺口。
+- 安全：`warp::log` 只记 method/path/status/referer/user-agent/elapsed，**不记请求头** → `x-api-key` 不会进日志。
+
+> 双轨版本：CA(host) **0.24.1** · TA 0.6.0（不变）· proto 0.5.0（不变）。CA-only 改动。
+> 运维（不在仓库）：开发板 NTP 已校准（此前 RTC 偏 7 天）。TA 深度日志（trace_println）走 OP-TEE 安全串口，非本文件。
+
 ## 0.24.0 (2026-06-21) — Beta5 — 生产/测试双 profile：测试 build 支持 localhost rpId
 
 **主题：引入编译期 profile，区分生产与本地调试。** 此前 TA 把 rpId 硬编码为 `aastar.io`（`ta/src/main.rs`），host 配 `KMS_RP_ID=localhost` 也绕不过——TA 在 TEE 内强制再校验时拒掉非 aastar.io 的 assertion（500）。本版用 `dev-rpid` feature 做成两套 build。
