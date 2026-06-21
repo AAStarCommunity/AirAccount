@@ -3924,7 +3924,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.24.0";
+const KMS_VERSION: &str = "0.24.1";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -5992,11 +5992,18 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         group4.or(admin_purge).boxed()
     };
 
+    // Per-request access log (target "kms::access"): one line per request with
+    // method, path, status, and elapsed — emitted via the `log` crate, so it
+    // honours RUST_LOG (info shows it). Wraps the recovered routes so the
+    // logged status reflects the final reply (incl. 4xx/5xx from rejections).
+    // Note: warp::log records only method/path/status/referer/user-agent/elapsed
+    // — it does NOT log request headers, so the x-api-key secret never lands here.
     let routes = group1
         .or(group2)
         .or(group3)
         .or(group4)
-        .recover(handle_rejection);
+        .recover(handle_rejection)
+        .with(warp::log("kms::access"));
 
     println!(
         "🚀 KMS API Server v{} starting on http://0.0.0.0:3000",
