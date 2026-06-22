@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import sys
+import uuid
 
 try:
     from Crypto.Hash import keccak
@@ -78,10 +79,38 @@ def grant_inner(inp, variant):
     return k256(buf)
 
 
+def b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def mint_label_digest(tag: str, wallet_id: str, label: str) -> bytes:
+    h = hashlib.sha256()
+    h.update(tag.encode())
+    h.update(uuid.UUID(wallet_id).bytes)            # 16 bytes big-endian
+    h.update(hashlib.sha256(label.encode()).digest())
+    return h.digest()
+
+
 def main():
     path = os.path.join(os.path.dirname(__file__), "commitment-vectors.json")
     vec = json.load(open(path))
     fails = 0
+
+    # ── mint (#115): commitment = SHA-256(nonce || SHA-256(tag || wallet_id || SHA-256(label)))
+    mi = vec["mint"]["input"]
+    nonce = bytes.fromhex(mi["nonce_hex"])
+    for k, v in vec["mint"].items():
+        if k.startswith("_") or k == "input":
+            continue
+        d = mint_label_digest(v["tag"], mi["wallet_id"], v["label"])
+        ok_d = d.hex() == v["mint_digest_hex"]
+        c = b64u(hashlib.sha256(nonce + d).digest())
+        ok_c = c == v["commitment_b64url"]
+        fails += (not ok_d) + (not ok_c)
+        print(f"[{'PASS' if ok_d and ok_c else 'FAIL'}] mint.{k} (digest+commitment)")
+        if not (ok_d and ok_c):
+            print(f"        digest got {d.hex()} want {v['mint_digest_hex']}")
+
     for case_name, case in vec["grant"].items():
         if case_name.startswith("_"):
             continue

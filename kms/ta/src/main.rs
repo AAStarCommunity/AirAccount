@@ -1575,8 +1575,11 @@ fn agent_derivation_path(agent_index: u32) -> String {
     format!("m/44'/60'/0'/1/{}", agent_index)
 }
 
-/// Maximum allowed JWT lifetime: 7 days.
-const MAX_AGENT_JWT_TTL: i64 = 7 * 24 * 3600;
+/// Maximum allowed JWT lifetime: 24 hours.
+/// Shortened from 7 days (2026-06-22) to bound the delegated-signing window: a
+/// leaked/abused credential — or a ttl a compromised CA tried to stretch — is valid
+/// at most 24h. Agents/sessions re-mint (re-auth with passkey) daily.
+const MAX_AGENT_JWT_TTL: i64 = 24 * 3600;
 
 /// Current wall-clock time (UNIX epoch seconds) read from the REE clock via TEE_GetREETime.
 ///
@@ -1602,20 +1605,22 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
 
     let wallet = load_wallet_cached(&input.wallet_id)?;
 
-    // C-1: TA-side passkey verification — blocks a compromised host from calling this
-    // command directly to mint agent credentials without user presence.
-    // #115 (reverted, nonce-only): the mint params (agent_index/subject/ttl) are all
-    // SERVER/host-derived — the client only authorizes {human_key_id, label} and never
-    // sees the atomically-allocated agent_index, so it cannot compute a param
-    // commitment (strict mint would be unsatisfiable). User presence (this check,
-    // #111/C-1) is the protection; the one-time per-wallet nonce gives replay safety.
-    // Proper binding of the client-authorized inputs (human_key_id+label) is a
-    // follow-up (needs `label` plumbed into the TA input).
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // C-1 (#111): TA-side user-presence verification — blocks a compromised host from
+    // minting agent credentials without the user. (This is the critical line; it stays.)
+    // #115: bind the challenge to the CLIENT-AUTHORIZED label (+ wallet_id) so a
+    // compromised CA cannot relabel the credential while riding the gesture. transition
+    // accepts the bare nonce; strict requires challenge == SHA-256(nonce ‖ digest).
+    // Server-derived params (agent_index/subject/ttl) are NOT bound — index is allocated
+    // after this check (client can't know it), ttl is bounded by MAX_AGENT_JWT_TTL.
+    verify_passkey_for_wallet(
+        &wallet,
+        input.passkey_assertion.as_ref(),
+        Some(&mint_label_digest(&input.wallet_id, &input.label, b"AA-AGENT-MINT-v2")),
+    )?;
 
     // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
-        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+        return Err(anyhow!("ttl_secs must be in 1..=86400"));
     }
     // H-2: Subject must not contain JSON-special characters that could inject claims.
     validate_jwt_subject(&input.subject)?;
@@ -1852,16 +1857,19 @@ fn create_p256_session_key(
     // TEE-HMAC JWT. Without this, a compromised CA could issue CreateP256SessionKey
     // directly and mint a signing credential with no user assertion (the host's
     // WebAuthn check would be the only barrier — defeated by a malicious host).
-    // Mirrors create_agent_key's C-1 defense-in-depth.
-    // #115 (reverted, nonce-only): session_index/subject/ttl are server/host-derived
-    // (client sends only human_key_id+label, never the allocated session_index), so a
-    // client-side param commitment is unsatisfiable in strict. User presence (this
-    // check, #111) is the protection. See create_agent_key for the full rationale.
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // C-1 (#111): TA-side user-presence verification (critical line; stays).
+    // #115: bind the challenge to the CLIENT-AUTHORIZED label (+ wallet_id). See
+    // create_agent_key for the full rationale (server-derived index/subject/ttl NOT
+    // bound; transition accepts bare nonce, strict requires the commitment).
+    verify_passkey_for_wallet(
+        &wallet,
+        input.passkey_assertion.as_ref(),
+        Some(&mint_label_digest(&input.wallet_id, &input.label, b"AA-P256-SESSION-MINT-v2")),
+    )?;
 
     // Enforce TTL bounds (same as create_agent_key)
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
-        return Err(anyhow!("ttl_secs must be in 1..=604800"));
+        return Err(anyhow!("ttl_secs must be in 1..=86400"));
     }
     validate_jwt_subject(&input.subject)?;
 
@@ -2369,6 +2377,24 @@ fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
     msg[0..28].copy_from_slice(b"\x19Ethereum Signed Message:\n32");
     msg[28..60].copy_from_slice(inner);
     Keccak256::digest(&msg).into()
+}
+
+/// #115: mint-challenge commitment over the CLIENT-AUTHORIZED inputs (wallet_id ‖
+/// label). In strict the client commits `challenge = SHA-256(nonce ‖ mint_label_digest)`
+/// and the TA recomputes it here — so a compromised CA cannot relabel the credential
+/// while riding the user's mint gesture. Server-derived params are intentionally NOT
+/// bound: `agent_index`/`session_index` are allocated AFTER the assertion (the client
+/// can't know them), and `ttl` is bounded by `MAX_AGENT_JWT_TTL`. The variable-length
+/// label is hashed to keep the preimage fixed-width. `tag` domain-separates agent vs
+/// p256 (and from the reverted v1 index/subject/ttl scheme). The SDK MUST recompute
+/// this identically (both inputs are client-known).
+fn mint_label_digest(wallet_id: &Uuid, label: &str, tag: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(tag);
+    h.update(wallet_id.as_bytes());
+    h.update(sha2::Sha256::digest(label.as_bytes()));
+    h.finalize().into()
 }
 
 fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {

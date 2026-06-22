@@ -246,6 +246,11 @@ pub struct CreateAgentKeyInput {
     /// TA verifies this before creating/refreshing agent credentials.
     #[serde(default)]
     pub passkey_assertion: Option<PasskeyAssertion>,
+    /// #115: client-authorized human-readable label, bound into the mint challenge
+    /// commitment (SHA-256(tag ‖ wallet_id ‖ SHA-256(label))) so a compromised CA
+    /// cannot relabel the credential while riding the user's mint gesture.
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -399,6 +404,11 @@ pub struct CreateP256SessionKeyInput {
     /// matching the defense-in-depth of create_agent_key (C-1). Option for wire
     /// back-compat, but the TA REQUIRES it for any wallet that has a passkey bound.
     pub passkey_assertion: Option<PasskeyAssertion>,
+    /// #115: client-authorized human-readable label, bound into the mint challenge
+    /// commitment (SHA-256(tag ‖ wallet_id ‖ SHA-256(label))) so a compromised CA
+    /// cannot relabel the credential while riding the user's mint gesture.
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

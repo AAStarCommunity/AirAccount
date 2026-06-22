@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "num_enum",
  "serde",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "ta"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64ct",

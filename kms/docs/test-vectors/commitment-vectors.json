@@ -1,7 +1,25 @@
 {
-  "_about": "Locked grant-session challenge-commitment test vectors for KMS strict mode (#119). The TA binds the WebAuthn challenge to the grant final_hash: challenge = base64url_nopad(SHA-256(challenge_nonce || final_hash)). SDK MUST recompute final_hash byte-identically (it equals the on-chain SessionKeyValidator hash). Verify with compute_vectors.py.",
-  "_version": "CA 0.25.3 / TA 0.7.2 / proto 0.6.0",
-  "_mint_note": "MINT ops (create_agent_key / create_p256_session_key) are NONCE-ONLY — no payload commitment. #115's mint-param binding was reverted (#112/#115): agent_index/session_index are server-allocated and subject/ttl are host-derived, so the client (which only sends human_key_id+label) cannot compute a param commitment. User presence (#111, verified in-TEE) is the mint protection. In strict the client commits to the bare TA nonce.",
+  "_about": "Locked challenge-commitment test vectors for KMS strict mode (#119): grant-session (final_hash) AND mint (label digest). SDK MUST recompute these byte-identically before flipping #63 strict. Verify with compute_vectors.py.",
+  "_version": "CA 0.26.0 / TA 0.8.0 / proto 0.7.0",
+  "mint": {
+    "_spec": "MINT ops (create_agent_key / create_p256_session_key) bind the CLIENT-AUTHORIZED inputs only: mint_digest = SHA-256(tag || wallet_id[16 BE] || SHA-256(label)). challenge = base64url_nopad(SHA-256(nonce || mint_digest)). tag domain-separates agent vs p256 (the '-v2' distinguishes from the reverted v1 index/subject/ttl scheme). Server-derived params (agent_index/session_index allocated AFTER the assertion, subject, ttl) are NOT bound; ttl is bounded by MAX_AGENT_JWT_TTL=24h. Agent-credential REFRESH carries no label → bind the empty label. Source: kms/ta/src/main.rs mint_label_digest + create_agent_key/create_p256_session_key (#115). User presence (#111) remains the critical protection.",
+    "input": { "wallet_id": "495c2e73-b688-46de-bab2-1af39ac0802c", "nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242" },
+    "agent": {
+      "tag": "AA-AGENT-MINT-v2", "label": "my-agent",
+      "mint_digest_hex": "96ef1919c2daf5f019d612a4ffd6c9afbe893994bd4069f5bfb7a84cbb9a59ad",
+      "commitment_b64url": "vfFryvH9S58RQI-XmcBeocd1mhNWSYP3z5p6B3M7rgc"
+    },
+    "p256": {
+      "tag": "AA-P256-SESSION-MINT-v2", "label": "my-session",
+      "mint_digest_hex": "9a3d0109308632dc28c28a773bcfb2dd4f3a72372b7c5b6d5bc8595d1f1b623e",
+      "commitment_b64url": "JDwM5V4rmHTPvvhdBt0GB0OwtuCoPemVbTkw04EmkJE"
+    },
+    "agent_refresh_empty_label": {
+      "tag": "AA-AGENT-MINT-v2", "label": "",
+      "mint_digest_hex": "a3df1f758394ed202335acee3a77fda2265c100acd9dab8090833f7b8c8d274f",
+      "commitment_b64url": "LZ5GMXMVqdNgzhpubxnsNbjY0jiLau79W_qm-rHzYpw"
+    }
+  },
   "grant": {
     "_spec": "inner = keccak256(abi.encode(string tag, uint256 chainId, address verifyingContract, address account, <address sessionKey | bytes32 keyX, bytes32 keyY>, uint48 expiry, address contractScope, bytes4 selectorScope, uint16 velocityLimit, uint32 velocityWindow, bytes32 callTargetsHash, bytes32 selectorsHash, uint256 nonce)). callTargetsHash = keccak256(abi.encodePacked(address[])) where Solidity pads EACH element to 32 bytes (address left-aligned: 12 zero + 20 bytes). selectorsHash = keccak256(abi.encodePacked(bytes4[])) where each bytes4 is right-padded to 32 (4 bytes + 28 zero). final_hash = keccak256('\\x19Ethereum Signed Message:\\n32' || inner). Source: kms/ta/src/main.rs build_grant_session_inner / build_p256_grant_session_inner + keccak_packed_addresses/keccak_packed_selectors (#112). inner cross-verified against `cast abi-encode` (empty arrays) and the SDK's live contract oracle (non-empty arrays).",
     "empty_arrays": {
