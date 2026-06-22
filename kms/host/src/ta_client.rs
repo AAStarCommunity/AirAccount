@@ -908,12 +908,15 @@ impl TeeHandle {
         session_index: u32,
         subject: &str,
         ttl_secs: i64,
+        // #111: forwarded to the TA, which re-verifies user presence before minting.
+        passkey_assertion: Option<proto::PasskeyAssertion>,
     ) -> Result<proto::CreateP256SessionKeyOutput> {
         let input = bincode::serialize(&proto::CreateP256SessionKeyInput {
             wallet_id,
             session_index,
             subject: subject.to_string(),
             ttl_secs,
+            passkey_assertion,
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
         let out = self
