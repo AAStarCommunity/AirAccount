@@ -756,6 +756,21 @@ mod tests {
             session_index: 0,
             subject: "test-wallet-id".to_string(),
             ttl_secs: 259200,
+            passkey_assertion: None, // #111
+        });
+        // #111: roundtrip with a present assertion too (wire-format coverage).
+        bincode_roundtrip(&CreateP256SessionKeyInput {
+            wallet_id: test_uuid(),
+            session_index: 1,
+            subject: "test-wallet-id".to_string(),
+            ttl_secs: 259200,
+            passkey_assertion: Some(PasskeyAssertion {
+                authenticator_data: vec![0u8; 37],
+                client_data_hash: [0xbb; 32],
+                signature_r: [0x11; 32],
+                signature_s: [0x22; 32],
+                client_data_json: None,
+            }),
         });
         bincode_roundtrip(&CreateP256SessionKeyOutput {
             pub_key_x: [0xaa; 32],
