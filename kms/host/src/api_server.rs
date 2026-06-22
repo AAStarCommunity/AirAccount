@@ -1505,6 +1505,7 @@ impl KmsApiServer {
                 &req.key_id,
                 req.passkey.as_ref(),
                 req.webauthn.as_ref(),
+                false, // #110: nonce-only op — TA enforces challenge==nonce; host stays strict
             )
             .await?;
 
@@ -1659,6 +1660,11 @@ impl KmsApiServer {
         key_id: &str,
         raw: Option<&PasskeyAssertion>,
         wa: Option<&WebAuthnAssertion>,
+        // Issue #110: true when this op is re-verified inside the TA (signing/
+        // mutating paths) → host delegates the challenge-value binding to the TA
+        // (accepts a payload-commitment challenge, not just the bare nonce). false
+        // for host-authoritative paths → keep strict `challenge == nonce`.
+        delegate_challenge_to_ta: bool,
     ) -> Result<Option<proto::PasskeyAssertion>> {
         if let Some(wa) = wa {
             // WebAuthn ceremony path
@@ -1701,6 +1707,7 @@ impl KmsApiServer {
                 &challenge_row.rp_id,
                 &pk_bytes,
                 w.sign_count,
+                delegate_challenge_to_ta,
             )?;
 
             // Update sign_count in DB
@@ -1768,6 +1775,15 @@ impl KmsApiServer {
         key_id: &str,
         raw: Option<&PasskeyAssertion>,
         wa: Option<&WebAuthnAssertion>,
+        // #110: true ONLY for ops the TA re-binds with a payload digest (Sign/
+        // SignHash). The host then accepts a payload-commitment challenge and lets
+        // the TA bind it. For nonce-only ops (DeriveAddress/DeleteKey/ChangePasskey
+        // — TA enforces challenge==nonce) and HOST-ONLY ops that never reach the TA
+        // (UnfreezeKey — flips lifecycle in the DB, no TA call), pass false so the
+        // host keeps the authoritative `challenge == nonce` check. ⚠️ Passing true
+        // for a host-only op (UnfreezeKey) would drop challenge binding entirely
+        // (host skips it, TA never sees it) → replay of a captured assertion.
+        delegate_challenge_to_ta: bool,
     ) -> Result<Option<proto::PasskeyAssertion>> {
         if raw.is_some() && wa.is_none() {
             let legacy_allowed =
@@ -1787,7 +1803,12 @@ impl KmsApiServer {
             );
         }
 
-        let resolved = self.resolve_passkey_assertion(key_id, raw, wa).await?;
+        // #110: delegate decision is per-op (see param doc) — true only for the
+        // payload-commitment signers; false keeps the host as the authoritative
+        // challenge==nonce check for nonce-only / host-only ops.
+        let resolved = self
+            .resolve_passkey_assertion(key_id, raw, wa, delegate_challenge_to_ta)
+            .await?;
 
         if resolved.is_none() {
             // No assertion supplied at all. Only acceptable when the wallet
@@ -1849,6 +1870,10 @@ impl KmsApiServer {
         let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
 
+        // #110: grant-session is HOST-authoritative — the TA does NOT re-verify this
+        // challenge (client_data_json is stripped below so the TA takes the legacy
+        // path; see note). So the host MUST keep the strict `challenge == nonce`
+        // check here → delegate_challenge_to_ta = false.
         let verified = webauthn::verify_authentication_response(
             &wa.credential,
             &challenge_row.challenge,
@@ -1856,6 +1881,7 @@ impl KmsApiServer {
             &challenge_row.rp_id,
             &pk_bytes,
             w.sign_count,
+            false,
         )?;
 
         let _ = self
@@ -1892,6 +1918,7 @@ impl KmsApiServer {
                 &req.key_id,
                 req.passkey.as_ref(),
                 req.webauthn.as_ref(),
+                false, // #110: nonce-only op — TA enforces challenge==nonce; host stays strict
             )
             .await?;
         let address_bytes = self
@@ -1951,6 +1978,7 @@ impl KmsApiServer {
                 &key_id_str,
                 req.passkey.as_ref(),
                 req.webauthn.as_ref(),
+                true, // #110: TA binds Some(tx/msg digest) — accept payload-commitment challenge
             )
             .await?;
 
@@ -2069,6 +2097,7 @@ impl KmsApiServer {
                 &key_id_str,
                 req.passkey.as_ref(),
                 req.webauthn.as_ref(),
+                true, // #110: TA binds Some(hash) — accept payload-commitment challenge
             )
             .await?;
 
@@ -2147,6 +2176,7 @@ impl KmsApiServer {
                     &req.key_id,
                     req.passkey.as_ref(),
                     req.webauthn.as_ref(),
+                    false, // #110: nonce-only op — TA enforces challenge==nonce; host stays strict
                 )
                 .await?;
             self.tee
@@ -2212,10 +2242,15 @@ impl KmsApiServer {
         // Owner authentication — identical strict assertion path as DeleteKey.
         // Verifying ownership is required even when the key is already active so
         // the endpoint cannot be used as an unauthenticated key-state probe.
+        // #110 (codex Q2): UnfreezeKey is HOST-ONLY — it flips lifecycle_status in
+        // the DB and never calls the TA, so the host's challenge==nonce check is the
+        // ONLY binding. MUST pass false; true would let a captured assertion be
+        // replayed with a fresh challenge_id (host skips value, TA never sees it).
         self.resolve_passkey_assertion_strict(
             &req.key_id,
             req.passkey.as_ref(),
             req.webauthn.as_ref(),
+            false,
         )
         .await?;
 
@@ -2633,6 +2668,7 @@ impl KmsApiServer {
                 &req.human_key_id,
                 None, // reject legacy path
                 req.webauthn_assertion.as_ref(),
+                false, // #110: agent path is host-authoritative → keep challenge==nonce
             )
             .await?;
         if assertion.is_none() {
@@ -2850,8 +2886,16 @@ impl KmsApiServer {
             }
             (None, Some(_)) => {
                 // Path B: WebAuthn ceremony (preferred, replay-protected, no hdPath restriction)
+                // #110: the TA's sign_typed_data binds the challenge to the EIP-712
+                // digest — verify_passkey_for_wallet(..., Some(&digest)) — so the signed
+                // challenge is the payload COMMITMENT, not the bare nonce. Delegate the
+                // challenge-value check to the TA (true), exactly like SignHash/Sign;
+                // otherwise the host's bare-nonce check blocks the commitment (liveness)
+                // and, in transition, the typed-data payload stays unbound (V4 CA-swap
+                // hole). Covers the convenience signers (micropayment / GToken / x402)
+                // that route through sign_typed_data.
                 let assertion = self
-                    .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref())
+                    .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref(), true)
                     .await?;
                 if assertion.is_none() {
                     return Err(anyhow!(
@@ -3364,6 +3408,7 @@ impl KmsApiServer {
                 &wallet_id_str,
                 None, // reject legacy path
                 req.webauthn_assertion.as_ref(),
+                false, // #110: agent path is host-authoritative → keep challenge==nonce
             )
             .await?;
         if assertion.is_none() {
@@ -3430,6 +3475,7 @@ impl KmsApiServer {
                 &wallet_id_str,
                 None, // reject legacy path
                 req.webauthn_assertion.as_ref(),
+                false, // #110: agent path is host-authoritative → keep challenge==nonce
             )
             .await?;
         if assertion.is_none() {
@@ -3713,7 +3759,7 @@ impl KmsApiServer {
             ));
         }
         let assertion = self
-            .resolve_passkey_assertion(&wallet_id_str, None, req.webauthn_assertion.as_ref())
+            .resolve_passkey_assertion(&wallet_id_str, None, req.webauthn_assertion.as_ref(), false)
             .await?;
         if assertion.is_none() {
             return Err(anyhow!(
@@ -3815,7 +3861,7 @@ impl KmsApiServer {
             ));
         }
         let assertion = self
-            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref())
+            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref(), false)
             .await?;
         if assertion.is_none() {
             return Err(anyhow!(
@@ -3924,7 +3970,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.24.1";
+const KMS_VERSION: &str = "0.24.2";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
