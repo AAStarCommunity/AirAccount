@@ -4,7 +4,7 @@
 [![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://kms.aastar.io/health)
 [![API Compatibility](https://img.shields.io/badge/AWS%20KMS-Compatible-orange.svg)](#aws-kms-compatibility)
 [![API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-85ea2d.svg)](https://kms.aastar.io/docs)
-[![Version](https://img.shields.io/badge/version-v0.24.2%20Beta5-blue.svg)](kms/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.25.0%20Beta5-blue.svg)](kms/CHANGELOG.md)
 
 A production-ready private key management system built on Trusted Execution Environment (TEE) using the eth_wallet sample from Teaclave TrustZone SDK. Provides enterprise-grade security with AWS KMS API compatibility.
 

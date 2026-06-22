@@ -17,7 +17,7 @@ TEE私钥管理 · WebAuthn无密码认证 · AWS KMS兼容API
 
 ## 当前状态
 - **当前分支**: main（活跃开发）
-- **版本**: v0.24.2
+- **版本**: v0.25.0
 - **架构**: TEE (Trusted Execution Environment) + WebAuthn + AWS KMS 兼容 API
 - **生产 URL**: https://kms.aastar.io（Cloudflare Tunnel → NXP FRDM-IMX93）
 - **硬件**: NXP FRDM-IMX93 (aarch64 Cortex-A55, OP-TEE 4.8, RSA-4096 TA signing)

@@ -393,6 +393,12 @@ pub struct CreateP256SessionKeyInput {
     pub subject: String,
     /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
     pub ttl_secs: i64,
+    /// #111: WebAuthn assertion proving user presence. The TA re-verifies it
+    /// (verify_passkey_for_wallet) BEFORE minting the session key + TEE-HMAC JWT,
+    /// so a compromised CA cannot mint a session credential without the user —
+    /// matching the defense-in-depth of create_agent_key (C-1). Option for wire
+    /// back-compat, but the TA REQUIRES it for any wallet that has a passkey bound.
+    pub passkey_assertion: Option<PasskeyAssertion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
