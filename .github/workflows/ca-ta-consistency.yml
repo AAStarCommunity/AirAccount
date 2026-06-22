@@ -1,0 +1,34 @@
+name: CA/TA consistency gate
+
+# Guards the recurring bug class (#110, #121): the TA binds Some(payload) for an op
+# but the host passes delegate=false (so the host rejects the committed challenge
+# before it reaches the TA). scripts/ca-ta-consistency.py asserts the invariant
+# "TA Some(payload) <=> host delegate=true" for same-named ops. See
+# docs/design/ca-ta-consistency-matrix.md.
+
+on:
+  push:
+    branches: [ main, KMS ]
+  pull_request:
+    branches: [ main, KMS ]
+    paths:
+      - 'kms/host/src/api_server.rs'
+      - 'kms/ta/src/main.rs'
+      - 'scripts/ca-ta-consistency.py'
+  workflow_dispatch:
+
+jobs:
+  ca-ta-consistency:
+    name: CA/TA challenge-binding consistency
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Run CA/TA consistency gate
+        run: python3 scripts/ca-ta-consistency.py
