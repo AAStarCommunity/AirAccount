@@ -2,6 +2,24 @@
 
 > Updated: 2026-06-22
 
+## 0.25.0 (2026-06-22) — Beta5 — TA 验证 P256 session key 创建的用户在场（#111，CRITICAL）
+
+**主题：关闭 CreateP256SessionKey 的「无 passkey 也能铸 TEE 签名凭证」通道。** 此前 host 验 WebAuthn 但**不转发给 TA**，TA 也不验 → 被攻陷的 CA 可直接发 `CreateP256SessionKey` 给 TA，零用户在场铸出 P256 session key + TEE-HMAC JWT，再以用户身份签 UserOp。这是 #110 一致性审计 + Codex 双重确认的 CRITICAL（D1）。
+
+### 安全 (Security)
+- **TA 在铸密钥/签发 JWT 前 `verify_passkey_for_wallet`**（`ta/main.rs` create_p256_session_key）——绑定 wallet 的 passkey，None payload = nonce 绑定（mint op，比照 create_agent_key 的 C-1 防御）。host 仍验 WebAuthn → host+TA 双验。
+- `CreateP256SessionKeyInput` 新增 `passkey_assertion`，host 转发已验断言给 TA。
+- 被攻陷 CA 现在**无法**绕过用户在场铸 session 凭证；重放由 host(challenge_id) + TA(nonce) 双重一次性消费拦截。
+
+### ⚠️ 部署 (Deploy)
+- **proto 线格式变更**（新增字段）→ **host + TA 必须同版本一起部署**（bincode 非自描述）。dev 板 TA+CA 一并重刷。
+- SDK 透明：host 本就强制 create-p256 带 WebAuthn 断言，调用方式不变。
+
+### 审查
+- CA/TA 一致性审计发现（D1）+ Codex 多轮对抗复核修复。
+
+> 双轨版本：CA(host) **0.25.0** · TA **0.7.0**（加 passkey 校验）· proto **0.6.0**（新增字段）。三者 co-deploy。
+
 ## 0.24.2 (2026-06-22) — Beta5 — host/TA challenge-binding 对齐（#110）
 
 **主题：修复 host(CA) 与 TA 对 WebAuthn challenge 期望不一致。** TA（#68）对签名 op 要求 challenge = `SHA256(nonce‖payload)`（payload commitment），但 host `verify_authentication_response` 硬要求 challenge == 裸 nonce → host 在 TA 之前就拒掉 commitment，commitment 路径死、strict 不可达。这是 CA/TA 不一致 bug（TA 改了 #68、host 没跟上）。

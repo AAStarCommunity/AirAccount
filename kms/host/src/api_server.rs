@@ -3884,7 +3884,7 @@ impl KmsApiServer {
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
             .tee
-            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600)
+            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600, assertion)
             .await
         {
             Ok(r) => r,
@@ -3970,7 +3970,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.24.2";
+const KMS_VERSION: &str = "0.25.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
