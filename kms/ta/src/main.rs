@@ -1604,14 +1604,14 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
 
     // C-1: TA-side passkey verification — blocks a compromised host from calling this
     // command directly to mint agent credentials without user presence.
-    // #115: bind the challenge to the mint params (agent_index/ttl/subject) so a
-    // compromised CA cannot ride the gesture with altered params. transition accepts
-    // bare nonce; strict requires challenge == SHA-256(nonce ‖ agent_mint_digest).
-    verify_passkey_for_wallet(
-        &wallet,
-        input.passkey_assertion.as_ref(),
-        Some(&agent_mint_digest(input)),
-    )?;
+    // #115 (reverted, nonce-only): the mint params (agent_index/subject/ttl) are all
+    // SERVER/host-derived — the client only authorizes {human_key_id, label} and never
+    // sees the atomically-allocated agent_index, so it cannot compute a param
+    // commitment (strict mint would be unsatisfiable). User presence (this check,
+    // #111/C-1) is the protection; the one-time per-wallet nonce gives replay safety.
+    // Proper binding of the client-authorized inputs (human_key_id+label) is a
+    // follow-up (needs `label` plumbed into the TA input).
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -1853,14 +1853,11 @@ fn create_p256_session_key(
     // directly and mint a signing credential with no user assertion (the host's
     // WebAuthn check would be the only barrier — defeated by a malicious host).
     // Mirrors create_agent_key's C-1 defense-in-depth.
-    // #115: bind the challenge to the mint params (session_index/ttl/subject) so a
-    // compromised CA cannot ride the gesture with altered params. transition accepts
-    // bare nonce; strict requires challenge == SHA-256(nonce ‖ p256_session_mint_digest).
-    verify_passkey_for_wallet(
-        &wallet,
-        input.passkey_assertion.as_ref(),
-        Some(&p256_session_mint_digest(input)),
-    )?;
+    // #115 (reverted, nonce-only): session_index/subject/ttl are server/host-derived
+    // (client sends only human_key_id+label, never the allocated session_index), so a
+    // client-side param commitment is unsatisfiable in strict. User presence (this
+    // check, #111) is the protection. See create_agent_key for the full rationale.
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     // Enforce TTL bounds (same as create_agent_key)
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -2223,20 +2220,35 @@ fn abi_u256_from_u32(val: u32) -> [u8; 32] {
     buf
 }
 
-/// keccak256(abi.encodePacked(addresses)) — tight-packed 20-byte entries
+/// keccak256(abi.encodePacked(address[])) — matches Solidity, which pads EACH
+/// array element to a 32-byte slot (address is right-aligned → 12 zero bytes +
+/// 20-byte address). NOT tight 20-byte packing.
+///
+/// #112 fix: the TA previously tight-packed (20 bytes/elem), but Solidity's
+/// `abi.encodePacked(address[])` (used by SessionKeyValidator._buildGrantHash and
+/// the SDK's viem encodePacked) pads each element to 32 bytes. They agree for the
+/// empty array (keccak("")) so this was latent; non-empty scoped grants had a
+/// final_hash that mismatched the contract → the TA signature failed on-chain and
+/// the strict commitment never matched. Verified byte-identical to the SDK's
+/// contract-oracle vectors (AirAccount#112 / #119).
 fn keccak_packed_addresses(addrs: &[[u8; 20]]) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(addrs.len() * 20);
+    let mut buf = Vec::with_capacity(addrs.len() * 32);
     for a in addrs {
+        buf.extend_from_slice(&[0u8; 12]); // left-pad address to its 32-byte slot
         buf.extend_from_slice(a);
     }
     Keccak256::digest(&buf).into()
 }
 
-/// keccak256(abi.encodePacked(selectors)) — tight-packed 4-byte entries
+/// keccak256(abi.encodePacked(bytes4[])) — matches Solidity: each bytes4 element
+/// is padded to a 32-byte slot, right-aligned for value types but bytesN is
+/// LEFT-aligned (4 selector bytes + 28 zero bytes). See keccak_packed_addresses
+/// for the #112 tight-pack→pad-32 rationale.
 fn keccak_packed_selectors(sels: &[[u8; 4]]) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(sels.len() * 4);
+    let mut buf = Vec::with_capacity(sels.len() * 32);
     for s in sels {
         buf.extend_from_slice(s);
+        buf.extend_from_slice(&[0u8; 28]); // right-pad bytes4 to its 32-byte slot
     }
     Keccak256::digest(&buf).into()
 }
@@ -2357,35 +2369,6 @@ fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
     msg[0..28].copy_from_slice(b"\x19Ethereum Signed Message:\n32");
     msg[28..60].copy_from_slice(inner);
     Keccak256::digest(&msg).into()
-}
-
-/// #115: canonical digest over the MINT parameters of a credential-minting op,
-/// bound into the WebAuthn challenge (challenge = SHA-256(nonce ‖ mint_digest)) so
-/// a compromised CA cannot ride ONE user-approved mint gesture with altered params
-/// (e.g. a longer ttl, a different subject/index). Domain-separated per op; the
-/// variable-length subject is hashed to keep every field fixed-width. The SDK MUST
-/// recompute this identically. Fields (big-endian): wallet_id(16) ‖ index(4) ‖
-/// ttl_secs(8) ‖ SHA-256(subject)(32), under a per-op domain tag.
-fn agent_mint_digest(input: &proto::CreateAgentKeyInput) -> [u8; 32] {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(b"AA-AGENT-MINT-v1");
-    h.update(input.wallet_id.as_bytes());
-    h.update(input.agent_index.to_be_bytes());
-    h.update(input.ttl_secs.to_be_bytes());
-    h.update(sha2::Sha256::digest(input.subject.as_bytes()));
-    h.finalize().into()
-}
-
-fn p256_session_mint_digest(input: &proto::CreateP256SessionKeyInput) -> [u8; 32] {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(b"AA-P256-SESSION-MINT-v1");
-    h.update(input.wallet_id.as_bytes());
-    h.update(input.session_index.to_be_bytes());
-    h.update(input.ttl_secs.to_be_bytes());
-    h.update(sha2::Sha256::digest(input.subject.as_bytes()));
-    h.finalize().into()
 }
 
 fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
