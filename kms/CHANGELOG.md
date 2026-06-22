@@ -2,6 +2,13 @@
 
 > Updated: 2026-06-22
 
+## 0.26.1 (2026-06-22) — Beta5 — /version 报告 challenge_mode（strict/transition 可辨）
+
+### 可观测 (Observability)
+- **`/version` 新增 `challenge_mode` 字段**（`"strict"` / `"transition"`）——一眼区分 strict 板（拒裸 nonce/无 clientDataJSON、强制 payload commitment，#63）与 transition 板。
+- 机制：CA 新增 report-only `strict-challenge` feature，由**同一个 `MX93_STRICT_CHALLENGE` 构建开关**设置（与权威的 TA `strict-challenge` feature 同步）。CA **不**强制 strict——TA 才是；该 flag 纯为 `/version` 上报。`mx93-build.sh` 的 build_ca 已联动。
+
+> 双轨版本：CA(host) **0.26.1** · TA 0.8.0（不变）· proto 0.7.0（不变）。CA-only（observability）。strict 板重刷 CA 即显示 challenge_mode=strict。
 ## 0.26.0 (2026-06-22) — Beta5 — mint label 绑定（#115 正确版）+ 凭证 TTL 上限 24h
 
 ### 安全 (Security) — #115（正确版，取代 v0.25.2 已回退的实现）

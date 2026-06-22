@@ -131,11 +131,18 @@ build_ta() {
 build_ca() {
     # PROFILE: production (default) defaults rpId to aastar.io only. Test build
     # (MX93_DEV_RPID=1) bakes localhost into the default rpId/origin allow-list.
-    local CA_FEAT_ARG=""
+    local CA_FEATS=""
     if [[ "${MX93_DEV_RPID:-0}" == "1" ]]; then
-        CA_FEAT_ARG="--features dev-rpid"
+        CA_FEATS="dev-rpid"
         warn "DEV-RPID (TEST) CA — localhost in default rpId/origin. DO NOT deploy to a production board."
     fi
+    # Mirror the TA strict-challenge feature on the CA so /version reports
+    # challenge_mode=strict (report-only; the TA is what enforces strict).
+    if [[ "${MX93_STRICT_CHALLENGE:-0}" == "1" ]]; then
+        CA_FEATS="${CA_FEATS:+$CA_FEATS,}strict-challenge"
+    fi
+    local CA_FEAT_ARG=""
+    [[ -n "$CA_FEATS" ]] && CA_FEAT_ARG="--features $CA_FEATS"
     log "Building CA (aarch64-unknown-linux-gnu, stable 1.88, features arg: '${CA_FEAT_ARG:-<none>}')..."
     docker exec "$CONTAINER" bash -c '
       set -e
