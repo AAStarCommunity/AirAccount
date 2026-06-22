@@ -17,7 +17,7 @@
 
 [package]
 name = "kms"
-version = "0.26.0"
+version = "0.26.1"
 authors = ["Teaclave Contributors <dev@teaclave.apache.org>"]
 license = "Apache-2.0"
 repository = "https://github.com/apache/teaclave-trustzone-sdk.git"
@@ -51,6 +51,10 @@ tee = ["optee-teec"]
 # localhost assertion pass the in-TEE re-verification. Production builds omit
 # it → default rpId is aastar.io only.
 dev-rpid = []
+# Report-only mirror of the TA `strict-challenge` feature. Set by the same
+# MX93_STRICT_CHALLENGE build flag so /version can report challenge_mode=strict.
+# The CA does NOT enforce strict — the TA does; this flag is purely observability.
+strict-challenge = []
 # DEV/TEST ONLY — gates mnemonic export and passkey-less ExportPrivateKey CLI.
 # Never enable in production builds or CI release pipelines.
 export-secrets = []

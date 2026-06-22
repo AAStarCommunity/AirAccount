@@ -4010,7 +4010,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.26.0";
+const KMS_VERSION: &str = "0.26.1";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
@@ -4184,10 +4184,17 @@ async fn version_check() -> Result<impl warp::Reply, warp::Rejection> {
     // test board (also accepts localhost) at a glance. Driven by the CA
     // dev-rpid feature; pair with a dev-rpid TA for localhost to actually work.
     let profile = if cfg!(feature = "dev-rpid") { "dev" } else { "prod" };
+    // `challenge_mode` lets ops tell a STRICT board (rejects bare nonce / no-clientDataJSON;
+    // requires payload-commitment ceremony, #63) from a TRANSITION board at a glance.
+    // The CA strict-challenge feature is set by the same MX93_STRICT_CHALLENGE build flag
+    // as the (authoritative) TA strict-challenge feature, so they stay in sync — the CA
+    // flag is purely for this report; the TA is what actually enforces it.
+    let challenge_mode = if cfg!(feature = "strict-challenge") { "strict" } else { "transition" };
     Ok(warp::reply::json(&serde_json::json!({
         "version": KMS_VERSION,
         "build": env!("CARGO_PKG_VERSION"),
         "profile": profile,
+        "challenge_mode": challenge_mode,
     })))
 }
 
