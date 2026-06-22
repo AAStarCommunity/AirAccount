@@ -1,6 +1,25 @@
 # KMS Changelog
 
-> Updated: 2026-06-21
+> Updated: 2026-06-22
+
+## 0.24.2 (2026-06-22) — Beta5 — host/TA challenge-binding 对齐（#110）
+
+**主题：修复 host(CA) 与 TA 对 WebAuthn challenge 期望不一致。** TA（#68）对签名 op 要求 challenge = `SHA256(nonce‖payload)`（payload commitment），但 host `verify_authentication_response` 硬要求 challenge == 裸 nonce → host 在 TA 之前就拒掉 commitment，commitment 路径死、strict 不可达。这是 CA/TA 不一致 bug（TA 改了 #68、host 没跟上）。
+
+### 修复 (Fix)
+- host `verify_authentication_response` 加 `delegate_challenge_to_ta` 开关：对 **TA 会二次绑定的签名 op**，host 不再以裸 nonce 硬拒非 nonce challenge，把 challenge↔payload 绑定**委托给 TA**（权威层）；仍验断言签名 + origin + rpId + flags + sign_count + 一次性消费 challenge_id。
+- per-op 映射：`Sign`/`SignHash`/`SignTypedData`（含 voucher/GToken/x402 便利签名）→ delegate（TA 绑 `Some(digest)`）；`ChangePasskey`/`DeriveAddress`/`DeleteKey` → 不委托（TA 绑 `None`=nonce，host 保持 strict）；`UnfreezeKey` → **不委托**（纯 host DB、不到 TA，host 是唯一门）；agent / p256-session 创建 → 不委托。
+- 一致性审计连带修复 **Finding 1**：`sign_typed_data` 的 WebAuthn 路径原本漏配（同 #110），已纳入。
+
+### 安全 (Security)
+- 信任模型：**TA 是 challenge↔nonce↔payload 绑定的唯一权威，host 为便利层**。CA 作恶（重放/payload 调包）由 TA 拦（重算 commitment + 一次性 nonce）。
+- 经 CA/TA 一致性审计 + Codex 两轮对抗审查；修掉 codex 发现的 `UnfreezeKey` 委托漏洞（Q2，本次引入即修）。
+- ⚠️ **已知残留风险（维护者明示接受，本 PR 不含）**：
+  - **#111（CRITICAL）** `CreateP256SessionKey` TA 不验用户在场 → 被攻陷 CA 可无 passkey 铸 session key + JWT。需 proto+TA 改动+刷机，排入 #99 TA 重刷窗口。
+  - **#112** grant-session strip client_data_json → 无 TA payload 绑定（#63 strict 翻转前置）。
+  - 过渡模式裸 nonce 签名窗口未关 → 由 #63 strict 翻转关闭。
+
+> 双轨版本：CA(host) **0.24.2** · TA 0.6.0（不变）· proto 0.5.0（不变）。host-only。
 
 ## 0.24.1 (2026-06-21) — Beta5 — 每请求 access log
 
