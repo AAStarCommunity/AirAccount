@@ -1607,16 +1607,20 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
 
     // C-1 (#111): TA-side user-presence verification — blocks a compromised host from
     // minting agent credentials without the user. (This is the critical line; it stays.)
-    // #115: bind the challenge to the CLIENT-AUTHORIZED label (+ wallet_id) so a
-    // compromised CA cannot relabel the credential while riding the gesture. transition
-    // accepts the bare nonce; strict requires challenge == SHA-256(nonce ‖ digest).
-    // Server-derived params (agent_index/subject/ttl) are NOT bound — index is allocated
-    // after this check (client can't know it), ttl is bounded by MAX_AGENT_JWT_TTL.
-    verify_passkey_for_wallet(
-        &wallet,
-        input.passkey_assertion.as_ref(),
-        Some(&mint_label_digest(&input.wallet_id, &input.label, b"AA-AGENT-MINT-v2")),
-    )?;
+    // #115: bind the challenge to a CLIENT-AUTHORIZED commitment so a compromised CA
+    // cannot ride the gesture with different inputs. CREATE binds the label (+wallet);
+    // REFRESH binds the agent_index being re-minted (+wallet) under a DISTINCT tag, so a
+    // refresh assertion can't be replayed to create (and vice versa) even for an empty
+    // label. The CA can't flip is_refresh: the client committed to the matching shape.
+    // transition accepts the bare nonce; strict requires challenge == SHA-256(nonce‖digest).
+    // Server-derived params (the allocated index for CREATE, subject, ttl) are NOT bound —
+    // ttl is bounded by MAX_AGENT_JWT_TTL.
+    let mint_digest = if input.is_refresh {
+        agent_refresh_digest(&input.wallet_id, input.agent_index)
+    } else {
+        mint_label_digest(&input.wallet_id, &input.label, b"AA-AGENT-MINT-v2")
+    };
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), Some(&mint_digest))?;
 
     // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -2394,6 +2398,21 @@ fn mint_label_digest(wallet_id: &Uuid, label: &str, tag: &[u8]) -> [u8; 32] {
     h.update(tag);
     h.update(wallet_id.as_bytes());
     h.update(sha2::Sha256::digest(label.as_bytes()));
+    h.finalize().into()
+}
+
+/// #115: REFRESH commitment — binds the agent_index being re-minted (which the
+/// refreshing client knows + commits to) under a DISTINCT domain tag. This is what
+/// prevents a refresh assertion from being replayed to create (or vice versa): the
+/// create digest uses AA-AGENT-MINT-v2 ‖ wallet ‖ H(label), so the two never collide
+/// even for an empty label. A compromised CA cannot redirect a refresh of index N to
+/// a create at a different index — the client committed to this exact (tag, index).
+fn agent_refresh_digest(wallet_id: &Uuid, agent_index: u32) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"AA-AGENT-REFRESH-v2");
+    h.update(wallet_id.as_bytes());
+    h.update(agent_index.to_be_bytes());
     h.finalize().into()
 }
 

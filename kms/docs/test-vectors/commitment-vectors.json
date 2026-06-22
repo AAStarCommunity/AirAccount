@@ -2,22 +2,22 @@
   "_about": "Locked challenge-commitment test vectors for KMS strict mode (#119): grant-session (final_hash) AND mint (label digest). SDK MUST recompute these byte-identically before flipping #63 strict. Verify with compute_vectors.py.",
   "_version": "CA 0.26.0 / TA 0.8.0 / proto 0.7.0",
   "mint": {
-    "_spec": "MINT ops (create_agent_key / create_p256_session_key) bind the CLIENT-AUTHORIZED inputs only: mint_digest = SHA-256(tag || wallet_id[16 BE] || SHA-256(label)). challenge = base64url_nopad(SHA-256(nonce || mint_digest)). tag domain-separates agent vs p256 (the '-v2' distinguishes from the reverted v1 index/subject/ttl scheme). Server-derived params (agent_index/session_index allocated AFTER the assertion, subject, ttl) are NOT bound; ttl is bounded by MAX_AGENT_JWT_TTL=24h. Agent-credential REFRESH carries no label → bind the empty label. Source: kms/ta/src/main.rs mint_label_digest + create_agent_key/create_p256_session_key (#115). User presence (#111) remains the critical protection.",
-    "input": { "wallet_id": "495c2e73-b688-46de-bab2-1af39ac0802c", "nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242" },
-    "agent": {
-      "tag": "AA-AGENT-MINT-v2", "label": "my-agent",
+    "_spec": "CREATE (create_agent_key / create_p256_session_key) binds the client-authorized label: mint_digest = SHA-256(tag || wallet_id[16 BE] || SHA-256(label)), tag = AA-AGENT-MINT-v2 / AA-P256-SESSION-MINT-v2. Agent-credential REFRESH binds the agent_index being re-minted under a DISTINCT tag: refresh_digest = SHA-256('AA-AGENT-REFRESH-v2' || wallet_id[16 BE] || agent_index[u32 BE]) — the distinct tag prevents a refresh assertion being replayed to create (or vice versa). challenge = base64url_nopad(SHA-256(nonce || digest)). Server-derived params (the allocated index for CREATE, subject, ttl) are NOT bound; ttl is bounded by MAX_AGENT_JWT_TTL=24h. is_refresh selects the branch; a compromised CA can't flip it (the client committed to the matching shape). Source: kms/ta/src/main.rs mint_label_digest / agent_refresh_digest (#115). User presence (#111) remains the critical protection.",
+    "input": { "wallet_id": "495c2e73-b688-46de-bab2-1af39ac0802c", "agent_index": 0, "nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242" },
+    "agent_create": {
+      "is_refresh": false, "tag": "AA-AGENT-MINT-v2", "label": "my-agent",
       "mint_digest_hex": "96ef1919c2daf5f019d612a4ffd6c9afbe893994bd4069f5bfb7a84cbb9a59ad",
       "commitment_b64url": "vfFryvH9S58RQI-XmcBeocd1mhNWSYP3z5p6B3M7rgc"
     },
-    "p256": {
-      "tag": "AA-P256-SESSION-MINT-v2", "label": "my-session",
+    "p256_create": {
+      "is_refresh": false, "tag": "AA-P256-SESSION-MINT-v2", "label": "my-session",
       "mint_digest_hex": "9a3d0109308632dc28c28a773bcfb2dd4f3a72372b7c5b6d5bc8595d1f1b623e",
       "commitment_b64url": "JDwM5V4rmHTPvvhdBt0GB0OwtuCoPemVbTkw04EmkJE"
     },
-    "agent_refresh_empty_label": {
-      "tag": "AA-AGENT-MINT-v2", "label": "",
-      "mint_digest_hex": "a3df1f758394ed202335acee3a77fda2265c100acd9dab8090833f7b8c8d274f",
-      "commitment_b64url": "LZ5GMXMVqdNgzhpubxnsNbjY0jiLau79W_qm-rHzYpw"
+    "agent_refresh": {
+      "is_refresh": true, "tag": "AA-AGENT-REFRESH-v2", "agent_index": 0,
+      "mint_digest_hex": "b691fbf5c2999e32b5f5c1f16038600e91d6e7db67dc3b069c257e957280217d",
+      "commitment_b64url": "Kv6zy_gztqOYGD3NMI118EOavjjlWaMakD3uxoseiZU"
     }
   },
   "grant": {

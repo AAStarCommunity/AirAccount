@@ -91,6 +91,14 @@ def mint_label_digest(tag: str, wallet_id: str, label: str) -> bytes:
     return h.digest()
 
 
+def agent_refresh_digest(tag: str, wallet_id: str, agent_index: int) -> bytes:
+    h = hashlib.sha256()
+    h.update(tag.encode())
+    h.update(uuid.UUID(wallet_id).bytes)
+    h.update(agent_index.to_bytes(4, "big"))
+    return h.digest()
+
+
 def main():
     path = os.path.join(os.path.dirname(__file__), "commitment-vectors.json")
     vec = json.load(open(path))
@@ -102,7 +110,10 @@ def main():
     for k, v in vec["mint"].items():
         if k.startswith("_") or k == "input":
             continue
-        d = mint_label_digest(v["tag"], mi["wallet_id"], v["label"])
+        if v.get("is_refresh"):
+            d = agent_refresh_digest(v["tag"], mi["wallet_id"], v["agent_index"])
+        else:
+            d = mint_label_digest(v["tag"], mi["wallet_id"], v["label"])
         ok_d = d.hex() == v["mint_digest_hex"]
         c = b64u(hashlib.sha256(nonce + d).digest())
         ok_c = c == v["commitment_b64url"]

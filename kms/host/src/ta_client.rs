@@ -768,6 +768,7 @@ impl TeeHandle {
         ttl_secs: i64,
         passkey_assertion: Option<proto::PasskeyAssertion>,
         label: &str,
+        is_refresh: bool,
     ) -> Result<proto::CreateAgentKeyOutput> {
         let input = bincode::serialize(&proto::CreateAgentKeyInput {
             wallet_id,
@@ -776,6 +777,7 @@ impl TeeHandle {
             ttl_secs,
             passkey_assertion,
             label: label.to_string(), // #115
+            is_refresh,               // #115
         })
         .context("Failed to serialize CreateAgentKeyInput")?;
         let out = self.call(proto::Command::CreateAgentKey, input).await?;
