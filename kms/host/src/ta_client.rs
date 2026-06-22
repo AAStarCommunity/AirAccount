@@ -767,6 +767,8 @@ impl TeeHandle {
         subject: &str,
         ttl_secs: i64,
         passkey_assertion: Option<proto::PasskeyAssertion>,
+        label: &str,
+        is_refresh: bool,
     ) -> Result<proto::CreateAgentKeyOutput> {
         let input = bincode::serialize(&proto::CreateAgentKeyInput {
             wallet_id,
@@ -774,6 +776,8 @@ impl TeeHandle {
             subject: subject.to_string(),
             ttl_secs,
             passkey_assertion,
+            label: label.to_string(), // #115
+            is_refresh,               // #115
         })
         .context("Failed to serialize CreateAgentKeyInput")?;
         let out = self.call(proto::Command::CreateAgentKey, input).await?;
@@ -910,6 +914,7 @@ impl TeeHandle {
         ttl_secs: i64,
         // #111: forwarded to the TA, which re-verifies user presence before minting.
         passkey_assertion: Option<proto::PasskeyAssertion>,
+        label: &str,
     ) -> Result<proto::CreateP256SessionKeyOutput> {
         let input = bincode::serialize(&proto::CreateP256SessionKeyInput {
             wallet_id,
@@ -917,6 +922,7 @@ impl TeeHandle {
             subject: subject.to_string(),
             ttl_secs,
             passkey_assertion,
+            label: label.to_string(), // #115
         })
         .context("Failed to serialize CreateP256SessionKeyInput")?;
         let out = self

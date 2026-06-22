@@ -426,6 +426,8 @@ mod tests {
             subject: "4319f351-0b24-4097-b659-80ee4f824cdd".to_string(),
             ttl_secs: 259200i64,
             passkey_assertion: None,
+            label: "agent-0".to_string(), // #115
+            is_refresh: false,            // #115
         });
         bincode_roundtrip(&CreateAgentKeyInput {
             wallet_id: test_uuid(),
@@ -439,6 +441,8 @@ mod tests {
                 signature_s: [0x22; 32],
                 client_data_json: None,
             }),
+            label: "test-agent".to_string(), // #115
+            is_refresh: true,                // #115 (refresh path)
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
             agent_address: [0xab; 20],
@@ -757,6 +761,7 @@ mod tests {
             subject: "test-wallet-id".to_string(),
             ttl_secs: 259200,
             passkey_assertion: None, // #111
+            label: "p256-0".to_string(), // #115
         });
         // #111: roundtrip with a present assertion too (wire-format coverage).
         bincode_roundtrip(&CreateP256SessionKeyInput {
@@ -771,6 +776,7 @@ mod tests {
                 signature_s: [0x22; 32],
                 client_data_json: None,
             }),
+            label: "p256-1".to_string(), // #115
         });
         bincode_roundtrip(&CreateP256SessionKeyOutput {
             pub_key_x: [0xaa; 32],
