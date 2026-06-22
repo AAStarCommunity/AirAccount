@@ -546,6 +546,17 @@ pub fn verify_authentication_response(
     expected_rp_id: &str,
     stored_pubkey_uncompressed: &[u8], // 65 bytes
     stored_counter: u32,
+    // Issue #110: when the op is re-verified inside the TA (every signing/mutating
+    // op calls verify_passkey_for_wallet there), the TA is the authoritative gate
+    // for the challenge↔nonce↔payload binding (#49/#68). The host is then only a
+    // convenience layer and MUST NOT reject solely because the signed challenge is
+    // not the bare nonce — for a signing op it is the payload COMMITMENT
+    // `SHA-256(nonce‖payload)`, which the host cannot recompute for tx/message
+    // (the digest is derived inside the TA). So accept any challenge here and let
+    // the TA bind it; the one-time challenge_id consume + assertion signature +
+    // origin/rpId checks still apply. Host-authoritative paths (no TA re-bind)
+    // pass `false` to keep the strict `challenge == nonce` check.
+    delegate_challenge_to_ta: bool,
 ) -> Result<VerifiedAuthentication> {
     // 1. Decode and verify clientDataJSON
     let client_data_bytes = b64url_decode(&response.response.client_data_json)?;
@@ -567,7 +578,19 @@ pub fn verify_authentication_response(
         .ok_or_else(|| anyhow!("clientDataJSON missing 'challenge'"))?;
     let decoded_challenge = b64url_decode(cd_challenge)?;
     if decoded_challenge != expected_challenge {
-        return Err(anyhow!("Challenge mismatch"));
+        if delegate_challenge_to_ta {
+            // Issue #110: not the bare nonce → presumed payload-commitment
+            // SHA-256(nonce‖payload) for a TA-rebound signing op. The host can't
+            // recompute it (the digest is derived in the TA); the TA is the
+            // authoritative binder (#68). Accept here — the one-time challenge_id
+            // was already consumed, the assertion signature is verified below, and
+            // the TA rejects any nonce/payload mismatch (replay or CA payload-swap).
+            eprintln!(
+                "ℹ️  #110: host delegating challenge-value binding to TA (non-nonce challenge, presumed payload commitment)"
+            );
+        } else {
+            return Err(anyhow!("Challenge mismatch"));
+        }
     }
 
     let cd_origin = client_data["origin"]
