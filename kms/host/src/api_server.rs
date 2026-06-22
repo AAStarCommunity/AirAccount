@@ -2693,7 +2693,12 @@ impl KmsApiServer {
                 &req.human_key_id,
                 None, // reject legacy path
                 req.webauthn_assertion.as_ref(),
-                false, // #110: agent path is host-authoritative → keep challenge==nonce
+                // #115: the TA now re-binds the mint challenge to the label
+                // (Some(mint_label_digest)), so the host must DELEGATE the
+                // challenge-value check (true) — otherwise it rejects the
+                // SHA-256(nonce‖digest) commitment as "not the bare nonce" before
+                // it reaches the TA. (host still verifies sig+origin+rpId+one-time.)
+                true,
             )
             .await?;
         if assertion.is_none() {
@@ -2712,8 +2717,10 @@ impl KmsApiServer {
                 wallet_id,
                 agent_index,
                 &req.human_key_id,
-                3 * 24 * 3600,
+                24 * 3600, // #115: 24h cap (was 3d)
                 assertion,
+                &req.label, // #115: bound into mint commitment
+                false,      // #115: CREATE (binds label)
             )
             .await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
@@ -3433,7 +3440,9 @@ impl KmsApiServer {
                 &wallet_id_str,
                 None, // reject legacy path
                 req.webauthn_assertion.as_ref(),
-                false, // #110: agent path is host-authoritative → keep challenge==nonce
+                // #115: refresh re-mints via CreateAgentKey, which the TA now binds to
+                // the (empty) label digest → delegate the challenge-value check to the TA.
+                true,
             )
             .await?;
         if assertion.is_none() {
@@ -3453,14 +3462,19 @@ impl KmsApiServer {
 
         // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation).
         // TA computes iat from its own clock — host no longer supplies iat.
+        // #115: refresh does not (re)set a label — the key identity is fixed by key_id —
+        // so bind the empty label (digest still binds wallet_id). The refreshing client
+        // commits to the empty label likewise.
         let tee_result = self
             .tee
             .create_agent_key(
                 wallet_uuid,
                 agent_index,
                 &wallet_id_str,
-                3 * 24 * 3600,
+                24 * 3600, // #115: 24h cap (was 3d)
                 assertion,
+                "",   // #115: refresh binds the index, not a label
+                true, // #115: REFRESH (binds agent_index under a distinct tag)
             )
             .await?;
         let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
@@ -3886,7 +3900,8 @@ impl KmsApiServer {
             ));
         }
         let assertion = self
-            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref(), false)
+            // #115: TA binds the mint challenge to the label → delegate to TA (true).
+            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref(), true)
             .await?;
         if assertion.is_none() {
             return Err(anyhow!(
@@ -3909,7 +3924,7 @@ impl KmsApiServer {
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
             .tee
-            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600, assertion)
+            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 24 * 3600, assertion, &req.label)
             .await
         {
             Ok(r) => r,
@@ -3995,7 +4010,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.25.3";
+const KMS_VERSION: &str = "0.26.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();

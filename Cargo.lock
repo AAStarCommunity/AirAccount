@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "kms"
-version = "0.25.3"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bincode",
  "num_enum",

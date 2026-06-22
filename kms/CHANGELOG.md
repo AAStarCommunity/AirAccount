@@ -2,6 +2,25 @@
 
 > Updated: 2026-06-22
 
+## 0.26.0 (2026-06-22) — Beta5 — mint label 绑定（#115 正确版）+ 凭证 TTL 上限 24h
+
+### 安全 (Security) — #115（正确版，取代 v0.25.2 已回退的实现）
+- **mint 把 CLIENT-AUTHORIZED 输入绑进 challenge**：`create_agent_key` / `create_p256_session_key` 的 TA 校验改为 `Some(mint_label_digest)`，`mint_label_digest = SHA-256(tag ‖ wallet_id[16] ‖ SHA-256(label))`，tag = `AA-AGENT-MINT-v2` / `AA-P256-SESSION-MINT-v2`。strict 下被攻陷的 CA **无法在用户手势里篡改 label**。
+- 只绑**客户端可知/授权**的值（wallet_id + label）；服务端派生的 `index`（assertion 后才原子分配，客户端无法预知）、`subject`、`ttl` 不绑——这正是 v0.25.2 实现回退的原因（绑了 index → strict 不可满足）。proto 加 `label` 字段，host 转发 `req.label`。agent-credential **refresh** 无 label → 绑空 label（仍绑 wallet_id）。
+- **transition-safe**：TA 仍接受裸 nonce（nonce 防重放始终保留）；strict 才强制 `challenge == SHA-256(nonce ‖ mint_label_digest)`。
+- **#111 用户在场校验不变**（关键防线）——本次只是给那次校验**叠加** label 绑定（nonce + label，不是替换 nonce）。
+
+### 加固 (Hardening) — 凭证 TTL 上限 24h
+- `MAX_AGENT_JWT_TTL` 7 天 → **24 小时**；agent/p256 默认 ttl 3 天 → 24h。压缩委托签名窗口：泄漏/被滥用的凭证（或被攻陷 CA 想拉长的 ttl）最多有效 24h。agent/session 每天重新铸（重新 passkey）。
+
+### 测试 (Test) — #119
+- `kms/docs/test-vectors/`：mint（agent/p256/refresh 空 label）+ grant（空/非空 pad-32）锁定向量 + `compute_vectors.py` 全 ALL PASS。
+
+### ⚠️ 部署 (Deploy)
+- **proto 0.6.0 → 0.7.0（新增 `label` 字段，wire 变）→ host + TA 必须 co-deploy**。SDK 须对 mint 发 `SHA-256(nonce ‖ mint_label_digest)`（不再是 v0.25.2 的 index 版、也不是裸 nonce）。
+
+> 双轨版本：CA(host) **0.26.0** · TA **0.8.0** · proto **0.7.0**。三者 co-deploy。
+
 ## 0.25.3 (2026-06-22) — Beta5 — grant 数组 pad-32 修复（#112）+ 回退 #115 mint 绑定 + #119 向量
 
 ### 修复 (Fix) — #112，consensus-critical

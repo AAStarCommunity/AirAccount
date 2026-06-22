@@ -6,6 +6,12 @@
 
 ---
 
+## 0.0 ⚠️ CA/TA 一致性硬门（动了 TA verify payload 或 host delegate 必跑）
+> 复发 bug 类（#110、#121）：TA 绑 `Some(payload)` 但 host `delegate=false`（或反之）→ host 在 challenge 到 TA 前就拒掉 commitment。**memory 不顶事，这是可执行硬门。**
+- [ ] 跑 `python3 scripts/ca-ta-consistency.py`，**把输出贴进 PR**。同名 op 必须 `ALL CONSISTENT`（TA Some ⟺ host delegate=true）。
+- [ ] 跨 crate 命名的 op（refresh / sign 各 handler）逐条对照 [`docs/design/ca-ta-consistency-matrix.md`](../../docs/design/ca-ta-consistency-matrix.md) 手工核。
+- [ ] 顺序：**先跑此门 + self-challenge → 再 codex rescue → 再 TPR**。门没过不准提 codex。
+
 ## 0. 决定版本号（双轨）
 - [ ] **CA(host)**：语义化版本（feature → minor，fix → patch）。这是对外/运行时主版本。
 - [ ] **TA**：仅当 TA 代码变更才 bump（攒到下次 TA 改动）。
