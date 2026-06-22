@@ -2,6 +2,19 @@
 
 > Updated: 2026-06-22
 
+## 0.25.3 (2026-06-22) — Beta5 — grant 数组 pad-32 修复（#112）+ 回退 #115 mint 绑定 + #119 向量
+
+### 修复 (Fix) — #112，consensus-critical
+- **grant 的 callTargets/selectorAllowlist 数组打包：tight-pack → pad-32**。`keccak_packed_addresses`/`keccak_packed_selectors` 此前 tight-pack（地址 20B/选择器 4B），但 Solidity `abi.encodePacked(address[]/bytes4[])`（合约 `SessionKeyValidator._buildGrantHash` 与 SDK viem 一致）**对数组每个元素补 32 字节**（address 左补、bytes4 右补）。空数组两者相同（`keccak("")`），故此前测试没暴露；**非空 scoped grant** 的 TA final_hash ≠ 合约 → TA 签名链上验不过、strict commitment 也对不上。**独立于 strict 的真 bug，非空 scoped grant 此前就坏。** 已用 SDK 的 live 合约 oracle 向量逐字节验证（k1+p256）。
+
+### 回退 (Revert) — #115 mint 参数绑定 → nonce-only
+- v0.25.2 的 #115 把 mint challenge 绑定到 `index/subject/ttl`，但这些值**全是服务端/host 派生**（`agent_index`/`session_index` 原子分配、subject/ttl host 派生），客户端 ceremony 只发 `human_key_id+label` → **strict 下客户端算不出 commitment（不可满足），会炸 strict mint**。回退为 nonce-only：mint 的保护是 **#111 TA 内校验用户在场**（关键防线，不变）+ 一次性 nonce。真正的参数加固应绑**客户端授权输入**（human_key_id+label，需 label 接进 TA）——见 follow-up。
+
+### 测试 (Test) — #119
+- `kms/docs/test-vectors/commitment-vectors.json` + `compute_vectors.py`：grant commitment 锁定向量（空 + 非空数组）+ 可运行 cross-check（防 pad-32 规格再漂移）。
+
+> 双轨版本：CA(host) **0.25.3** · TA **0.7.2**（pad-32 + mint 回退）· proto 0.6.0（不变）。TA 改动 → 需刷 TA。
+
 ## 0.25.2 (2026-06-22) — Beta5 — mint 参数绑进 challenge（#115）+ 凭证信任模型文档（#117）
 
 ### 安全 (Security) — #115
