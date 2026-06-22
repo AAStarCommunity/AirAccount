@@ -251,6 +251,14 @@ pub struct CreateAgentKeyInput {
     /// cannot relabel the credential while riding the user's mint gesture.
     #[serde(default)]
     pub label: String,
+    /// #115: distinguishes fresh CREATE from credential REFRESH (both use the
+    /// CreateAgentKey command). The TA binds DIFFERENT commitments so a refresh
+    /// assertion cannot be replayed to create (or vice versa): CREATE binds
+    /// AA-AGENT-MINT-v2 ‖ wallet ‖ H(label); REFRESH binds AA-AGENT-REFRESH-v2 ‖
+    /// wallet ‖ agent_index. A compromised CA cannot flip this — the client commits
+    /// to the matching tag/shape, which won't verify under the other branch.
+    #[serde(default)]
+    pub is_refresh: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

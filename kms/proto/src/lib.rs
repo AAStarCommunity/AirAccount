@@ -427,6 +427,7 @@ mod tests {
             ttl_secs: 259200i64,
             passkey_assertion: None,
             label: "agent-0".to_string(), // #115
+            is_refresh: false,            // #115
         });
         bincode_roundtrip(&CreateAgentKeyInput {
             wallet_id: test_uuid(),
@@ -441,6 +442,7 @@ mod tests {
                 client_data_json: None,
             }),
             label: "test-agent".to_string(), // #115
+            is_refresh: true,                // #115 (refresh path)
         });
         bincode_roundtrip(&CreateAgentKeyOutput {
             agent_address: [0xab; 20],
