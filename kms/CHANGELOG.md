@@ -2,6 +2,18 @@
 
 > Updated: 2026-06-22
 
+## 0.25.2 (2026-06-22) — Beta5 — mint 参数绑进 challenge（#115）+ 凭证信任模型文档（#117）
+
+### 安全 (Security) — #115
+- **mint 类操作把 mint 参数绑进 WebAuthn challenge**：`create_agent_key` / `create_p256_session_key` 的 TA 校验从 `None`（仅 nonce）改为 `Some(mint_digest)`——绑定 `index / ttl / subject`。strict 下被攻陷的 CA **无法借一次用户手势篡改铸造参数**（如偷偷延长 ttl、换 subject）。
+- mint_digest 规格（域分离、定长，SDK 须一致复算）：`SHA-256(domain_tag ‖ wallet_id[16] ‖ index[u32 BE,4] ‖ ttl_secs[i64 BE,8] ‖ SHA-256(subject)[32])`，tag = `AA-AGENT-MINT-v1` / `AA-P256-SESSION-MINT-v1`。客户端 commitment = `SHA-256(nonce ‖ mint_digest)`。
+- **transition-safe**：TA 仍接受裸 nonce（SDK 现有 mint 流程不变）；strict 才强制 commitment。无 proto / host 改动（TA-only；assertion 字段 #111 已就位）。
+
+### 文档 (Docs) — #117
+- `docs/TRUST.md` §7：委托签名凭证（agent key / P256 session key）信任模型——**铸造时用户在场 + 参数绑定（强）**，**TTL 窗口内委托签名（有意折中，靠短 TTL + scope + 撤销控制）**。澄清 `sign_p256_user_op` 每笔不验在场是 by-design 委托，非 bug。
+
+> 双轨版本：CA(host) **0.25.2** · TA **0.7.1**（mint 绑定）· proto 0.6.0（不变）。TA 改动 → 需刷 TA。
+
 ## 0.25.1 (2026-06-22) — Beta5 — grant-session 走 TA 挑战绑定（#112，strict 前置）
 
 **主题：让 grant-session 的 challenge 由 TA 发、被 TA 绑定**——清掉 strict 翻转（#63）的最后一个 KMS 侧依赖。此前 grant 用 host 随机 challenge + host strip 掉 client_data_json → TA 拿不到 → 只有 host 绑定（弱于核心签名），且 strict 下会被硬拒。

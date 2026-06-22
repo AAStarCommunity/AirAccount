@@ -1604,7 +1604,14 @@ fn create_agent_key(input: &proto::CreateAgentKeyInput) -> Result<proto::CreateA
 
     // C-1: TA-side passkey verification — blocks a compromised host from calling this
     // command directly to mint agent credentials without user presence.
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // #115: bind the challenge to the mint params (agent_index/ttl/subject) so a
+    // compromised CA cannot ride the gesture with altered params. transition accepts
+    // bare nonce; strict requires challenge == SHA-256(nonce ‖ agent_mint_digest).
+    verify_passkey_for_wallet(
+        &wallet,
+        input.passkey_assertion.as_ref(),
+        Some(&agent_mint_digest(input)),
+    )?;
 
     // H-1: Enforce TTL bounds inside TA (host-supplied, but TA caps it).
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -1845,9 +1852,15 @@ fn create_p256_session_key(
     // TEE-HMAC JWT. Without this, a compromised CA could issue CreateP256SessionKey
     // directly and mint a signing credential with no user assertion (the host's
     // WebAuthn check would be the only barrier — defeated by a malicious host).
-    // Mirrors create_agent_key's C-1 defense-in-depth. None payload = nonce binding
-    // (this is a mint op, not a payload signature).
-    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
+    // Mirrors create_agent_key's C-1 defense-in-depth.
+    // #115: bind the challenge to the mint params (session_index/ttl/subject) so a
+    // compromised CA cannot ride the gesture with altered params. transition accepts
+    // bare nonce; strict requires challenge == SHA-256(nonce ‖ p256_session_mint_digest).
+    verify_passkey_for_wallet(
+        &wallet,
+        input.passkey_assertion.as_ref(),
+        Some(&p256_session_mint_digest(input)),
+    )?;
 
     // Enforce TTL bounds (same as create_agent_key)
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
@@ -2344,6 +2357,35 @@ fn eip191_hash(inner: &[u8; 32]) -> [u8; 32] {
     msg[0..28].copy_from_slice(b"\x19Ethereum Signed Message:\n32");
     msg[28..60].copy_from_slice(inner);
     Keccak256::digest(&msg).into()
+}
+
+/// #115: canonical digest over the MINT parameters of a credential-minting op,
+/// bound into the WebAuthn challenge (challenge = SHA-256(nonce ‖ mint_digest)) so
+/// a compromised CA cannot ride ONE user-approved mint gesture with altered params
+/// (e.g. a longer ttl, a different subject/index). Domain-separated per op; the
+/// variable-length subject is hashed to keep every field fixed-width. The SDK MUST
+/// recompute this identically. Fields (big-endian): wallet_id(16) ‖ index(4) ‖
+/// ttl_secs(8) ‖ SHA-256(subject)(32), under a per-op domain tag.
+fn agent_mint_digest(input: &proto::CreateAgentKeyInput) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"AA-AGENT-MINT-v1");
+    h.update(input.wallet_id.as_bytes());
+    h.update(input.agent_index.to_be_bytes());
+    h.update(input.ttl_secs.to_be_bytes());
+    h.update(sha2::Sha256::digest(input.subject.as_bytes()));
+    h.finalize().into()
+}
+
+fn p256_session_mint_digest(input: &proto::CreateP256SessionKeyInput) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"AA-P256-SESSION-MINT-v1");
+    h.update(input.wallet_id.as_bytes());
+    h.update(input.session_index.to_be_bytes());
+    h.update(input.ttl_secs.to_be_bytes());
+    h.update(sha2::Sha256::digest(input.subject.as_bytes()));
+    h.finalize().into()
 }
 
 fn sign_grant_session(input: &proto::SignGrantSessionInput) -> Result<proto::SignGrantSessionOutput> {
