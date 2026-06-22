@@ -1839,7 +1839,15 @@ fn create_p256_session_key(
     );
 
     // Verify the wallet exists so we don't create orphaned session keys
-    let _wallet = load_wallet_cached(&input.wallet_id)?;
+    let wallet = load_wallet_cached(&input.wallet_id)?;
+
+    // #111: re-verify user presence IN THE TEE before minting the session key +
+    // TEE-HMAC JWT. Without this, a compromised CA could issue CreateP256SessionKey
+    // directly and mint a signing credential with no user assertion (the host's
+    // WebAuthn check would be the only barrier — defeated by a malicious host).
+    // Mirrors create_agent_key's C-1 defense-in-depth. None payload = nonce binding
+    // (this is a mint op, not a payload signature).
+    verify_passkey_for_wallet(&wallet, input.passkey_assertion.as_ref(), None)?;
 
     // Enforce TTL bounds (same as create_agent_key)
     if input.ttl_secs <= 0 || input.ttl_secs > MAX_AGENT_JWT_TTL {
