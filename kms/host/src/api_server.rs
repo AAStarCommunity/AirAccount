@@ -1870,10 +1870,13 @@ impl KmsApiServer {
         let pk_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
             .map_err(|e| anyhow!("Invalid stored passkey hex: {}", e))?;
 
-        // #110: grant-session is HOST-authoritative — the TA does NOT re-verify this
-        // challenge (client_data_json is stripped below so the TA takes the legacy
-        // path; see note). So the host MUST keep the strict `challenge == nonce`
-        // check here → delegate_challenge_to_ta = false.
+        // #112: grant-session now uses a TA-issued nonce (begin_grant_session_auth →
+        // GetChallenge), and the TA re-binds it at sign time (sign_grant_session /
+        // sign_p256_grant_session call verify_passkey_for_wallet with Some(final_hash)
+        // → payload commitment). So the host delegates the challenge-value check to
+        // the TA (true) — exactly like the regular signing path — accepting a
+        // payload-commitment challenge in strict, and the bare nonce in transition.
+        // (Host still verifies signature + origin + rpId + one-time challenge_id.)
         let verified = webauthn::verify_authentication_response(
             &wa.credential,
             &challenge_row.challenge,
@@ -1881,24 +1884,19 @@ impl KmsApiServer {
             &challenge_row.rp_id,
             &pk_bytes,
             w.sign_count,
-            false,
+            true,
         )?;
 
         let _ = self
             .db
             .update_wallet_sign_count(key_id, verified.new_counter);
 
-        // Issue #49 scope: grant-session uses a purpose-bound HOST challenge (not a
-        // TA-issued nonce), and its challenge binding is already enforced above
-        // (purpose + key + consume_challenge). The TA pending-nonce table is only
-        // populated by the regular sign BeginAuthentication path, so we must NOT
-        // ask the TA to verify a nonce it never issued — strip client_data_json so
-        // the TA takes the legacy/transition path for grant-session. (TODO(#49):
-        // route grant-session begin through TA GetChallenge to extend TA-side
-        // binding here too, once the single-slot pending table supports purposes.)
-        let mut proto_assertion = verified.proto_assertion;
-        proto_assertion.client_data_json = None;
-        Ok(proto_assertion)
+        // #112: DO NOT strip client_data_json anymore. The TA now holds the nonce
+        // (GetChallenge) and is the authoritative binder — forward the assertion so
+        // the TA verifies challenge↔nonce↔payload. (Pre-#112 the grant challenge was
+        // host-random, absent from the TA pending table, so we had to strip; that is
+        // no longer the case.)
+        Ok(verified.proto_assertion)
     }
 
     pub async fn derive_address(&self, req: DeriveAddressRequest) -> Result<DeriveAddressResponse> {
@@ -2623,8 +2621,35 @@ impl KmsApiServer {
         };
 
         let rp_id = self.resolve_rp_id(origin_header);
-        let (challenge_id, challenge_bytes, resp) =
-            webauthn::generate_authentication_options(&rp_id, allow_credentials);
+
+        // #112: source the grant-session challenge from the TA (GetChallenge) so it
+        // lands in the TA's pending-nonce table and the TA can bind it at sign time
+        // (sign_grant_session / sign_p256_grant_session pass Some(final_hash) → payload
+        // commitment). This mirrors the regular BeginAuthentication path and lets the
+        // resolver stop stripping client_data_json (so the TA — not just the host —
+        // verifies the challenge). Fallback to a host-random challenge only if the
+        // TA GetChallenge is unavailable (older TA / transient).
+        let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(key_id) {
+            Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
+                Ok(nonce) => {
+                    println!("🔐 #112: using TA-issued nonce for grant-session key_id={}", key_id);
+                    webauthn::generate_authentication_options_with_challenge(
+                        &rp_id,
+                        allow_credentials,
+                        nonce,
+                    )
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️  #112: TA GetChallenge unavailable ({}); grant-session falls back to \
+                         host-random challenge (TA legacy path)",
+                        e
+                    );
+                    webauthn::generate_authentication_options(&rp_id, allow_credentials)
+                }
+            },
+            Err(_) => webauthn::generate_authentication_options(&rp_id, allow_credentials),
+        };
 
         self.db.store_challenge(
             &challenge_id,
@@ -3970,7 +3995,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.25.0";
+const KMS_VERSION: &str = "0.25.1";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();

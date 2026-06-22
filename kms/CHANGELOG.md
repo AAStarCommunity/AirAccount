@@ -2,6 +2,21 @@
 
 > Updated: 2026-06-22
 
+## 0.25.1 (2026-06-22) — Beta5 — grant-session 走 TA 挑战绑定（#112，strict 前置）
+
+**主题：让 grant-session 的 challenge 由 TA 发、被 TA 绑定**——清掉 strict 翻转（#63）的最后一个 KMS 侧依赖。此前 grant 用 host 随机 challenge + host strip 掉 client_data_json → TA 拿不到 → 只有 host 绑定（弱于核心签名），且 strict 下会被硬拒。
+
+### 修复 (Fix)
+- `begin_grant_session_auth`：改用 **TA `GetChallenge`**（镜像常规 BeginAuthentication），TA nonce 进 pending 表（GetChallenge 不可用时回退 host-random）。
+- `resolve_grant_passkey_assertion`：**停止 strip `client_data_json`** + host 改 `delegate_challenge_to_ta=true` —— TA 现在二次绑定 grant（`sign_grant_session`/`sign_p256_grant_session` 已传 `Some(final_hash)` → payload commitment）。host 仍验签名 + origin + rpId + 一次性 challenge_id。
+
+### 安全 / 兼容
+- **transition-safe**：SDK 当前「签 begin 返回的 challenge（裸）」照旧能用（现在那是 TA nonce，TA peek 到、transition 接受裸 nonce）。strict 时 SDK 对 grant 发 commitment（aastar-sdk#135 item3）。
+- grant 现与常规 sign 共享 **per-wallet 单 nonce 槽**（TA "one live nonce per wallet"）——与「并发常规 sign」是同一既有限制（非本次新增）；ceremony 顺序执行不受影响。多槽/purpose-aware pending 表是单独 TA 改进（后续）。
+- ⚠️ 这是 **#63 strict 翻转的前置**：grant 不再被 strict 硬拒。
+
+> 双轨版本：CA(host) **0.25.1** · TA 0.7.0（不变）· proto 0.6.0（不变）。**host-only**（无需刷 TA）。
+
 ## 0.25.0 (2026-06-22) — Beta5 — TA 验证 P256 session key 创建的用户在场（#111，CRITICAL）
 
 **主题：关闭 CreateP256SessionKey 的「无 passkey 也能铸 TEE 签名凭证」通道。** 此前 host 验 WebAuthn 但**不转发给 TA**，TA 也不验 → 被攻陷的 CA 可直接发 `CreateP256SessionKey` 给 TA，零用户在场铸出 P256 session key + TEE-HMAC JWT，再以用户身份签 UserOp。这是 #110 一致性审计 + Codex 双重确认的 CRITICAL（D1）。
