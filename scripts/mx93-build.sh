@@ -42,6 +42,18 @@ die()  { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 docker ps --format '{{.Names}}' | grep -qx "$CONTAINER" \
     || die "Container '$CONTAINER' not running. Start it: docker start $CONTAINER (and OrbStack)."
 
+# CA/TA challenge-binding consistency gate (#110/#121 recurrence guard).
+# Aborts the build if the TA binds Some(payload) for an op but the host passes
+# delegate=false (so the commitment would be rejected before reaching the TA).
+# See docs/design/ca-ta-consistency-matrix.md.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR/ca-ta-consistency.py" >/dev/null 2>&1 \
+        || die "CA/TA consistency gate FAILED — run 'python3 scripts/ca-ta-consistency.py' (docs/design/ca-ta-consistency-matrix.md)"
+    ok "CA/TA consistency gate passed"
+else
+    warn "python3 not found — skipping CA/TA consistency gate (run scripts/ca-ta-consistency.py manually)"
+fi
+
 # Ensure the MX93 TA signing key (NXP imx-optee-os lf-6.18 RSA-4096 public dev
 # key) is present. It is gitignored (*.pem) and not committed, so fetch it from
 # NXP's official repo on first build. MX93 OP-TEE 4.8 only trusts this 4096-bit

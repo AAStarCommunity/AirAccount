@@ -239,7 +239,7 @@ pub struct CreateAgentKeyInput {
     pub agent_index: u32,
     /// JWT sub claim (typically the human key ID string).
     pub subject: String,
-    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    /// JWT lifetime in seconds (TA caps at MAX_AGENT_JWT_TTL = 86400 (24h)).
     /// TA computes iat = now() internally; host does not supply iat.
     pub ttl_secs: i64,
     /// Passkey assertion — mandatory when wallet has a PassKey bound.
@@ -404,7 +404,7 @@ pub struct CreateP256SessionKeyInput {
     pub session_index: u32,
     /// JWT sub claim (typically the human key ID string).
     pub subject: String,
-    /// JWT lifetime in seconds (TA enforces 1..=604800 cap).
+    /// JWT lifetime in seconds (TA caps at MAX_AGENT_JWT_TTL = 86400 (24h)).
     pub ttl_secs: i64,
     /// #111: WebAuthn assertion proving user presence. The TA re-verifies it
     /// (verify_passkey_for_wallet) BEFORE minting the session key + TEE-HMAC JWT,
