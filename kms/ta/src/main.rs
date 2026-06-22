@@ -308,9 +308,11 @@ const MAX_PENDING_CHALLENGES: usize = 256;
 /// rather than a hand-edited literal, so a strict TA image can be produced for
 /// mainnet/testing without touching source — and the default build stays
 /// TRANSITION so production (kms.aastar.io) keeps accepting not-yet-migrated
-/// clients until the SDK ships the GetChallenge flow (#58). Build the strict
-/// image with `--features strict-challenge` only AFTER #58 is deployed,
-/// otherwise every legacy client is rejected.
+/// clients until all clients use the GetChallenge + payload-commitment ceremony
+/// (SDK-side; see aastar-sdk PR #131 follow-up — NOT issue #58, which is the
+/// unrelated email-OTP unfreeze feature). Build the strict image with
+/// `--features strict-challenge` only AFTER clients have migrated; the KMS flip
+/// is tracked in #63 (umbrella #99), otherwise not-yet-migrated clients are rejected.
 #[cfg(feature = "strict-challenge")]
 const ENFORCE_TA_CHALLENGE: bool = true;
 #[cfg(not(feature = "strict-challenge"))]
