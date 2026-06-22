@@ -58,12 +58,14 @@ fi
 build_ta() {
     # Issue #63: TA feature set. Default = transition (production-safe). Set
     # MX93_STRICT_CHALLENGE=1 to build a STRICT image (rejects assertions without
-    # TA-issued challenge binding). Only build strict AFTER the SDK ships the
-    # GetChallenge flow (#58) — otherwise every not-yet-migrated client is rejected.
+    # TA-issued challenge binding). Only build strict AFTER all clients use the
+    # GetChallenge + payload-commitment ceremony (SDK-side, aastar-sdk PR #131
+    # follow-up; NOT #58 = email-OTP). KMS flip tracked in #63 (umbrella #99) —
+    # otherwise every not-yet-migrated client is rejected.
     local TA_FEATURES="ree-fs-only"
     if [[ "${MX93_STRICT_CHALLENGE:-0}" == "1" ]]; then
         TA_FEATURES="ree-fs-only,strict-challenge"
-        warn "STRICT challenge mode ON — legacy (no-clientDataJSON) clients will be REJECTED. Ensure SDK #58 is deployed."
+        warn "STRICT challenge mode ON — legacy (no-clientDataJSON) clients will be REJECTED. Ensure all clients use the GetChallenge/commitment ceremony (SDK-side) before flipping."
     fi
     # PROFILE: production (default) accepts rpId aastar.io only. Test build
     # (MX93_DEV_RPID=1) ALSO accepts localhost — for a DEV BOARD ONLY, never prod.

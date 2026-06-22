@@ -52,8 +52,9 @@ ree-fs-only = []
 #   working. Assertions WITH clientDataJSON are ALWAYS strictly verified.
 # On = STRICT: every assertion MUST carry clientDataJSON and pass TA-issued
 #   nonce binding (closes the legacy assertion-replay backdoor, V2). Build the
-#   strict image ONLY after the SDK ships the GetChallenge flow (#58), else all
-#   legacy clients are rejected. Mainnet target.
+#   strict image ONLY after all clients use the GetChallenge + payload-commitment
+#   ceremony (SDK-side; see aastar-sdk PR #131 follow-up), else not-yet-migrated
+#   clients are rejected. KMS flip tracked in #63 (umbrella #99). Mainnet target.
 strict-challenge = []
 
 [dependencies]
