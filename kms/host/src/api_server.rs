@@ -2712,8 +2712,9 @@ impl KmsApiServer {
                 wallet_id,
                 agent_index,
                 &req.human_key_id,
-                3 * 24 * 3600,
+                24 * 3600, // #115: 24h cap (was 3d)
                 assertion,
+                &req.label, // #115: bound into mint commitment
             )
             .await?;
         let agent_address = format!("0x{}", hex::encode(&tee_result.agent_address));
@@ -3453,14 +3454,18 @@ impl KmsApiServer {
 
         // Re-derive agent key in TEE with fresh JWT (same key, new TTL — idempotent derivation).
         // TA computes iat from its own clock — host no longer supplies iat.
+        // #115: refresh does not (re)set a label — the key identity is fixed by key_id —
+        // so bind the empty label (digest still binds wallet_id). The refreshing client
+        // commits to the empty label likewise.
         let tee_result = self
             .tee
             .create_agent_key(
                 wallet_uuid,
                 agent_index,
                 &wallet_id_str,
-                3 * 24 * 3600,
+                24 * 3600, // #115: 24h cap (was 3d)
                 assertion,
+                "", // #115: refresh carries no label
             )
             .await?;
         let (new_jwt, expires_at) = agent_jwt::assemble_jwt(&tee_result)?;
@@ -3909,7 +3914,7 @@ impl KmsApiServer {
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
             .tee
-            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 3 * 24 * 3600, assertion)
+            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 24 * 3600, assertion, &req.label)
             .await
         {
             Ok(r) => r,
@@ -3995,7 +4000,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.25.3";
+const KMS_VERSION: &str = "0.26.0";
 
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
