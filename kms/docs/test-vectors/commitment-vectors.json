@@ -1,0 +1,67 @@
+{
+  "_about": "Locked grant-session challenge-commitment test vectors for KMS strict mode (#119). The TA binds the WebAuthn challenge to the grant final_hash: challenge = base64url_nopad(SHA-256(challenge_nonce || final_hash)). SDK MUST recompute final_hash byte-identically (it equals the on-chain SessionKeyValidator hash). Verify with compute_vectors.py.",
+  "_version": "CA 0.25.3 / TA 0.7.2 / proto 0.6.0",
+  "_mint_note": "MINT ops (create_agent_key / create_p256_session_key) are NONCE-ONLY — no payload commitment. #115's mint-param binding was reverted (#112/#115): agent_index/session_index are server-allocated and subject/ttl are host-derived, so the client (which only sends human_key_id+label) cannot compute a param commitment. User presence (#111, verified in-TEE) is the mint protection. In strict the client commits to the bare TA nonce.",
+  "grant": {
+    "_spec": "inner = keccak256(abi.encode(string tag, uint256 chainId, address verifyingContract, address account, <address sessionKey | bytes32 keyX, bytes32 keyY>, uint48 expiry, address contractScope, bytes4 selectorScope, uint16 velocityLimit, uint32 velocityWindow, bytes32 callTargetsHash, bytes32 selectorsHash, uint256 nonce)). callTargetsHash = keccak256(abi.encodePacked(address[])) where Solidity pads EACH element to 32 bytes (address left-aligned: 12 zero + 20 bytes). selectorsHash = keccak256(abi.encodePacked(bytes4[])) where each bytes4 is right-padded to 32 (4 bytes + 28 zero). final_hash = keccak256('\\x19Ethereum Signed Message:\\n32' || inner). Source: kms/ta/src/main.rs build_grant_session_inner / build_p256_grant_session_inner + keccak_packed_addresses/keccak_packed_selectors (#112). inner cross-verified against `cast abi-encode` (empty arrays) and the SDK's live contract oracle (non-empty arrays).",
+    "empty_arrays": {
+      "_note": "callTargets=[] selectorAllowlist=[] -> callTargetsHash = selectorsHash = keccak256('') = c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470. (tight-pack and pad-32 agree for the empty array — this case never exposed the #112 bug.)",
+      "input": {
+        "chainId": 11155111,
+        "verifyingContract": "0x1111111111111111111111111111111111111111",
+        "account": "0x2222222222222222222222222222222222222222",
+        "expiry": 1893456000,
+        "contractScope": "0x0000000000000000000000000000000000000000",
+        "selectorScope": "0x00000000",
+        "velocityLimit": 0,
+        "velocityWindow": 0,
+        "callTargets": [],
+        "selectorAllowlist": [],
+        "grant_nonce_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "challenge_nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242"
+      },
+      "secp256k1": {
+        "primary_type": "GRANT_SESSION_V2",
+        "sessionKey": "0x3333333333333333333333333333333333333333",
+        "inner_hex": "97882a1d78e1efda4869be4845290d6d4a0e41e3a5f1b1d8035cbc44f0d6eb58",
+        "final_hash_hex": "6546b30b4c80e91564cca9bc4e5c6a289a9af45a014c2b2a6616a836ff675ce1",
+        "commitment_b64url": "ApVTX1yXCUs2-NrxbngTZuBuj4dNGLH77fvFOsBVnr0"
+      },
+      "p256": {
+        "primary_type": "GRANT_P256_SESSION_V2",
+        "keyX_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "keyY_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "inner_hex": "f00b0d3012331b69ef9875424b01a69bb5accbd05212e6dd521cadc5e09a556b",
+        "final_hash_hex": "cf3c506f66064251f9e7f7a14dc5d20062569972fe8b5352f1106e97ad0a82dc",
+        "commitment_b64url": "X0wWLJJv1eDc2hebWBoIjgS8lvtA98q20PiMpk0SfiA"
+      }
+    },
+    "nonempty_arrays": {
+      "_note": "THE #112 regression-lock case. callTargetsHash/selectorsHash use Solidity pad-32 packing (NOT tight 20/4-byte). final_hash cross-verified against the SDK's live on-chain SessionKeyValidator.buildGrantHash oracle.",
+      "input": {
+        "chainId": 11155111,
+        "verifyingContract": "0x6810CfB7c72D16e044a17694fAa8076e517264D0",
+        "account": "0x1212121212121212121212121212121212121212",
+        "expiry": 9999999999,
+        "contractScope": "0x0000000000000000000000000000000000000000",
+        "selectorScope": "0x00000000",
+        "velocityLimit": 0,
+        "velocityWindow": 0,
+        "callTargets": ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        "selectorAllowlist": ["0xdeadbeef", "0x12345678"],
+        "grant_nonce_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "secp256k1": {
+        "primary_type": "GRANT_SESSION_V2",
+        "sessionKey": "0x3434343434343434343434343434343434343434",
+        "final_hash_hex": "578ce6da8e25bb3423b2dcfe73771af540f5de8b62432a68b660b09fad76c17d"
+      },
+      "p256": {
+        "primary_type": "GRANT_P256_SESSION_V2",
+        "keyX_hex": "3434343434343434343434343434343434343434343434343434343434343434",
+        "keyY_hex": "5656565656565656565656565656565656565656565656565656565656565656",
+        "final_hash_hex": "6b9815da68d2a3b212592f5c76aa54215c6712f72fda153e55d870ce6df95bf9"
+      }
+    }
+  }
+}
