@@ -103,7 +103,41 @@ provisioning 涉及**两把不同的 key**，作用完全不同：
 
 ---
 
-## 6. 时间线
+## 6. 部署前工作清单（刷机之外的 feature / issue / PR）
+
+除了刷 prod TA，主网 Alpha 上线前还有这些动作，按优先级分四档：
+
+### 6.1 必须做（阻塞 mainnet Alpha — 真资金红线）
+- **#99 生产硬件硬化**（总纲，一趟刷）：RPMB 防回滚（#50）+ secure boot + SRK/真签名 key + strict（dev 已验、prod 重做）。
+- **prod build profile**：无 dev-rpid + strict-challenge + 自己的 TA 签名私钥 + 去 `ree-fs-only`。
+- **prod TA measurement 发布透明日志**（Sigsum）作主网权威值。
+- **#102 Guardian secp256k1 单点风险 — 必须决策**：Alpha 接受 KMS 单点托管 guardian key（明确披露）还是先做合约 P-256 guardian 去依赖。真资金前要么修、要么书面接受。
+- **mainnet 合约部署/确认**（外部，SuperPaymaster 仓库 + #11）：grant `verifyingContract`、SessionKeyValidator、SuperPaymaster mainnet 地址。
+- **域名/rpId 切换**（§4）：kms→主网、测试→kms1、旧 kms1 v0.16.8 下线确认、prod rpId=aastar.io。
+- **prod API key**（新建一套；dev key 绝不上 prod）。
+- **备份/DR 方案**（⚠️ 待补 issue，见 6.4）：丢板=丢钥，真资金必须有恢复路径。
+- **最终安全复审**（⚠️ 待补 issue，见 6.4）：真资金前对完整 strict 路径 + 新硬化做一轮对抗审查。
+
+### 6.2 建议做（这趟刷机窗口顺带 — 反正要重刷 TA）
+- **#40 CAAM 硬件加速 / ELE crypto offload**（#99 子项）：SHA256 / P-256 passkey 验证 / HMAC 卸载到 ELE 硬件（secp256k1 留软件）。性价比评估后决定。
+- **#122 一致性门覆盖扩展**：grant/sign/revoke 自动化 + CI（基础已接入 #123）。
+- **容量确认**：i.MX93 ~100 用户负载（见 `backend-decomposition-kms-capacity.md`），确认 Alpha 规模够用。
+- **公网端点复核**：限流 / DoS 防护 / 监控 / 告警（mainnet 公开端点比 dev 严）。
+
+### 6.3 可延后（主网后 / 远期，不阻塞 Alpha）
+- #108 SignHashBatch（会话式批量授权）· #98 attestation 绑 SignHash 响应 · #88 链上 MeasurementRegistry（治理层）· #58 email OTP unfreeze（依赖 OTP API）· #38 PKCS#11 接口 · #48 ELE/HSM 私钥迁移研究（最高安全、长期）。
+
+### 6.4 还没 issue、建议补（主网前补齐）
+- **备份 / DR 方案**：prod kms.db + TEE secure storage 备份策略 + 丢板恢复（含 social recovery 边界）。
+- **最终 pre-mainnet 安全复审**：完整 strict + 硬化路径的对抗审查（codex/外部），真资金前一道关。
+- **密钥泄漏 / 事故响应预案**：TA 签名私钥泄漏怎么办（轮换？SRK 已烧无法换→只能换板）；API key 泄漏；板子失窃。
+- **TA 签名私钥保管方案**：生成、离线保管、谁能访问、备份（丢了不能再更新此板）。
+
+> 已完成（本月，不重复）：#110/#111/#112/#115（challenge-binding 全链，v0.24.2→v0.26.0）、#63 strict（dev 已翻+验）、#52 from 校验、CA/TA 一致性门、#119 向量。
+
+---
+
+## 7. 时间线
 
 ```
 2026-07  两块 MX93 到货
@@ -115,7 +149,7 @@ provisioning 涉及**两把不同的 key**，作用完全不同：
 
 ---
 
-## 7. 验收（mainnet Alpha 上线门槛）
+## 8. 验收（mainnet Alpha 上线门槛）
 
 - [ ] `/version` = `profile=prod, challenge_mode=strict`
 - [ ] RPMB 回滚测试：回退存储被拒
@@ -129,7 +163,7 @@ provisioning 涉及**两把不同的 key**，作用完全不同：
 
 ---
 
-## 8. ⚠️ 不可逆操作清单（需授权 + 在场 + 双确认 + 先备份）
+## 9. ⚠️ 不可逆操作清单（需授权 + 在场 + 双确认 + 先备份）
 
 | 操作 | 后果 | 错误代价 |
 |---|---|---|
