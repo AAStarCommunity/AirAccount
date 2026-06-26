@@ -3880,6 +3880,45 @@ impl KmsApiServer {
         })
     }
 
+    /// POST /contact/begin-binding — owner starts a contact binding (#129). Q4 gate
+    /// (codex/opus checkpoint review): the owner ceremony challenge is consumed + the
+    /// owner's passkey verified BEFORE the binding row is touched — begin's upsert can
+    /// overwrite a verified row, so this ceremony is the ENTIRE protection for a verified
+    /// binding. delegate=false → host-authoritative bare-nonce (no TA; binding is host
+    /// side). Telegram only for now; email is unwired until begin_email_binding exists.
+    /// ({account,channel} commitment binding is a follow-up — needs host-side payload
+    /// support in resolve_passkey_assertion.)
+    pub async fn begin_contact_binding(
+        &self,
+        req: BeginBindingRequest,
+    ) -> Result<BeginBindingResponse> {
+        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+            .await?;
+        if req.channel != "telegram" {
+            return Err(anyhow!(
+                "channel '{}' not supported yet (telegram only; email pending begin_email_binding)",
+                req.channel
+            ));
+        }
+        // High-entropy one-time bindingCode (256-bit, OS CSPRNG) — DB matches on it.
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let binding_code = hex::encode(buf);
+        let ttl_secs: i64 = 600;
+        self.db
+            .begin_contact_binding(&req.account, &req.channel, &binding_code, None, ttl_secs)?;
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + ttl_secs;
+        Ok(BeginBindingResponse {
+            binding_code,
+            expires_at,
+        })
+    }
+
     pub async fn create_p256_session_key(
         &self,
         req: CreateP256SessionKeyRequest,
@@ -5153,6 +5192,33 @@ async fn handle_sign_p256_grant_session(
     }
 }
 
+/// POST /contact/begin-binding — owner ceremony + the channel to bind (#129).
+#[derive(Debug, serde::Deserialize)]
+pub struct BeginBindingRequest {
+    pub account: String,
+    pub channel: String, // 'telegram' (email pending begin_email_binding)
+    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BeginBindingResponse {
+    #[serde(rename = "bindingCode")]
+    binding_code: String,
+    #[serde(rename = "expiresAt")]
+    expires_at: i64,
+}
+
+async fn handle_begin_binding(
+    body: BeginBindingRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.begin_contact_binding(body).await {
+        Ok(resp) => Ok(warp::reply::json(&resp)),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_create_p256_session_key(
     body: CreateP256SessionKeyRequest,
     server: Arc<KmsApiServer>,
@@ -5956,6 +6022,18 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server_cp256.clone()))
         .and_then(handle_create_p256_session_key);
 
+    // #129 contact-binding: POST /contact/begin-binding (owner ceremony, plain JSON).
+    let server_begin_bind = server.clone();
+    let begin_binding = warp::path("contact")
+        .and(warp::path("begin-binding"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_begin_bind.clone()))
+        .and_then(handle_begin_binding);
+
     let server_sp256 = server.clone();
     let sign_p256_user_op = warp::path("kms")
         .and(warp::path("sign-p256-user-op"))
@@ -6057,6 +6135,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(sign_grant_session)
         .or(sign_p256_grant_session)
         .or(create_p256_session_key)
+        .or(begin_binding)
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
         .boxed();
