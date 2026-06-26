@@ -2056,20 +2056,39 @@ impl KmsApiServer {
     /// A leaked secp256k1 owner key cannot produce a P256 WebAuthn assertion → this is
     /// what genuinely defends against owner-key theft (per Validator#124).
     pub async fn verify_confirm_assertion(&self, req: VerifyConfirmAssertionRequest) -> Result<bool> {
-        let wallet = self
-            .db
-            .get_wallet(&req.account)?
-            .ok_or_else(|| anyhow!("account not found"))?;
-        let pk_hex = wallet
-            .passkey_pubkey
-            .ok_or_else(|| anyhow!("account has no passkey bound"))?;
-        let pk = hex::decode(pk_hex.trim_start_matches("0x"))
-            .map_err(|e| anyhow!("invalid stored passkey hex: {}", e))?;
+        // (opus review) Validate the request STRUCTURE first — independent of account
+        // existence — so the only Err (→ 400) is genuinely-malformed caller input and does
+        // NOT leak whether `account` exists. Every account-dependent outcome below
+        // (not-found / no-passkey / dormant-frozen / bad stored key / bad signature)
+        // returns Ok(false) → uniform 200 {verified:false}, no enumeration oracle.
         let uoh = hex::decode(req.user_op_hash.trim_start_matches("0x"))
             .map_err(|e| anyhow!("invalid userOpHash hex: {}", e))?;
         if uoh.len() != 32 {
             return Err(anyhow!("userOpHash must be 32 bytes"));
         }
+        let wallet = match self.db.get_wallet(&req.account)? {
+            Some(w) => w,
+            None => return Ok(false),
+        };
+        // Defense-in-depth (opus review): a dormant/frozen wallet (#42) must not produce a
+        // co-signable confirmation. The op may not re-route through this KMS's sign_hash
+        // (path-2: final sig is owner/YAA-produced), so this is NOT redundant. Frozen →
+        // Ok(false) (uniform, not an error → no oracle).
+        if self.ensure_not_frozen(&req.account).is_err() {
+            return Ok(false);
+        }
+        let pk_hex = match wallet.passkey_pubkey {
+            Some(h) => h,
+            None => return Ok(false),
+        };
+        let pk = match hex::decode(pk_hex.trim_start_matches("0x")) {
+            Ok(b) => b,
+            Err(_) => return Ok(false), // corrupt stored key = not verifiable, not a caller error
+        };
+        // TODO(multi-passkey): with >1 passkey per wallet, resolve the assertion's
+        // credential_id to the SPECIFIC bound pubkey before verifying — do not accept any
+        // of the account's keys. Inert today (single passkey_pubkey), load-bearing then.
+        //
         // Try each configured rpId (prod = aastar.io only → strict; dev board also
         // localhost). delegate=false → host enforces challenge == userOpHash (WYSIWYS).
         // sign_count=0 → counter monotonicity check skipped and never updated, so this is
@@ -5314,6 +5333,22 @@ async fn handle_rejection(
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "error": "Not found" })),
             warp::http::StatusCode::NOT_FOUND,
+        ));
+    }
+    // (opus/codex review) Malformed JSON / oversized body must read as 400/413, not 500.
+    if err
+        .find::<warp::filters::body::BodyDeserializeError>()
+        .is_some()
+    {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({ "error": "Malformed request body" })),
+            warp::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    if err.find::<warp::reject::PayloadTooLarge>().is_some() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({ "error": "Payload too large" })),
+            warp::http::StatusCode::PAYLOAD_TOO_LARGE,
         ));
     }
     if let Some(rl_error) = err.find::<RateLimitError>() {
