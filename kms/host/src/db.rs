@@ -1281,10 +1281,15 @@ impl KmsDb {
         let now = current_unix();
         let conn = self.lock();
         let n = conn.execute(
+            // first-claim-wins: only a fresh 'pending' row can be claimed (codex/opus
+            // review). A re-claim can't overwrite an already-claimed chat_ref/verify_token
+            // (removes a re-claim race + blocks TTL re-extension via re-claim). A
+            // legitimate re-bind goes through begin (which resets to 'pending') first.
+            // channel='telegram': claim is telegram-only (email has no bot claim step).
             "UPDATE contact_bindings SET status='claimed', contact_ref=?2, \
                display_hint=COALESCE(?3, display_hint), verify_token=?4, bot_id=?5, \
                claimed_at=?6, expires_at=?7 \
-             WHERE binding_code=?1 AND status IN ('pending','claimed') AND expires_at > ?6",
+             WHERE binding_code=?1 AND channel='telegram' AND status='pending' AND expires_at > ?6",
             params![binding_code, contact_ref, display_hint, verify_token, bot_id, now, now + ttl_secs],
         )?;
         Ok(n > 0)
