@@ -2048,6 +2048,56 @@ impl KmsApiServer {
         })
     }
 
+    /// #124 (DVT path-2): RP-verify a WebAuthn confirm-assertion. The account owner's
+    /// passkey signs `challenge = userOpHash` (WYSIWYS) in YAA; a DVT node forwards the
+    /// assertion here. Stateless + idempotent: no KMS nonce, sign_count=0 (counter check
+    /// skipped + never updated) so the SAME assertion can be verified by every quorum
+    /// node. Replay is bounded by userOpHash uniqueness + the node's single-use pending.
+    /// A leaked secp256k1 owner key cannot produce a P256 WebAuthn assertion → this is
+    /// what genuinely defends against owner-key theft (per Validator#124).
+    pub async fn verify_confirm_assertion(&self, req: VerifyConfirmAssertionRequest) -> Result<bool> {
+        let wallet = self
+            .db
+            .get_wallet(&req.account)?
+            .ok_or_else(|| anyhow!("account not found"))?;
+        let pk_hex = wallet
+            .passkey_pubkey
+            .ok_or_else(|| anyhow!("account has no passkey bound"))?;
+        let pk = hex::decode(pk_hex.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("invalid stored passkey hex: {}", e))?;
+        let uoh = hex::decode(req.user_op_hash.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("invalid userOpHash hex: {}", e))?;
+        if uoh.len() != 32 {
+            return Err(anyhow!("userOpHash must be 32 bytes"));
+        }
+        // Try each configured rpId (prod = aastar.io only → strict; dev board also
+        // localhost). delegate=false → host enforces challenge == userOpHash (WYSIWYS).
+        // sign_count=0 → counter monotonicity check skipped and never updated, so this is
+        // idempotent across the quorum (each node verifies the same assertion).
+        let mut last_err = None;
+        for rp_id in &self.rp_ids {
+            match webauthn::verify_authentication_response(
+                &req.passkey,
+                &uoh,
+                &self.expected_origins,
+                rp_id,
+                &pk,
+                0,
+                false,
+            ) {
+                Ok(_) => return Ok(true),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if let Some(e) = last_err {
+            println!(
+                "⚠️ verify_confirm_assertion: not verified for account={}: {}",
+                req.account, e
+            );
+        }
+        Ok(false)
+    }
+
     pub async fn sign_hash(&self, req: SignHashRequest) -> Result<SignHashResponse> {
         // CA-side validation: hash format
         let hash_array = Self::validate_hash_hex(&req.hash)?;
@@ -4396,6 +4446,36 @@ async fn handle_sign_hash(
     }
 }
 
+/// #124 (DVT path-2 out-of-band confirm): a WebAuthn assertion the account owner
+/// produced over `challenge = userOpHash`. `passkey` is the standard browser
+/// AuthenticationResponseJSON (base64url; {authenticatorData, clientDataJSON,
+/// signature} live under `.response`).
+#[derive(Debug, serde::Deserialize)]
+pub struct VerifyConfirmAssertionRequest {
+    pub account: String,
+    #[serde(rename = "userOpHash")]
+    pub user_op_hash: String,
+    pub passkey: webauthn::AuthenticationResponseJSON,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VerifyConfirmAssertionResponse {
+    verified: bool,
+}
+
+/// POST /verify-confirm-assertion — RP-verify a DVT out-of-band confirm assertion
+/// (Validator#124). Authed (DVT node x-api-key). The node does its own local binding
+/// check (challenge == userOpHash) and delegates the cryptographic RP verify here.
+async fn handle_verify_confirm_assertion(
+    body: VerifyConfirmAssertionRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.verify_confirm_assertion(body).await {
+        Ok(verified) => Ok(warp::reply::json(&VerifyConfirmAssertionResponse { verified })),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_get_public_key(
     body: GetPublicKeyRequest,
     server: Arc<KmsApiServer>,
@@ -5737,6 +5817,18 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server6_clone.clone()))
         .and_then(handle_sign_hash);
 
+    // #124 (DVT path-2): RP-verify an out-of-band confirm assertion. Plain JSON POST
+    // (not AWS-KMS framed), x-api-key authed (DVT node) + rate-limited.
+    let server_vca_clone = Arc::clone(&server);
+    let verify_confirm_assertion = warp::path("verify-confirm-assertion")
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_vca_clone.clone()))
+        .and_then(handle_verify_confirm_assertion);
+
     // GetPublicKey API (TEE)
     let get_public_key = warp::path("GetPublicKey")
         .and(warp::post())
@@ -6037,6 +6129,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(derive_address)
         .or(sign)
         .or(sign_hash)
+        .or(verify_confirm_assertion)
         .or(get_public_key)
         .boxed();
     let group3 = delete_key
