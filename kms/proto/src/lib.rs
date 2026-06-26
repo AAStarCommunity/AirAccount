@@ -760,7 +760,7 @@ mod tests {
             session_index: 0,
             subject: "test-wallet-id".to_string(),
             ttl_secs: 259200,
-            passkey_assertion: None, // #111
+            passkey_assertion: None,     // #111
             label: "p256-0".to_string(), // #115
         });
         // #111: roundtrip with a present assertion too (wire-format coverage).

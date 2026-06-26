@@ -1261,7 +1261,14 @@ impl KmsDb {
              ON CONFLICT(account, channel) DO UPDATE SET \
                status='pending', binding_code=?3, display_hint=?4, verify_token=NULL, \
                contact_ref=NULL, claimed_at=NULL, verified_at=NULL, created_at=?5, expires_at=?6",
-            params![account, channel, binding_code, display_hint, now, now + ttl_secs],
+            params![
+                account,
+                channel,
+                binding_code,
+                display_hint,
+                now,
+                now + ttl_secs
+            ],
         )?;
         Ok(())
     }
@@ -1290,7 +1297,15 @@ impl KmsDb {
                display_hint=COALESCE(?3, display_hint), verify_token=?4, bot_id=?5, \
                claimed_at=?6, expires_at=?7 \
              WHERE binding_code=?1 AND channel='telegram' AND status='pending' AND expires_at > ?6",
-            params![binding_code, contact_ref, display_hint, verify_token, bot_id, now, now + ttl_secs],
+            params![
+                binding_code,
+                contact_ref,
+                display_hint,
+                verify_token,
+                bot_id,
+                now,
+                now + ttl_secs
+            ],
         )?;
         Ok(n > 0)
     }
@@ -1602,23 +1617,38 @@ mod tests {
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
         // claim → bot records tentative chat + verify_token (status=claimed)
         assert!(db
-            .claim_contact_binding("code123", "chat-789", Some("@alice"), "vtok456", Some("aastarbot"), 300)
+            .claim_contact_binding(
+                "code123",
+                "chat-789",
+                Some("@alice"),
+                "vtok456",
+                Some("aastarbot"),
+                300
+            )
             .unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
         // confirm with WRONG token → rejected, still not verified
-        assert!(!db.confirm_contact_binding("acct1", "code123", "WRONG").unwrap());
+        assert!(!db
+            .confirm_contact_binding("acct1", "code123", "WRONG")
+            .unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
         // confirm under the WRONG account → rejected (account match)
-        assert!(!db.confirm_contact_binding("acct2", "code123", "vtok456").unwrap());
+        assert!(!db
+            .confirm_contact_binding("acct2", "code123", "vtok456")
+            .unwrap());
         // confirm with right account+token → verified
-        assert!(db.confirm_contact_binding("acct1", "code123", "vtok456").unwrap());
+        assert!(db
+            .confirm_contact_binding("acct1", "code123", "vtok456")
+            .unwrap());
         let c = db.get_verified_contacts("acct1").unwrap();
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].channel, "telegram");
         assert_eq!(c[0].contact_ref, Some("chat-789".to_string()));
         assert_eq!(c[0].status, "verified");
         // double-confirm → false (code cleared after verify; no re-verify)
-        assert!(!db.confirm_contact_binding("acct1", "code123", "vtok456").unwrap());
+        assert!(!db
+            .confirm_contact_binding("acct1", "code123", "vtok456")
+            .unwrap());
         // unbind → deleted
         assert!(db.unbind_contact("acct1", "telegram").unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
