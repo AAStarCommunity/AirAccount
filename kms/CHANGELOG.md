@@ -1,6 +1,34 @@
 # KMS Changelog
 
-> Updated: 2026-06-22
+> Updated: 2026-06-26
+
+## 0.27.0 (2026-06-26) — Beta5 — DVT 带外确认验签端点 + 通知联系方式绑定（#124 / #129）
+
+> **host-only 新增端点，无 proto/TA 改动 → TA 不需重编/重刷**，只重编 CA + 重启 kms-api。全部新端点 **`x-api-key` 鉴权 + 限流**；POST 端点 64KB body 上限。
+
+### 新增 (Feature) — DVT 带外确认 RP 验签（#124，Validator path-2）
+- **`POST /verify-confirm-assertion`** `{account, userOpHash, passkey}` → `{verified}`。KMS 作 WebAuthn **RP** 为 DVT 节点验 owner 对 `userOpHash` 的 passkey assertion（节点自己不跑 WebAuthn）。
+  - 复用 `verify_authentication_response`：`expected_challenge = userOpHash`（WYSIWYS）、`sign_count=0`（跳计数器校验+不更新 → **无状态、幂等**，quorum 多节点可各自验同一 assertion）、`delegate=false`（host 强制 challenge==userOpHash）；rpId 循环（prod 仅 aastar.io）。
+  - **要求 passkey（P256）**：泄漏的 secp256k1 owner key 单独**过不了** → 真防 owner-key 被盗。账户不存在/无 passkey/frozen/验签失败统一 `{verified:false}`（无枚举 oracle）。
+  - 部署不变量：生产须 `KMS_REQUIRE_API_KEY=1` + 每 DVT 节点独立可撤销 key；fail-closed（KMS 不可达=节点不放行）。
+
+### 新增 (Feature) — 通知联系方式绑定（#129，Phase 1：Telegram）
+经验证后把用户的 Telegram 绑定到 AirAccount，供 DVT 带外确认触达真实用户。**5 个端点**：
+- **`POST /contact/begin-binding`** `{account, channel, WebAuthn}` → `{bindingCode, expiresAt}` —— **owner ceremony**（消费 challenge + 验 owner 再落库）；256-bit code；仅 telegram（email 待 `begin_email_binding`）。
+- **`POST /contact/claim-binding`** `{bindingCode, telegramChatId, telegramUsername?}` → `{verifyToken, expiresAt}` —— bot api-key；first-claim-wins。
+- **`POST /contact/confirm-binding`** `{account, bindingCode, verifyToken, WebAuthn}` → `{status:'verified'}` —— **owner ceremony 必需**（bot 知道 verifyToken，故 confirm 必须 owner 才能完成；bot 做不到）+ DB 校验 account 归属（防跨账户确认）。
+- **`GET /contact/{account}`** → `{contacts:[{channel, contactRef, status, verifiedAt}]}` —— api-key（DVT 节点）；仅 verified，不返 secrets；读取走 access log。
+- **`POST /contact/unbind`** `{account, channel, WebAuthn}` → `{status}` —— owner ceremony。
+- 存储：host-side `contact_bindings` 表（**PII 非 TEE，与 key 存储隔离**，FK cascade，一次性 code/token）。信任模型见 `docs/design/contact-binding-kms.md` §2（被攻陷 bot 后果限于"通知误投+元数据泄漏"、非批准/盗款——批准走 path-2 passkey）。
+
+### 加固 / 修复 (Hardening) — codex+opus 多轮 review
+- **强制 owner ceremony 存在**：begin/confirm/unbind 对 `resolve_passkey_assertion` 返回 `None`（省略 `WebAuthn` 字段）显式拒绝（`ok_or_else`），堵住"省字段绕过 ceremony"。
+- contact 端点接受规范 **`WebAuthn`** 字段名（与现有 API 一致）；`confirm_email_binding` 预加 account 校验（email 上线前堵跨账户洞）；malformed/超大 body → 400/413（原 500）。
+
+### 跟踪的 Phase-1 follow-up（设计文档 §2，非阻塞）
+api-key scoping/key-classes · owner ceremony 绑 `{account,channel}` commitment · bot-key-class + `bot_id` 服务端导出 · email 端点（待 `begin_email_binding`）· `contact_ref` at-rest 加密（pre-GA）。
+
+> 双轨版本：CA(host) **0.27.0** · TA **0.8.0（不变）** · proto **0.7.0（不变）**。**CA-only（新增 host 端点）**——重编 CA + 重启即可，TA 不刷。
 
 ## 0.26.1 (2026-06-22) — Beta5 — /version 报告 challenge_mode（strict/transition 可辨）
 

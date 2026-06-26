@@ -4,7 +4,7 @@
 [![Service Status](https://img.shields.io/badge/Status-Online-brightgreen.svg)](https://kms.aastar.io/health)
 [![API Compatibility](https://img.shields.io/badge/AWS%20KMS-Compatible-orange.svg)](#aws-kms-compatibility)
 [![API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-85ea2d.svg)](https://kms.aastar.io/docs)
-[![Version](https://img.shields.io/badge/version-v0.26.1%20Beta5-blue.svg)](kms/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.27.0%20Beta5-blue.svg)](kms/CHANGELOG.md)
 
 A production-ready private key management system built on Trusted Execution Environment (TEE) using the eth_wallet sample from Teaclave TrustZone SDK. Provides enterprise-grade security with AWS KMS API compatibility.
 
@@ -35,13 +35,15 @@ curl -X POST https://kms.aastar.io/ \
 | **OpenAPI 3.1 spec** | <https://kms.aastar.io/openapi.yaml> · [in-repo](kms/docs/api/openapi.yaml) |
 | **Test coverage matrix** | [kms/docs/API-TEST-MATRIX.md](kms/docs/API-TEST-MATRIX.md) |
 
-32 endpoints — wallet lifecycle · signing (hash / message / transaction / EIP-712) · WebAuthn
-ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers. Every
-operation carries its test-coverage status (`x-tested`). **Real-device E2E: 39/39 · unit: proto 39 + host 56.**
+38 endpoints — wallet lifecycle · signing (hash / message / transaction / EIP-712) · WebAuthn
+ceremony · agent keys · grant sessions · P256 sessions · SuperPaymaster gasless signers ·
+**DVT out-of-band confirm verify (`/verify-confirm-assertion`, #124)** · **contact binding
+(`/contact/*`, #129)**. Every operation carries its test-coverage status (`x-tested`).
+**Real-device E2E: 39/39 · unit: proto 39 + host 58.**
 
 ### 🔑 API Key 认证与管理
 
-**敏感路由**（CreateKey / Sign / SignHash / DeleteKey / ChangePasskey / UnfreezeKey / ListKeys / DescribeKey / GetPublicKey / DeriveAddress / WebAuthn `Begin*`·`Complete*` / agent 端点）需带 HTTP header **`x-api-key: <key>`**，否则 `401`。**开放只读端点**（`/health` `/version` `/stats` `/QueueStatus` `/RollbackCounter` `/attestation?nonce=` `/.well-known/*` `/docs` `/openapi.yaml`）无需 key。
+**敏感路由**（CreateKey / Sign / SignHash / DeleteKey / ChangePasskey / UnfreezeKey / ListKeys / DescribeKey / GetPublicKey / DeriveAddress / WebAuthn `Begin*`·`Complete*` / agent 端点 / `verify-confirm-assertion` (#124) / `contact/*` (#129)）需带 HTTP header **`x-api-key: <key>`**，否则 `401`。**开放只读端点**（`/health` `/version` `/stats` `/QueueStatus` `/RollbackCounter` `/attestation?nonce=` `/.well-known/*` `/docs` `/openapi.yaml`）无需 key。
 
 ```bash
 curl -X POST https://kms.aastar.io/Sign \
