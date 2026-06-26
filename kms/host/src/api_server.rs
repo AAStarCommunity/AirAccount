@@ -3892,8 +3892,13 @@ impl KmsApiServer {
         &self,
         req: BeginBindingRequest,
     ) -> Result<BeginBindingResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
         self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
-            .await?;
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
         if req.channel != "telegram" {
             return Err(anyhow!(
                 "channel '{}' not supported yet (telegram only; email pending begin_email_binding)",
@@ -3961,8 +3966,13 @@ impl KmsApiServer {
         &self,
         req: ConfirmBindingRequest,
     ) -> Result<ConfirmBindingResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
         self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
-            .await?;
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
         let ok =
             self.db
                 .confirm_contact_binding(&req.account, &req.binding_code, &req.verify_token)?;
@@ -3994,8 +4004,13 @@ impl KmsApiServer {
 
     /// POST /contact/unbind — OWNER (app passkey ceremony) revokes a binding. #129.
     pub async fn unbind_contact(&self, req: UnbindRequest) -> Result<UnbindResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
         self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
-            .await?;
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
         let removed = self.db.unbind_contact(&req.account, &req.channel)?;
         Ok(UnbindResponse {
             status: if removed { "revoked" } else { "not_found" }.to_string(),
