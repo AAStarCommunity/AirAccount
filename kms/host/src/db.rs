@@ -1320,18 +1320,25 @@ impl KmsDb {
         Ok(n > 0)
     }
 
-    /// Confirm an email binding: app submits {binding_code, verify_token}. Email has no
-    /// claim step (address known at begin), so the contact_ref was set at begin; here we
-    /// just verify the token round-trip.
-    pub fn confirm_email_binding(&self, binding_code: &str, verify_token: &str) -> Result<bool> {
+    /// Confirm an email binding: app submits {account, binding_code, verify_token}. Email has
+    /// no claim step (address known at begin), so the contact_ref was set at begin; here we
+    /// just verify the token round-trip. `account` is matched in the WHERE (mirrors
+    /// confirm_contact_binding) so a stolen code+token for account B can't be confirmed under
+    /// account A — closes the cross-account hole before email gets wired (codex review).
+    pub fn confirm_email_binding(
+        &self,
+        account: &str,
+        binding_code: &str,
+        verify_token: &str,
+    ) -> Result<bool> {
         let now = current_unix();
         let conn = self.lock();
         let n = conn.execute(
-            "UPDATE contact_bindings SET status='verified', verified_at=?3, \
+            "UPDATE contact_bindings SET status='verified', verified_at=?4, \
                binding_code=NULL, verify_token=NULL \
-             WHERE binding_code=?1 AND verify_token=?2 AND status IN ('pending','claimed') \
-               AND channel='email' AND expires_at > ?3",
-            params![binding_code, verify_token, now],
+             WHERE account=?1 AND binding_code=?2 AND verify_token=?3 AND status IN ('pending','claimed') \
+               AND channel='email' AND expires_at > ?4",
+            params![account, binding_code, verify_token, now],
         )?;
         Ok(n > 0)
     }

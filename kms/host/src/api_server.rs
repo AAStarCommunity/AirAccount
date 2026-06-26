@@ -5394,7 +5394,14 @@ async fn handle_sign_p256_grant_session(
 pub struct BeginBindingRequest {
     pub account: String,
     pub channel: String, // 'telegram' (email pending begin_email_binding)
-    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    // Match the existing KMS API field name `WebAuthn` (what the SDK sends) so a real
+    // ceremony isn't silently dropped to None; keep lowercase aliases for flexibility.
+    #[serde(
+        rename = "WebAuthn",
+        alias = "webauthn",
+        alias = "webauthn_assertion",
+        default
+    )]
     pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
@@ -5443,7 +5450,14 @@ pub struct ConfirmBindingRequest {
     pub binding_code: String,
     #[serde(rename = "verifyToken", alias = "verify_token")]
     pub verify_token: String,
-    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    // Match the existing KMS API field name `WebAuthn` (what the SDK sends) so a real
+    // ceremony isn't silently dropped to None; keep lowercase aliases for flexibility.
+    #[serde(
+        rename = "WebAuthn",
+        alias = "webauthn",
+        alias = "webauthn_assertion",
+        default
+    )]
     pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
@@ -5456,7 +5470,14 @@ struct ConfirmBindingResponse {
 pub struct UnbindRequest {
     pub account: String,
     pub channel: String,
-    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    // Match the existing KMS API field name `WebAuthn` (what the SDK sends) so a real
+    // ceremony isn't silently dropped to None; keep lowercase aliases for flexibility.
+    #[serde(
+        rename = "WebAuthn",
+        alias = "webauthn",
+        alias = "webauthn_assertion",
+        default
+    )]
     pub webauthn_assertion: Option<WebAuthnAssertion>,
 }
 
