@@ -2071,7 +2071,10 @@ impl KmsApiServer {
     /// node. Replay is bounded by userOpHash uniqueness + the node's single-use pending.
     /// A leaked secp256k1 owner key cannot produce a P256 WebAuthn assertion → this is
     /// what genuinely defends against owner-key theft (per Validator#124).
-    pub async fn verify_confirm_assertion(&self, req: VerifyConfirmAssertionRequest) -> Result<bool> {
+    pub async fn verify_confirm_assertion(
+        &self,
+        req: VerifyConfirmAssertionRequest,
+    ) -> Result<bool> {
         // (opus review) Validate the request STRUCTURE first — independent of account
         // existence — so the only Err (→ 400) is genuinely-malformed caller input and does
         // NOT leak whether `account` exists. Every account-dependent outcome below
@@ -2719,7 +2722,10 @@ impl KmsApiServer {
         let (challenge_id, challenge_bytes, resp) = match uuid::Uuid::parse_str(key_id) {
             Ok(wallet_uuid) => match self.tee.get_challenge(wallet_uuid).await {
                 Ok(nonce) => {
-                    println!("🔐 #112: using TA-issued nonce for grant-session key_id={}", key_id);
+                    println!(
+                        "🔐 #112: using TA-issued nonce for grant-session key_id={}",
+                        key_id
+                    );
                     webauthn::generate_authentication_options_with_challenge(
                         &rp_id,
                         allow_credentials,
@@ -3014,7 +3020,12 @@ impl KmsApiServer {
                 // hole). Covers the convenience signers (micropayment / GToken / x402)
                 // that route through sign_typed_data.
                 let assertion = self
-                    .resolve_passkey_assertion(&req.key_id, None, req.webauthn_assertion.as_ref(), true)
+                    .resolve_passkey_assertion(
+                        &req.key_id,
+                        None,
+                        req.webauthn_assertion.as_ref(),
+                        true,
+                    )
                     .await?;
                 if assertion.is_none() {
                     return Err(anyhow!(
@@ -4066,9 +4077,9 @@ impl KmsApiServer {
         self.resolve_passkey_assertion(&key_id, None, req.webauthn_assertion.as_ref(), false)
             .await?
             .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
-        let ok =
-            self.db
-                .confirm_contact_binding(&key_id, &req.binding_code, &req.verify_token)?;
+        let ok = self
+            .db
+            .confirm_contact_binding(&key_id, &req.binding_code, &req.verify_token)?;
         if !ok {
             return Err(anyhow!(
                 "binding not confirmable (bad token, wrong account, not claimed, or expired)"
@@ -4135,7 +4146,12 @@ impl KmsApiServer {
         }
         let assertion = self
             // #115: TA binds the mint challenge to the label → delegate to TA (true).
-            .resolve_passkey_assertion(&req.human_key_id, None, req.webauthn_assertion.as_ref(), true)
+            .resolve_passkey_assertion(
+                &req.human_key_id,
+                None,
+                req.webauthn_assertion.as_ref(),
+                true,
+            )
             .await?;
         if assertion.is_none() {
             return Err(anyhow!(
@@ -4158,7 +4174,14 @@ impl KmsApiServer {
         // Generate P256 key pair in TEE (may take ~seconds on Cortex-A7)
         let tee_result = match self
             .tee
-            .create_p256_session_key(wallet_id, session_index, &req.human_key_id, 24 * 3600, assertion, &req.label)
+            .create_p256_session_key(
+                wallet_id,
+                session_index,
+                &req.human_key_id,
+                24 * 3600,
+                assertion,
+                &req.label,
+            )
             .await
         {
             Ok(r) => r,
@@ -4417,13 +4440,21 @@ async fn version_check() -> Result<impl warp::Reply, warp::Rejection> {
     // `profile` lets ops tell a production board (rpId aastar.io only) from a
     // test board (also accepts localhost) at a glance. Driven by the CA
     // dev-rpid feature; pair with a dev-rpid TA for localhost to actually work.
-    let profile = if cfg!(feature = "dev-rpid") { "dev" } else { "prod" };
+    let profile = if cfg!(feature = "dev-rpid") {
+        "dev"
+    } else {
+        "prod"
+    };
     // `challenge_mode` lets ops tell a STRICT board (rejects bare nonce / no-clientDataJSON;
     // requires payload-commitment ceremony, #63) from a TRANSITION board at a glance.
     // The CA strict-challenge feature is set by the same MX93_STRICT_CHALLENGE build flag
     // as the (authoritative) TA strict-challenge feature, so they stay in sync — the CA
     // flag is purely for this report; the TA is what actually enforces it.
-    let challenge_mode = if cfg!(feature = "strict-challenge") { "strict" } else { "transition" };
+    let challenge_mode = if cfg!(feature = "strict-challenge") {
+        "strict"
+    } else {
+        "transition"
+    };
     Ok(warp::reply::json(&serde_json::json!({
         "version": KMS_VERSION,
         "build": env!("CARGO_PKG_VERSION"),
@@ -4655,7 +4686,9 @@ async fn handle_verify_confirm_assertion(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match server.verify_confirm_assertion(body).await {
-        Ok(verified) => Ok(warp::reply::json(&VerifyConfirmAssertionResponse { verified })),
+        Ok(verified) => Ok(warp::reply::json(&VerifyConfirmAssertionResponse {
+            verified,
+        })),
         Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
     }
 }
@@ -5551,7 +5584,9 @@ async fn handle_get_contacts(
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match server.get_contacts(&account).await {
-        Ok(contacts) => Ok(warp::reply::json(&serde_json::json!({ "contacts": contacts }))),
+        Ok(contacts) => Ok(warp::reply::json(
+            &serde_json::json!({ "contacts": contacts }),
+        )),
         Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
     }
 }
