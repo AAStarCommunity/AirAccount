@@ -2,6 +2,15 @@
 
 > Updated: 2026-06-26
 
+## 0.27.1 (2026-06-26) — Beta5 — contact/verify 端点 account 接受 address 或 key_id（修复）
+
+### 修复 (Fix) — #129/#124（aastar-sdk#203 review 发现）
+- **`/contact/*` + `/verify-confirm-assertion` 的 `account` 现接受钱包地址或 key_id**。原实现只按 `key_id`(UUID) 查 `get_wallet`，但消费方传以太坊地址（SDK#203 用 `account: Address`；DVT 手上是 userOp.sender 地址）→ 运行时 "Key not found"，集成跑不通。
+- 新增 `resolve_account_key_id`：`wallet_exists` → key_id 原样；否则 `lookup_address`（`address_index`，与现有 Sign/SignHash 端点同款）→ 其 key_id；否则回退原串（not-found 行为不变）。begin/confirm/get/unbind/verify_confirm 全程用解析后的 key_id（ceremony + DB 一致 → 无跨账户）。codex 复审 SOUND。
+- host-only，TA/proto 不变。
+
+> 双轨：CA(host) **0.27.1** · TA 0.8.0 · proto 0.7.0。CA-only，重编 CA + 重启即可。
+
 ## 0.27.0 (2026-06-26) — Beta5 — DVT 带外确认验签端点 + 通知联系方式绑定（#124 / #129）
 
 > **host-only 新增端点，无 proto/TA 改动 → TA 不需重编/重刷**，只重编 CA + 重启 kms-api。全部新端点 **`x-api-key` 鉴权 + 限流**；POST 端点 64KB body 上限。
