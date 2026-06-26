@@ -30,6 +30,7 @@
 ### ⚠️ 端点层必须强制的不变量（阻塞要求，DB 层不自带）
 - **begin-binding / unbind 必须先消费 owner passkey ceremony challenge** 再调 DB（`begin_contact_binding` 的 upsert **会覆盖 verified 行**——verified 绑定的全部保护就是这道门）。端点 PR **必须带测试**：无 consumed ceremony 时端点不可达。
 - **claim-binding 仅限已认证 bot**；**confirm-binding 仅限 owner（app passkey 会话）提交**，bot 鉴权不得触达 confirm。
+- **claim-binding 速率限制**（复用现有 per-api-key 限流）+ **confirm-binding 尝试计数/限速**（纵深，防 verify_token 猜测；token ≥128bit 已使暴力不可行，计数是兜底）。[#130 review Low]
 - `binding_code` / `verify_token` **必须高熵随机（≥128-bit）**（DB 按 `binding_code` 匹配，低熵=可猜）。
 - **email 端点在 `begin_email_binding`（begin 时设 contact_ref+verify_token）实现前不得开放**（当前 DB 层 email 路径不完整，confirm 永远失败=安全但半成品）。
 - `contact_ref` **at-rest 加密**：Phase 1 非阻塞（chat_id 低敏 + 表隔离 + getContact 严格鉴权），但 **GA / 规模化接入真实用户前必须做**（email 是可识别 PII），非无限期 TODO。
