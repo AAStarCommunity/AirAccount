@@ -3949,6 +3949,143 @@ impl KmsApiServer {
         })
     }
 
+    /// POST /contact/begin-binding — owner starts a contact binding (#129). Q4 gate
+    /// (codex/opus checkpoint review): the owner ceremony challenge is consumed + the
+    /// owner's passkey verified BEFORE the binding row is touched — begin's upsert can
+    /// overwrite a verified row, so this ceremony is the ENTIRE protection for a verified
+    /// binding. delegate=false → host-authoritative bare-nonce (no TA; binding is host
+    /// side). Telegram only for now; email is unwired until begin_email_binding exists.
+    /// ({account,channel} commitment binding is a follow-up — needs host-side payload
+    /// support in resolve_passkey_assertion.)
+    pub async fn begin_contact_binding(
+        &self,
+        req: BeginBindingRequest,
+    ) -> Result<BeginBindingResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
+        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
+        if req.channel != "telegram" {
+            return Err(anyhow!(
+                "channel '{}' not supported yet (telegram only; email pending begin_email_binding)",
+                req.channel
+            ));
+        }
+        // High-entropy one-time bindingCode (256-bit, OS CSPRNG) — DB matches on it.
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let binding_code = hex::encode(buf);
+        let ttl_secs: i64 = 600;
+        self.db
+            .begin_contact_binding(&req.account, &req.channel, &binding_code, None, ttl_secs)?;
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + ttl_secs;
+        Ok(BeginBindingResponse {
+            binding_code,
+            expires_at,
+        })
+    }
+
+    /// POST /contact/claim-binding (bot api-key) — the shared bot reports a /bind. Issues a
+    /// one-time verify_token (256-bit) the bot delivers to the chat; the binding only
+    /// completes when the OWNER returns the token via confirm (owner ceremony). #129.
+    pub async fn claim_contact_binding(
+        &self,
+        req: ClaimBindingRequest,
+    ) -> Result<ClaimBindingResponse> {
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let verify_token = hex::encode(buf);
+        let ttl_secs: i64 = 600;
+        let claimed = self.db.claim_contact_binding(
+            &req.binding_code,
+            &req.telegram_chat_id,
+            req.telegram_username.as_deref(),
+            &verify_token,
+            req.bot_id.as_deref(),
+            ttl_secs,
+        )?;
+        if !claimed {
+            return Err(anyhow!("invalid, expired, or already-claimed binding code"));
+        }
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + ttl_secs;
+        Ok(ClaimBindingResponse {
+            verify_token,
+            expires_at,
+        })
+    }
+
+    /// POST /contact/confirm-binding — OWNER (app passkey ceremony) returns the verify_token.
+    /// The owner ceremony is REQUIRED because the bot knows verify_token (it delivered it),
+    /// so a confirm gated only by api-key would let a compromised bot self-complete the
+    /// binding. The DB also matches the ceremony'd account (no cross-account confirm). #129.
+    pub async fn confirm_contact_binding(
+        &self,
+        req: ConfirmBindingRequest,
+    ) -> Result<ConfirmBindingResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
+        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
+        let ok =
+            self.db
+                .confirm_contact_binding(&req.account, &req.binding_code, &req.verify_token)?;
+        if !ok {
+            return Err(anyhow!(
+                "binding not confirmable (bad token, wrong account, not claimed, or expired)"
+            ));
+        }
+        Ok(ConfirmBindingResponse {
+            status: "verified".to_string(),
+        })
+    }
+
+    /// GET /contact/{account} (api-key; DVT node) — verified contacts only, no secrets.
+    /// PII: api-key authed, never public (#129 §3.5). Owner-ceremony read is a follow-up.
+    pub async fn get_contacts(&self, account: &str) -> Result<Vec<ContactView>> {
+        let rows = self.db.get_verified_contacts(account)?;
+        Ok(rows
+            .into_iter()
+            .map(|c| ContactView {
+                channel: c.channel,
+                contact_ref: c.contact_ref,
+                display_hint: c.display_hint,
+                status: c.status,
+                verified_at: c.verified_at,
+            })
+            .collect())
+    }
+
+    /// POST /contact/unbind — OWNER (app passkey ceremony) revokes a binding. #129.
+    pub async fn unbind_contact(&self, req: UnbindRequest) -> Result<UnbindResponse> {
+        // codex BLOCKER fix: resolve_passkey_assertion returns Ok(None) when no webauthn
+        // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
+        // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
+        // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
+        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+            .await?
+            .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
+        let removed = self.db.unbind_contact(&req.account, &req.channel)?;
+        Ok(UnbindResponse {
+            status: if removed { "revoked" } else { "not_found" }.to_string(),
+        })
+    }
+
     pub async fn create_p256_session_key(
         &self,
         req: CreateP256SessionKeyRequest,
@@ -5252,6 +5389,134 @@ async fn handle_sign_p256_grant_session(
     }
 }
 
+/// POST /contact/begin-binding — owner ceremony + the channel to bind (#129).
+#[derive(Debug, serde::Deserialize)]
+pub struct BeginBindingRequest {
+    pub account: String,
+    pub channel: String, // 'telegram' (email pending begin_email_binding)
+    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BeginBindingResponse {
+    #[serde(rename = "bindingCode")]
+    binding_code: String,
+    #[serde(rename = "expiresAt")]
+    expires_at: i64,
+}
+
+async fn handle_begin_binding(
+    body: BeginBindingRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.begin_contact_binding(body).await {
+        Ok(resp) => Ok(warp::reply::json(&resp)),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ClaimBindingRequest {
+    #[serde(rename = "bindingCode", alias = "binding_code")]
+    pub binding_code: String,
+    #[serde(rename = "telegramChatId", alias = "telegram_chat_id")]
+    pub telegram_chat_id: String,
+    #[serde(rename = "telegramUsername", alias = "telegram_username")]
+    pub telegram_username: Option<String>,
+    #[serde(rename = "botId", alias = "bot_id")]
+    pub bot_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ClaimBindingResponse {
+    #[serde(rename = "verifyToken")]
+    verify_token: String,
+    #[serde(rename = "expiresAt")]
+    expires_at: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ConfirmBindingRequest {
+    pub account: String,
+    #[serde(rename = "bindingCode", alias = "binding_code")]
+    pub binding_code: String,
+    #[serde(rename = "verifyToken", alias = "verify_token")]
+    pub verify_token: String,
+    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ConfirmBindingResponse {
+    status: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UnbindRequest {
+    pub account: String,
+    pub channel: String,
+    #[serde(rename = "webauthn", alias = "webauthn_assertion")]
+    pub webauthn_assertion: Option<WebAuthnAssertion>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct UnbindResponse {
+    status: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ContactView {
+    channel: String,
+    #[serde(rename = "contactRef")]
+    contact_ref: Option<String>,
+    #[serde(rename = "displayHint")]
+    display_hint: Option<String>,
+    status: String,
+    #[serde(rename = "verifiedAt")]
+    verified_at: Option<i64>,
+}
+
+async fn handle_claim_binding(
+    body: ClaimBindingRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.claim_contact_binding(body).await {
+        Ok(resp) => Ok(warp::reply::json(&resp)),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
+async fn handle_confirm_binding(
+    body: ConfirmBindingRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.confirm_contact_binding(body).await {
+        Ok(resp) => Ok(warp::reply::json(&resp)),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
+async fn handle_get_contacts(
+    account: String,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.get_contacts(&account).await {
+        Ok(contacts) => Ok(warp::reply::json(&serde_json::json!({ "contacts": contacts }))),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
+async fn handle_unbind_contact(
+    body: UnbindRequest,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match server.unbind_contact(body).await {
+        Ok(resp) => Ok(warp::reply::json(&resp)),
+        Err(e) => Err(warp::reject::custom(ApiError(e.to_string()))),
+    }
+}
+
 async fn handle_create_p256_session_key(
     body: CreateP256SessionKeyRequest,
     server: Arc<KmsApiServer>,
@@ -6083,6 +6348,62 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::any().map(move || server_cp256.clone()))
         .and_then(handle_create_p256_session_key);
 
+    // #129 contact-binding: POST /contact/begin-binding (owner ceremony, plain JSON).
+    let server_begin_bind = server.clone();
+    let begin_binding = warp::path("contact")
+        .and(warp::path("begin-binding"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_begin_bind.clone()))
+        .and_then(handle_begin_binding);
+
+    let server_claim_bind = server.clone();
+    let claim_binding = warp::path("contact")
+        .and(warp::path("claim-binding"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_claim_bind.clone()))
+        .and_then(handle_claim_binding);
+
+    let server_confirm_bind = server.clone();
+    let confirm_binding = warp::path("contact")
+        .and(warp::path("confirm-binding"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_confirm_bind.clone()))
+        .and_then(handle_confirm_binding);
+
+    let server_unbind = server.clone();
+    let unbind_contact = warp::path("contact")
+        .and(warp::path("unbind"))
+        .and(warp::post())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::body::content_length_limit(64 * 1024))
+        .and(warp::body::json())
+        .and(warp::any().map(move || server_unbind.clone()))
+        .and_then(handle_unbind_contact);
+
+    // GET /contact/{account} — verified contacts (DVT api-key). param BEFORE method so it
+    // only matches a single segment; POST /contact/* routes above are matched first.
+    let server_get_contacts = server.clone();
+    let get_contacts = warp::path("contact")
+        .and(warp::path::param::<String>())
+        .and(warp::get())
+        .and(api_key_filter.clone())
+        .and(rl_filter.clone())
+        .and(warp::any().map(move || server_get_contacts.clone()))
+        .and_then(handle_get_contacts);
+
     let server_sp256 = server.clone();
     let sign_p256_user_op = warp::path("kms")
         .and(warp::path("sign-p256-user-op"))
@@ -6185,6 +6506,11 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(sign_grant_session)
         .or(sign_p256_grant_session)
         .or(create_p256_session_key)
+        .or(begin_binding)
+        .or(claim_binding)
+        .or(confirm_binding)
+        .or(unbind_contact)
+        .or(get_contacts)
         .or(sign_p256_user_op)
         .or(revoke_p256_session_key)
         .boxed();
