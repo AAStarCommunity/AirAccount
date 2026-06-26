@@ -205,6 +205,18 @@ pub struct ChallengeRow {
     pub expires_at: i64,
 }
 
+/// #129: a verified notification contact binding (Telegram/email). PII — never
+/// returned for non-verified rows; one-time secrets are not exposed.
+#[derive(Debug, Clone)]
+pub struct ContactBinding {
+    pub account: String,
+    pub channel: String,
+    pub contact_ref: Option<String>,
+    pub display_hint: Option<String>,
+    pub status: String,
+    pub verified_at: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentKeyRow {
     pub wallet_id: String,
@@ -1225,6 +1237,123 @@ impl KmsDb {
             conn.execute("DELETE FROM challenges WHERE id=?1", params![id])?;
         }
         Ok(result)
+    }
+
+    // ── Contact bindings (#129 / aastar-sdk#193) ──
+
+    /// Begin a binding: upsert a pending row with a one-time binding_code, resetting
+    /// any prior (non-verified is not protected — re-binding restarts) state for
+    /// (account, channel). Caller has already verified owner ownership (ceremony).
+    pub fn begin_contact_binding(
+        &self,
+        account: &str,
+        channel: &str,
+        binding_code: &str,
+        display_hint: Option<&str>,
+        ttl_secs: i64,
+    ) -> Result<()> {
+        let now = current_unix();
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO contact_bindings \
+               (account, channel, status, binding_code, display_hint, created_at, expires_at) \
+             VALUES (?1,?2,'pending',?3,?4,?5,?6) \
+             ON CONFLICT(account, channel) DO UPDATE SET \
+               status='pending', binding_code=?3, display_hint=?4, verify_token=NULL, \
+               contact_ref=NULL, claimed_at=NULL, verified_at=NULL, created_at=?5, expires_at=?6",
+            params![account, channel, binding_code, display_hint, now, now + ttl_secs],
+        )?;
+        Ok(())
+    }
+
+    /// Telegram claim: bot reports the chat that sent /bind <binding_code>. Records the
+    /// (tentative, not yet verified) chat_ref + a one-time verify_token; status=claimed.
+    /// Returns false if the code is unknown/expired/already verified.
+    pub fn claim_contact_binding(
+        &self,
+        binding_code: &str,
+        contact_ref: &str,
+        display_hint: Option<&str>,
+        verify_token: &str,
+        bot_id: Option<&str>,
+        ttl_secs: i64,
+    ) -> Result<bool> {
+        let now = current_unix();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE contact_bindings SET status='claimed', contact_ref=?2, \
+               display_hint=COALESCE(?3, display_hint), verify_token=?4, bot_id=?5, \
+               claimed_at=?6, expires_at=?7 \
+             WHERE binding_code=?1 AND status IN ('pending','claimed') AND expires_at > ?6",
+            params![binding_code, contact_ref, display_hint, verify_token, bot_id, now, now + ttl_secs],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Confirm: app submits {binding_code, verify_token} (the token round-tripped via the
+    /// app's passkey session). Marks verified, persists contact_ref, clears the one-time
+    /// secrets. Returns false if code+token don't match a claimed, non-expired row.
+    pub fn confirm_contact_binding(&self, binding_code: &str, verify_token: &str) -> Result<bool> {
+        let now = current_unix();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE contact_bindings SET status='verified', verified_at=?3, \
+               binding_code=NULL, verify_token=NULL \
+             WHERE binding_code=?1 AND verify_token=?2 AND status='claimed' AND expires_at > ?3",
+            params![binding_code, verify_token, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Confirm an email binding: app submits {binding_code, verify_token}. Email has no
+    /// claim step (address known at begin), so the contact_ref was set at begin; here we
+    /// just verify the token round-trip.
+    pub fn confirm_email_binding(&self, binding_code: &str, verify_token: &str) -> Result<bool> {
+        let now = current_unix();
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE contact_bindings SET status='verified', verified_at=?3, \
+               binding_code=NULL, verify_token=NULL \
+             WHERE binding_code=?1 AND verify_token=?2 AND status IN ('pending','claimed') \
+               AND channel='email' AND expires_at > ?3",
+            params![binding_code, verify_token, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Verified contacts for an account (for DVT getContact + owner read). Never returns
+    /// pending/claimed rows or one-time secrets.
+    pub fn get_verified_contacts(&self, account: &str) -> Result<Vec<ContactBinding>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT account, channel, contact_ref, display_hint, status, verified_at \
+             FROM contact_bindings WHERE account=?1 AND status='verified'",
+        )?;
+        let rows = stmt.query_map(params![account], |row| {
+            Ok(ContactBinding {
+                account: row.get(0)?,
+                channel: row.get(1)?,
+                contact_ref: row.get(2)?,
+                display_hint: row.get(3)?,
+                status: row.get(4)?,
+                verified_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Unbind: physically delete the (account, channel) binding (owner-authorized).
+    pub fn unbind_contact(&self, account: &str, channel: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM contact_bindings WHERE account=?1 AND channel=?2",
+            params![account, channel],
+        )?;
+        Ok(n > 0)
     }
 
     // ── API keys ──
