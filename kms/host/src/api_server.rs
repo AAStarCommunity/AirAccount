@@ -1768,6 +1768,22 @@ impl KmsApiServer {
         Ok(())
     }
 
+    /// Resolve a caller-supplied `account` to a wallet key_id. Accepts either the key_id
+    /// (UUID) directly or a wallet **address** — the latter resolved via address_index, the
+    /// same way the Sign/SignHash endpoints accept an address. This lets DVT (which has the
+    /// userOp sender address) and the SDK (which uses the account Address) call the contact /
+    /// confirm-verify endpoints without tracking the KMS UUID. Falls back to the original
+    /// string when neither resolves, so downstream not-found handling is unchanged.
+    fn resolve_account_key_id(&self, account: &str) -> Result<String> {
+        if self.db.wallet_exists(account)? {
+            return Ok(account.to_string());
+        }
+        if let Some(row) = self.db.lookup_address(account)? {
+            return Ok(row.key_id);
+        }
+        Ok(account.to_string())
+    }
+
     /// Wallets with no passkey bound (legacy/pre-passkey wallets) still pass
     /// `None` through; the TA applies its own policy for those.
     async fn resolve_passkey_assertion_strict(
@@ -2066,7 +2082,9 @@ impl KmsApiServer {
         if uoh.len() != 32 {
             return Err(anyhow!("userOpHash must be 32 bytes"));
         }
-        let wallet = match self.db.get_wallet(&req.account)? {
+        // account may be the wallet key_id OR an address (DVT has the userOp sender address).
+        let key_id = self.resolve_account_key_id(&req.account)?;
+        let wallet = match self.db.get_wallet(&key_id)? {
             Some(w) => w,
             None => return Ok(false),
         };
@@ -2074,7 +2092,7 @@ impl KmsApiServer {
         // co-signable confirmation. The op may not re-route through this KMS's sign_hash
         // (path-2: final sig is owner/YAA-produced), so this is NOT redundant. Frozen →
         // Ok(false) (uniform, not an error → no oracle).
-        if self.ensure_not_frozen(&req.account).is_err() {
+        if self.ensure_not_frozen(&key_id).is_err() {
             return Ok(false);
         }
         let pk_hex = match wallet.passkey_pubkey {
@@ -3965,7 +3983,10 @@ impl KmsApiServer {
         // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
         // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
         // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
-        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+        // account may be the wallet key_id OR an address (SDK uses Address) — resolve to the
+        // canonical key_id so the binding row + ceremony key the same value.
+        let key_id = self.resolve_account_key_id(&req.account)?;
+        self.resolve_passkey_assertion(&key_id, None, req.webauthn_assertion.as_ref(), false)
             .await?
             .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
         if req.channel != "telegram" {
@@ -3981,7 +4002,7 @@ impl KmsApiServer {
         let binding_code = hex::encode(buf);
         let ttl_secs: i64 = 600;
         self.db
-            .begin_contact_binding(&req.account, &req.channel, &binding_code, None, ttl_secs)?;
+            .begin_contact_binding(&key_id, &req.channel, &binding_code, None, ttl_secs)?;
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -4039,12 +4060,15 @@ impl KmsApiServer {
         // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
         // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
         // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
-        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+        // account may be the wallet key_id OR an address — resolve to key_id (the binding row
+        // was stored under key_id at begin, so the account-match must compare key_ids).
+        let key_id = self.resolve_account_key_id(&req.account)?;
+        self.resolve_passkey_assertion(&key_id, None, req.webauthn_assertion.as_ref(), false)
             .await?
             .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
         let ok =
             self.db
-                .confirm_contact_binding(&req.account, &req.binding_code, &req.verify_token)?;
+                .confirm_contact_binding(&key_id, &req.binding_code, &req.verify_token)?;
         if !ok {
             return Err(anyhow!(
                 "binding not confirmable (bad token, wrong account, not claimed, or expired)"
@@ -4058,7 +4082,9 @@ impl KmsApiServer {
     /// GET /contact/{account} (api-key; DVT node) — verified contacts only, no secrets.
     /// PII: api-key authed, never public (#129 §3.5). Owner-ceremony read is a follow-up.
     pub async fn get_contacts(&self, account: &str) -> Result<Vec<ContactView>> {
-        let rows = self.db.get_verified_contacts(account)?;
+        // account may be the wallet key_id OR an address (DVT has the userOp sender address).
+        let key_id = self.resolve_account_key_id(account)?;
+        let rows = self.db.get_verified_contacts(&key_id)?;
         Ok(rows
             .into_iter()
             .map(|c| ContactView {
@@ -4077,10 +4103,12 @@ impl KmsApiServer {
         // assertion is supplied — so the ceremony MUST be required explicitly, else a caller
         // (incl. a compromised bot holding bindingCode+verifyToken) could omit `webauthn` and
         // reach the DB write with NO owner ceremony, defeating the whole owner-gate.
-        self.resolve_passkey_assertion(&req.account, None, req.webauthn_assertion.as_ref(), false)
+        // account may be the wallet key_id OR an address — resolve to the canonical key_id.
+        let key_id = self.resolve_account_key_id(&req.account)?;
+        self.resolve_passkey_assertion(&key_id, None, req.webauthn_assertion.as_ref(), false)
             .await?
             .ok_or_else(|| anyhow!("owner WebAuthn ceremony required"))?;
-        let removed = self.db.unbind_contact(&req.account, &req.channel)?;
+        let removed = self.db.unbind_contact(&key_id, &req.channel)?;
         Ok(UnbindResponse {
             status: if removed { "revoked" } else { "not_found" }.to_string(),
         })
