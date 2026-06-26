@@ -117,6 +117,28 @@ CREATE TABLE IF NOT EXISTS p256_session_keys (
     FOREIGN KEY (wallet_id) REFERENCES wallets(key_id) ON DELETE CASCADE
 );
 
+-- #129 / aastar-sdk#193: verified notification contact bindings (Telegram/email).
+-- PII, NOT keys: stored host-side (never in TEE), isolated from wallet/key tables.
+-- contact_ref is the verified channel id (telegram chat id / email); stored only
+-- after the two-proof flow (owner passkey ceremony + verify-token round-trip).
+-- binding_code / verify_token are one-time (cleared on verify or expiry).
+CREATE TABLE IF NOT EXISTS contact_bindings (
+    account         TEXT NOT NULL,                       -- wallet key_id
+    channel         TEXT NOT NULL,                       -- 'telegram' | 'email'
+    contact_ref     TEXT,                                -- verified chat_id / email (at-rest encrypted)
+    display_hint    TEXT,                                -- @username / masked email, for user to verify
+    status          TEXT NOT NULL DEFAULT 'pending',     -- pending|claimed|verified|revoked
+    binding_code    TEXT,                                -- one-time, issued at begin-binding
+    verify_token    TEXT,                                -- one-time, issued at claim (telegram) / begin (email)
+    bot_id          TEXT,                                -- shared bot id (telegram)
+    created_at      INTEGER NOT NULL,
+    claimed_at      INTEGER,
+    verified_at     INTEGER,
+    expires_at      INTEGER NOT NULL,                    -- pending code/token TTL
+    PRIMARY KEY (account, channel),
+    FOREIGN KEY (account) REFERENCES wallets(key_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_key ON address_index(key_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_expire ON challenges(expires_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_credential ON wallets(credential_id);
@@ -126,6 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_keys_human ON agent_keys(human_id);
 CREATE INDEX IF NOT EXISTS idx_agent_keys_address ON agent_keys(agent_address);
 CREATE INDEX IF NOT EXISTS idx_jwt_secret_meta_status ON jwt_secret_meta(status);
 CREATE INDEX IF NOT EXISTS idx_p256_session_gc ON p256_session_keys(wallet_id, status, credential_expires_at);
+CREATE INDEX IF NOT EXISTS idx_contact_binding_code ON contact_bindings(binding_code);
 "#;
 
 // ── TX stats ──
