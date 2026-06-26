@@ -1298,14 +1298,24 @@ impl KmsDb {
     /// Confirm: app submits {binding_code, verify_token} (the token round-tripped via the
     /// app's passkey session). Marks verified, persists contact_ref, clears the one-time
     /// secrets. Returns false if code+token don't match a claimed, non-expired row.
-    pub fn confirm_contact_binding(&self, binding_code: &str, verify_token: &str) -> Result<bool> {
+    /// `account` is matched in the WHERE (the confirm endpoint passes the owner-ceremony'd
+    /// account) so an owner can only confirm bindings for THEIR OWN account — a stolen
+    /// {binding_code, verify_token} for account B can't be confirmed under account A's
+    /// ceremony. The bot knows verify_token (it delivered it), so the endpoint also
+    /// requires the owner ceremony; this account match is the second half of that defense.
+    pub fn confirm_contact_binding(
+        &self,
+        account: &str,
+        binding_code: &str,
+        verify_token: &str,
+    ) -> Result<bool> {
         let now = current_unix();
         let conn = self.lock();
         let n = conn.execute(
-            "UPDATE contact_bindings SET status='verified', verified_at=?3, \
+            "UPDATE contact_bindings SET status='verified', verified_at=?4, \
                binding_code=NULL, verify_token=NULL \
-             WHERE binding_code=?1 AND verify_token=?2 AND status='claimed' AND expires_at > ?3",
-            params![binding_code, verify_token, now],
+             WHERE account=?1 AND binding_code=?2 AND verify_token=?3 AND status='claimed' AND expires_at > ?4",
+            params![account, binding_code, verify_token, now],
         )?;
         Ok(n > 0)
     }
@@ -1589,17 +1599,19 @@ mod tests {
             .unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
         // confirm with WRONG token → rejected, still not verified
-        assert!(!db.confirm_contact_binding("code123", "WRONG").unwrap());
+        assert!(!db.confirm_contact_binding("acct1", "code123", "WRONG").unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
-        // confirm with right token → verified
-        assert!(db.confirm_contact_binding("code123", "vtok456").unwrap());
+        // confirm under the WRONG account → rejected (account match)
+        assert!(!db.confirm_contact_binding("acct2", "code123", "vtok456").unwrap());
+        // confirm with right account+token → verified
+        assert!(db.confirm_contact_binding("acct1", "code123", "vtok456").unwrap());
         let c = db.get_verified_contacts("acct1").unwrap();
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].channel, "telegram");
         assert_eq!(c[0].contact_ref, Some("chat-789".to_string()));
         assert_eq!(c[0].status, "verified");
         // double-confirm → false (code cleared after verify; no re-verify)
-        assert!(!db.confirm_contact_binding("code123", "vtok456").unwrap());
+        assert!(!db.confirm_contact_binding("acct1", "code123", "vtok456").unwrap());
         // unbind → deleted
         assert!(db.unbind_contact("acct1", "telegram").unwrap());
         assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
