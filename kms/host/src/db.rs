@@ -1571,6 +1571,47 @@ mod tests {
     }
 
     #[test]
+    fn contact_binding_telegram_roundtrip() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("acct1")).unwrap();
+        // begin → pending, not verified
+        db.begin_contact_binding("acct1", "telegram", "code123", Some("@alice"), 300)
+            .unwrap();
+        assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
+        // claim → bot records tentative chat + verify_token (status=claimed)
+        assert!(db
+            .claim_contact_binding("code123", "chat-789", Some("@alice"), "vtok456", Some("aastarbot"), 300)
+            .unwrap());
+        assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
+        // confirm with WRONG token → rejected, still not verified
+        assert!(!db.confirm_contact_binding("code123", "WRONG").unwrap());
+        assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
+        // confirm with right token → verified
+        assert!(db.confirm_contact_binding("code123", "vtok456").unwrap());
+        let c = db.get_verified_contacts("acct1").unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].channel, "telegram");
+        assert_eq!(c[0].contact_ref, Some("chat-789".to_string()));
+        assert_eq!(c[0].status, "verified");
+        // double-confirm → false (code cleared after verify; no re-verify)
+        assert!(!db.confirm_contact_binding("code123", "vtok456").unwrap());
+        // unbind → deleted
+        assert!(db.unbind_contact("acct1", "telegram").unwrap());
+        assert!(db.get_verified_contacts("acct1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn contact_binding_claim_unknown_code_rejected() {
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("acct2")).unwrap();
+        // no begin → claiming an unknown code must fail (bot can't conjure a binding)
+        assert!(!db
+            .claim_contact_binding("ghost", "chat", None, "tok", None, 300)
+            .unwrap());
+        assert!(db.get_verified_contacts("acct2").unwrap().is_empty());
+    }
+
+    #[test]
     fn wallet_exists_check() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
