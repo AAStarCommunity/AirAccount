@@ -35,6 +35,12 @@
 - **email 端点在 `begin_email_binding`（begin 时设 contact_ref+verify_token）实现前不得开放**（当前 DB 层 email 路径不完整，confirm 永远失败=安全但半成品）。
 - `contact_ref` **at-rest 加密**：Phase 1 非阻塞（chat_id 低敏 + 表隔离 + getContact 严格鉴权），但 **GA / 规模化接入真实用户前必须做**（email 是可识别 PII），非无限期 TODO。
 
+### Phase 1 已知限制 + 跟踪的 follow-up（codex+opus 端点 review，均非阻塞）
+端点已实现并过 review；以下显式跟踪，不静默带过：
+- **getContact 是扁平 api-key**：任一有效 api-key 可读**已知 key_id** 的 verified contactRef（PII）。有界原因：`account`=服务端 UUID（无盲枚举）、contactRef 是投递必需（不能掩码）、**getContact 读取走 per-request access log（v0.24.1）→ 泄露 key 的批量读可检测**。补偿控制=**每 DVT 节点独立可撤销 api-key + `KMS_REQUIRE_API_KEY=1`**。**follow-up（命名跟踪）**：api-key scoping / key-classes，限制 blast-radius，Phase 1 后做。
+- **owner ceremony 是通用 `authentication` ceremony、未绑 `{account,channel}`**（§3.3 的 commitment `SHA-256(nonce ‖ SHA-256("AA-CONTACT-BIND-v1"‖account‖channel))` 是 **follow-up**，需 resolve_passkey_assertion 加 host 侧 payload 支持）。后果限于通知层（begin 仍需后续 claim+confirm；confirm 仍需 bindingCode+verifyToken+account 匹配）+ challenge 单次消费 + app↔KMS TLS → Phase 1 Low。**follow-up（命名跟踪）**：ceremony 绑 {account,channel} commitment。
+- **claim 无 bot-key 分类 + `bot_id` 取自请求体（可伪造，仅显示元数据）**：blocker 修复后劫持链已断（confirm 需 owner ceremony，攻击者 claim 错 chat 也无法 verify，get 仅返 verified）；残留=低级 DoS（需每次新偷 256-bit code）。**follow-up（命名跟踪）**：bot-key-class 落地时，`bot_id` 改由**认证调用方身份**导出，不信请求体。
+
 ## 3. Phase 1：Telegram + Email 绑定
 
 ### 3.1 Telegram（用户发起式，因 Telegram bot 不能先私聊未 /start 用户 → 共享 bot）
