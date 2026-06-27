@@ -1730,6 +1730,26 @@ mod tests {
     }
 
     #[test]
+    fn freeze_dormant_resolves_checksummed_addr_activity() {
+        // Covers freeze_dormant_keys' INDEPENDENT SQL copy (Opus flagged last_used_at's test
+        // doesn't reach it). Write-time normalization (record_tx) makes tx_log.addr lowercase,
+        // so this second case-sensitive addr comparison also matches → an address-mode Sign
+        // logged with a checksummed addr keeps the wallet active. Without the fix it would
+        // fall back to created_at (old) and wrongly freeze a live key (#42).
+        use chrono::Utc;
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-fz")).unwrap(); // lifecycle_status defaults 'active'
+        let checksummed = "0xAbCdEf0000000000000000000000000000000004";
+        db.upsert_address(checksummed, "w-fz", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        db.record_tx("Sign", None, Some(checksummed), true, 5, true, false)
+            .unwrap();
+        let now = Utc::now().timestamp() + 10;
+        let frozen = db.freeze_dormant_keys(now, 86_400).unwrap();
+        assert!(!frozen.contains(&"w-fz".to_string()));
+    }
+
+    #[test]
     fn wallet_exists_check() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
