@@ -57,8 +57,12 @@ pub fn update_address_entry(
 ) -> Result<()> {
     let mut map = load_address_map()?;
 
+    // Normalize the address key to lowercase (consistent with the DB address paths) so a
+    // checksummed (EIP-55) lookup matches. This legacy JSON cache has no active server
+    // caller today, but keeping the invariant airtight avoids a latent case-mismatch if it
+    // is ever wired up. (codex review)
     map.insert(
-        address.to_string(),
+        address.to_lowercase(),
         AddressMetadata {
             wallet_id,
             derivation_path: derivation_path.to_string(),
@@ -71,10 +75,11 @@ pub fn update_address_entry(
     Ok(())
 }
 
-/// Lookup address in cache
+/// Lookup address in cache. Normalizes to lowercase to match the stored key (see
+/// `update_address_entry`) so a checksummed input resolves.
 pub fn lookup_address(address: &str) -> Result<Option<AddressMetadata>> {
     let map = load_address_map()?;
-    Ok(map.get(address).cloned())
+    Ok(map.get(&address.to_lowercase()).cloned())
 }
 
 /// Get current Unix timestamp
