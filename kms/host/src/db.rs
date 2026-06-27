@@ -621,6 +621,12 @@ impl KmsDb {
         derivation_path: &str,
         public_key: Option<&str>,
     ) -> Result<()> {
+        // Store the address key lowercased. Callers may pass an EIP-55 checksummed (mixed
+        // case) address; the column is the lookup key, so it MUST be normalized or a
+        // case-insensitive consumer (SDK passes checksummed, DVT passes userOp.sender) would
+        // miss it → contact/verify fail-closed (silent, hard to debug). hex::encode already
+        // emits lowercase today; this nails it regardless of caller case.
+        let address = address.to_lowercase();
         let conn = self.lock();
         conn.execute(
             "INSERT OR REPLACE INTO address_index (address, key_id, derivation_path, public_key) \
@@ -653,6 +659,12 @@ impl KmsDb {
     }
 
     pub fn lookup_address(&self, address: &str) -> Result<Option<AddressRow>> {
+        // Normalize to lowercase so a checksummed (EIP-55 mixed-case) input — what the SDK
+        // (#203) and DVT (userOp.sender) pass — matches the lowercase-stored key. Without
+        // this, address-case mismatch → not found → /contact + /verify-confirm-assertion
+        // fail-closed for legit users (silent, source-dependent, hard to debug). One place,
+        // fixes every address consumer (Sign/SignHash + contact/verify).
+        let address = address.to_lowercase();
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT address, key_id, derivation_path, public_key FROM address_index WHERE address=?1"
@@ -1470,11 +1482,18 @@ impl KmsDb {
         is_panic: bool,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        // Normalize the signing address to lowercase to match wallets.address /
+        // address_index.address (both lowercase). The dormant-key check (#42,
+        // freeze_dormant_keys) matches tx_log rows by key_id OR by `addr` with a
+        // case-sensitive equality; a checksummed addr here (now that lookup_address is
+        // case-insensitive, a checksummed Sign succeeds and reaches record_tx) would miss
+        // that comparison → the wallet looks dormant → wrongly auto-frozen. (codex review)
+        let addr = addr.map(|a| a.to_lowercase());
         let conn = self.lock();
         conn.execute(
             "INSERT INTO tx_log (op, key_id, addr, webauthn, latency_ms, success, is_panic, created_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![op, key_id, addr, webauthn as i32, latency_ms as i64,
+            params![op, key_id, addr.as_deref(), webauthn as i32, latency_ms as i64,
                     success as i32, is_panic as i32, now],
         )?;
         Ok(())
@@ -1663,6 +1682,71 @@ mod tests {
             .claim_contact_binding("ghost", "chat", None, "tok", None, 300)
             .unwrap());
         assert!(db.get_verified_contacts("acct2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_address_is_case_insensitive() {
+        // Locks the address-case fix: SDK (#203) sends EIP-55 checksummed addresses, DVT
+        // sends userOp.sender — both must resolve regardless of case, or /contact +
+        // /verify-confirm-assertion fail-closed for legit users.
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-addr")).unwrap();
+        let checksummed = "0xAbCdEf0000000000000000000000000000000001";
+        let lowercased = "0xabcdef0000000000000000000000000000000001";
+        // Store via a checksummed address → normalized lowercase on write.
+        db.upsert_address(checksummed, "w-addr", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        // Look up either case → both resolve to the same wallet.
+        assert_eq!(
+            db.lookup_address(lowercased).unwrap().map(|r| r.key_id),
+            Some("w-addr".to_string())
+        );
+        assert_eq!(
+            db.lookup_address(checksummed).unwrap().map(|r| r.key_id),
+            Some("w-addr".to_string())
+        );
+        // Stored value itself is lowercase.
+        assert_eq!(
+            db.lookup_address(lowercased).unwrap().unwrap().address,
+            lowercased
+        );
+    }
+
+    #[test]
+    fn last_used_at_resolves_checksummed_tx_addr() {
+        // Locks the dormant-freeze fix: an address-mode Sign logs tx_log.addr by address
+        // only. The SDK sends a checksummed address; record_tx must lowercase it so the
+        // dormant check (last_used_at matches addr vs the lowercase address columns) finds
+        // the activity — else the wallet looks dormant and gets wrongly auto-frozen (#42).
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-tx")).unwrap();
+        let checksummed = "0xAbCdEf0000000000000000000000000000000002";
+        db.upsert_address(checksummed, "w-tx", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        db.record_tx("Sign", None, Some(checksummed), true, 5, true, false)
+            .unwrap();
+        // Activity is found via the (now lowercase) addr → wallet is NOT dormant.
+        assert!(db.last_used_at("w-tx").unwrap().is_some());
+    }
+
+    #[test]
+    fn freeze_dormant_resolves_checksummed_addr_activity() {
+        // Covers freeze_dormant_keys' INDEPENDENT SQL copy (Opus flagged last_used_at's test
+        // doesn't reach it). Write-time normalization (record_tx) makes tx_log.addr lowercase,
+        // so this second case-sensitive addr comparison also matches → an address-mode Sign
+        // logged with a checksummed addr keeps the wallet active. Without the fix it would
+        // fall back to created_at (old) and wrongly freeze a live key (#42).
+        use chrono::Utc;
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-fz")).unwrap(); // lifecycle_status defaults 'active'
+        let checksummed = "0xAbCdEf0000000000000000000000000000000004";
+        db.upsert_address(checksummed, "w-fz", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        db.record_tx("Sign", None, Some(checksummed), true, 5, true, false)
+            .unwrap();
+        let now = Utc::now().timestamp() + 10;
+        let frozen = db.freeze_dormant_keys(now, 86_400).unwrap();
+        assert!(!frozen.contains(&"w-fz".to_string()));
     }
 
     #[test]
@@ -1947,12 +2031,13 @@ mod tests {
         db.insert_wallet(&sample_wallet("w-1")).unwrap(); // satisfy address_index FK
         db.upsert_address("0xABC123", "w-1", "m/44'/60'/0'/0/0", None)
             .unwrap();
-        // exact (key_id, path) → hit
+        // exact (key_id, path) → hit. upsert_address normalizes the key to lowercase
+        // (address-case fix), so the stored/returned value is lowercased.
         assert_eq!(
             db.address_for_key_path("w-1", "m/44'/60'/0'/0/0")
                 .unwrap()
                 .as_deref(),
-            Some("0xABC123")
+            Some("0xabc123")
         );
         // same key, different path → miss
         assert!(db
