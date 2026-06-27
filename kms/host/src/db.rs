@@ -621,6 +621,12 @@ impl KmsDb {
         derivation_path: &str,
         public_key: Option<&str>,
     ) -> Result<()> {
+        // Store the address key lowercased. Callers may pass an EIP-55 checksummed (mixed
+        // case) address; the column is the lookup key, so it MUST be normalized or a
+        // case-insensitive consumer (SDK passes checksummed, DVT passes userOp.sender) would
+        // miss it → contact/verify fail-closed (silent, hard to debug). hex::encode already
+        // emits lowercase today; this nails it regardless of caller case.
+        let address = address.to_lowercase();
         let conn = self.lock();
         conn.execute(
             "INSERT OR REPLACE INTO address_index (address, key_id, derivation_path, public_key) \
@@ -653,6 +659,12 @@ impl KmsDb {
     }
 
     pub fn lookup_address(&self, address: &str) -> Result<Option<AddressRow>> {
+        // Normalize to lowercase so a checksummed (EIP-55 mixed-case) input — what the SDK
+        // (#203) and DVT (userOp.sender) pass — matches the lowercase-stored key. Without
+        // this, address-case mismatch → not found → /contact + /verify-confirm-assertion
+        // fail-closed for legit users (silent, source-dependent, hard to debug). One place,
+        // fixes every address consumer (Sign/SignHash + contact/verify).
+        let address = address.to_lowercase();
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT address, key_id, derivation_path, public_key FROM address_index WHERE address=?1"
@@ -1666,6 +1678,34 @@ mod tests {
     }
 
     #[test]
+    fn lookup_address_is_case_insensitive() {
+        // Locks the address-case fix: SDK (#203) sends EIP-55 checksummed addresses, DVT
+        // sends userOp.sender — both must resolve regardless of case, or /contact +
+        // /verify-confirm-assertion fail-closed for legit users.
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-addr")).unwrap();
+        let checksummed = "0xAbCdEf0000000000000000000000000000000001";
+        let lowercased = "0xabcdef0000000000000000000000000000000001";
+        // Store via a checksummed address → normalized lowercase on write.
+        db.upsert_address(checksummed, "w-addr", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        // Look up either case → both resolve to the same wallet.
+        assert_eq!(
+            db.lookup_address(lowercased).unwrap().map(|r| r.key_id),
+            Some("w-addr".to_string())
+        );
+        assert_eq!(
+            db.lookup_address(checksummed).unwrap().map(|r| r.key_id),
+            Some("w-addr".to_string())
+        );
+        // Stored value itself is lowercase.
+        assert_eq!(
+            db.lookup_address(lowercased).unwrap().unwrap().address,
+            lowercased
+        );
+    }
+
+    #[test]
     fn wallet_exists_check() {
         let db = test_db();
         db.insert_wallet(&sample_wallet("w1")).unwrap();
@@ -1947,12 +1987,13 @@ mod tests {
         db.insert_wallet(&sample_wallet("w-1")).unwrap(); // satisfy address_index FK
         db.upsert_address("0xABC123", "w-1", "m/44'/60'/0'/0/0", None)
             .unwrap();
-        // exact (key_id, path) → hit
+        // exact (key_id, path) → hit. upsert_address normalizes the key to lowercase
+        // (address-case fix), so the stored/returned value is lowercased.
         assert_eq!(
             db.address_for_key_path("w-1", "m/44'/60'/0'/0/0")
                 .unwrap()
                 .as_deref(),
-            Some("0xABC123")
+            Some("0xabc123")
         );
         // same key, different path → miss
         assert!(db
