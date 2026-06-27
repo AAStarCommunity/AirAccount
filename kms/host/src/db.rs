@@ -1482,11 +1482,18 @@ impl KmsDb {
         is_panic: bool,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        // Normalize the signing address to lowercase to match wallets.address /
+        // address_index.address (both lowercase). The dormant-key check (#42,
+        // freeze_dormant_keys) matches tx_log rows by key_id OR by `addr` with a
+        // case-sensitive equality; a checksummed addr here (now that lookup_address is
+        // case-insensitive, a checksummed Sign succeeds and reaches record_tx) would miss
+        // that comparison → the wallet looks dormant → wrongly auto-frozen. (codex review)
+        let addr = addr.map(|a| a.to_lowercase());
         let conn = self.lock();
         conn.execute(
             "INSERT INTO tx_log (op, key_id, addr, webauthn, latency_ms, success, is_panic, created_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![op, key_id, addr, webauthn as i32, latency_ms as i64,
+            params![op, key_id, addr.as_deref(), webauthn as i32, latency_ms as i64,
                     success as i32, is_panic as i32, now],
         )?;
         Ok(())
@@ -1703,6 +1710,23 @@ mod tests {
             db.lookup_address(lowercased).unwrap().unwrap().address,
             lowercased
         );
+    }
+
+    #[test]
+    fn last_used_at_resolves_checksummed_tx_addr() {
+        // Locks the dormant-freeze fix: an address-mode Sign logs tx_log.addr by address
+        // only. The SDK sends a checksummed address; record_tx must lowercase it so the
+        // dormant check (last_used_at matches addr vs the lowercase address columns) finds
+        // the activity — else the wallet looks dormant and gets wrongly auto-frozen (#42).
+        let db = test_db();
+        db.insert_wallet(&sample_wallet("w-tx")).unwrap();
+        let checksummed = "0xAbCdEf0000000000000000000000000000000002";
+        db.upsert_address(checksummed, "w-tx", "m/44'/60'/0'/0/0", None)
+            .unwrap();
+        db.record_tx("Sign", None, Some(checksummed), true, 5, true, false)
+            .unwrap();
+        // Activity is found via the (now lowercase) addr → wallet is NOT dormant.
+        assert!(db.last_used_at("w-tx").unwrap().is_some());
     }
 
     #[test]
