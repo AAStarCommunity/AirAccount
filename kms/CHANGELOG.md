@@ -1,6 +1,19 @@
 # KMS Changelog
 
-> Updated: 2026-06-26
+> Updated: 2026-06-27
+
+## 0.27.2 (2026-06-27) — Beta5 — 地址大小写归一化（fail-closed 隐患修复）
+
+### 修复 (Fix) — #129/#203（coordinator review 揪出的 fail-closed 隐患）
+- **地址 key 全链路归一化 lowercase**，消除大小写不匹配导致的静默 fail-closed。KMS 各处用 `hex::encode` 存小写地址，但 `lookup_address` 是 case-sensitive 精确匹配；SDK(#203) 传 EIP-55 校验和、DVT 传 userOp.sender → 不匹配 → **/contact + /verify-confirm-assertion 对合法用户永远查不到/返 false**（按地址来源时灵时不灵、极难排查）。
+- 三处 DB 路径 + 一处 legacy 缓存归一化：
+  - `lookup_address`：query 输入小写 → 匹配小写存储（一处根治所有 consumer 含 Sign/SignHash + contact/verify）。
+  - `upsert_address`：写入小写（防御不变量）。
+  - **`record_tx`**：`tx_log.addr` 写入小写（codex round-12 BLOCKER）——否则校验和 Sign 成功后写校验和 addr，dormant 检查（#42 freeze_dormant_keys 按 addr case-sensitive 比对）失配 → 活跃钱包被误判 dormant、误冻结。
+  - `address_cache.rs`（legacy JSON 缓存，无活跃调用）：同步加小写（防将来被接上重现）。
+- 测试：`lookup_address_is_case_insensitive`、`last_used_at_resolves_checksummed_tx_addr` + 修 `address_for_key_path_lookup`。67 host 单测全过。codex round-13 确认 DB 不变量 airtight。
+
+> 双轨：CA(host) **0.27.2** · TA 0.8.0 · proto 0.7.0。CA-only，重编 CA + 重启。
 
 ## 0.27.1 (2026-06-26) — Beta5 — contact/verify 端点 account 接受 address 或 key_id（修复）
 
