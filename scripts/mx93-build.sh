@@ -170,6 +170,22 @@ build_ca() {
     mkdir -p "$BUILD_OUT"
     cp "$H_CA_OUT/kms-api-server" "$BUILD_OUT/kms-api-server"
     ok "CA -> $BUILD_OUT/kms-api-server ($(du -h "$BUILD_OUT/kms-api-server" | cut -f1))"
+
+    # Record the compiled posture so mx93-deploy.sh can refuse to silently flip a
+    # board's /version profile/challenge_mode (v0.27.3 incident: a default-feature
+    # CA was deployed onto a dev-rpid+strict board, flipping it to prod/transition).
+    local bi_profile="prod" bi_challenge="transition"
+    [[ "${MX93_DEV_RPID:-0}" == "1" ]]        && bi_profile="dev"
+    [[ "${MX93_STRICT_CHALLENGE:-0}" == "1" ]] && bi_challenge="strict"
+    cat > "$BUILD_OUT/ca.buildinfo" <<EOF
+# Auto-written by mx93-build.sh — the CA's compiled /version posture.
+# mx93-deploy.sh compares this to the board's live /version before restart.
+dev_rpid=${MX93_DEV_RPID:-0}
+strict_challenge=${MX93_STRICT_CHALLENGE:-0}
+profile=$bi_profile
+challenge_mode=$bi_challenge
+EOF
+    ok "buildinfo -> profile=$bi_profile challenge_mode=$bi_challenge"
 }
 
 case "$MODE" in
