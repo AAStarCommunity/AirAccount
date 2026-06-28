@@ -1,6 +1,16 @@
 # KMS Changelog
 
-> Updated: 2026-06-27
+> Updated: 2026-06-28
+
+## 0.27.3 (2026-06-28) — Beta5 — /health 端点清单追平 + 全仓版本号 sync
+
+### 修复 (Fix) — /health 诊断面 under-report（#124/#129）
+- `/health` 的 `endpoints` 清单补上 0.27.0 起 host-only 新增、却一直没列的 6 个端点：`POST /verify-confirm-assertion` + `POST /contact/{begin,claim,confirm}-binding` + `POST /contact/unbind` + `GET /contact/{account}`。此前线上 /health 只报 12 个 POST，与实际路由不符。
+
+### 文档 (Docs) — 全仓版本号漂移收口
+- 多处展示版本号此前滞后（`index.html`/`API-TEST-MATRIX.md`/`CLAUDE.md` 还停在 0.26.1，`README` badge / `RELEASE-PLAN` 在 0.27.0），本版统一拉到 **0.27.3**：`KMS_VERSION`、`openapi.yaml`、Swagger UI 标题、测试矩阵、README 徽章、CLAUDE.md、RELEASE-PLAN。
+
+> 双轨：CA(host) **0.27.3** · TA 0.8.0（不变）· proto 0.7.0（不变）。**CA-only**，重编 `kms-api-server` + 重启 kms-api.service。TA 字节未变，不重刷。
 
 ## 0.27.2 (2026-06-27) — Beta5 — 地址大小写归一化（fail-closed 隐患修复）
 
