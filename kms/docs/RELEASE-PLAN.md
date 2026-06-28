@@ -1,6 +1,6 @@
 # AirAccount KMS 发布计划梳理
 
-> 日期：2026-06-26 | 当前：**Beta5 (v0.27.0)** ✅ —— host-only 新增 DVT 带外确认验签端点（#124）+ 通知联系方式绑定（#129，Telegram）。TA 不变，重编 CA + 重启即发布。详见 [CHANGELOG 0.27.0](../CHANGELOG.md)。
+> 日期：2026-06-28 | 当前：**Beta5 (v0.27.3)** ✅ —— address-case fail-closed 修复（#129/#203, 0.27.2）+ /health 端点清单追平 + 全仓版本号 sync（0.27.3）。TA 不变（0.8.0），CA-only 重编 + 重启即发布。详见 [CHANGELOG](../CHANGELOG.md)。
 
 ## 当前状态
 
