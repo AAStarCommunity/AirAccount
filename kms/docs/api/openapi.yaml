@@ -1,11 +1,11 @@
 # AirAccount KMS — OpenAPI 3.1 specification
-# Generated: 2026-06-21 · Version 0.24.1 (Beta5)
+# Generated: 2026-06-28 · Version 0.27.2 (Beta5)
 # Render with Swagger UI: open kms/docs/api/index.html
 # Test coverage per endpoint: see `x-tested` + kms/docs/API-TEST-MATRIX.md
 openapi: 3.1.0
 info:
   title: AirAccount KMS API
-  version: 0.26.1
+  version: 0.27.2
   summary: TEE private-key management · WebAuthn · AWS KMS-compatible
   description: |
     AirAccount KMS manages secp256k1 / P-256 keys inside an OP-TEE TrustZone secure world.
@@ -64,6 +64,10 @@ tags:
     description: SessionKeyValidator GRANT_SESSION_V2 signing (secp256k1 / P-256)
   - name: P256 Sessions
     description: P-256 session keys for ERC-4337 UserOps
+  - name: Contact Binding
+    description: "Notification contact binding (Telegram), owner-ceremony gated (#129)"
+  - name: DVT Confirm
+    description: "DVT out-of-band confirm — RP-verify an owner passkey assertion over a userOpHash (#124)"
 
 security:
   - ApiKey: []
@@ -441,6 +445,83 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
       x-tested: { e2e: "run-full-e2e.sh §7c", api: "run-api-tests.sh (no-WebAuthn→400, idempotent)", status: "✅ verified (34/34)" }
 
+  # ───────────────────────── DVT Confirm (#124) ─────────────────────────
+  # Plain JSON POST (NOT AWS-KMS framed, no x-amz-target). x-api-key authed (DVT node).
+  /verify-confirm-assertion:
+    post:
+      tags: [DVT Confirm]
+      summary: RP-verify a DVT out-of-band confirm assertion (#124)
+      description: |
+        KMS acts as the WebAuthn **RP** for a DVT node: verifies the account owner's passkey
+        assertion produced over `challenge = userOpHash` (WYSIWYS). Stateless + idempotent
+        (`sign_count` check skipped) so a quorum of nodes can each verify the same assertion.
+        A leaked secp256k1 owner key alone cannot pass (P256 passkey required). Account
+        not-found / no-passkey / frozen / bad-signature all return `{verified:false}` (no
+        enumeration oracle). Fail-closed: if KMS is unreachable the node must not proceed.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/VerifyConfirmAssertionRequest' } } } }
+      responses:
+        '200': { description: Verification result, content: { application/json: { schema: { type: object, required: [verified], properties: { verified: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#124)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+
+  # ───────────────────────── Contact Binding (#129) ─────────────────────────
+  /contact/begin-binding:
+    post:
+      tags: [Contact Binding]
+      summary: Begin a contact binding — owner ceremony (#129)
+      description: "Owner WebAuthn ceremony + the channel to bind. Issues a 256-bit binding code. Only `telegram` for now (email pending)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BeginBindingRequest' } } } }
+      responses:
+        '200': { description: Binding code issued, content: { application/json: { schema: { type: object, required: [bindingCode, expiresAt], properties: { bindingCode: { type: string }, expiresAt: { type: integer, description: "unix seconds" } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#129)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+  /contact/claim-binding:
+    post:
+      tags: [Contact Binding]
+      summary: Claim a binding code from the Telegram side (bot)
+      description: "Bot (api-key) claims the binding code with the Telegram chat id. First-claim-wins. Returns a verify token to be confirmed by the owner."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ClaimBindingRequest' } } } }
+      responses:
+        '200': { description: Verify token issued, content: { application/json: { schema: { type: object, required: [verifyToken, expiresAt], properties: { verifyToken: { type: string }, expiresAt: { type: integer, description: "unix seconds" } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#129)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+  /contact/confirm-binding:
+    post:
+      tags: [Contact Binding]
+      summary: Confirm a binding — owner ceremony (#129)
+      description: "Owner WebAuthn ceremony over the binding code + the claimed verify token; persists the verified contact."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConfirmBindingRequest' } } } }
+      responses:
+        '200': { description: Confirmed, content: { application/json: { schema: { type: object, required: [status], properties: { status: { type: string } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#129)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+  /contact/unbind:
+    post:
+      tags: [Contact Binding]
+      summary: Unbind a contact — owner ceremony (#129)
+      description: "Owner WebAuthn ceremony to remove a previously verified contact channel."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UnbindRequest' } } } }
+      responses:
+        '200': { description: Unbound, content: { application/json: { schema: { type: object, required: [status], properties: { status: { type: string } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#129)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+  /contact/{account}:
+    get:
+      tags: [Contact Binding]
+      summary: List verified contacts for an account (DVT api-key)
+      description: |
+        Returns the verified notification contacts for an account so DVT can reach the real
+        user for out-of-band confirm. `account` accepts a wallet address or key_id.
+        **Deployment invariant:** in production each DVT node must hold its own independently
+        revocable `x-api-key` (KMS does not scope this route to a DVT-specific role at the code
+        level — isolation is enforced by per-node key issuance + revocation, not by the route).
+      parameters:
+        - { name: account, in: path, required: true, schema: { type: string }, description: "Wallet address or key_id" }
+      responses:
+        '200': { description: Verified contacts, content: { application/json: { schema: { type: object, required: [contacts], properties: { contacts: { type: array, items: { $ref: '#/components/schemas/ContactView' } } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+      x-tested: { unit: "host unit tests (#129)", e2e: "pending (host-only, added v0.27.0)", status: "⚠️ unit-tested, E2E pending" }
+
   # NOTE: /admin/purge-key is intentionally absent. It is a DEV/TEST-only endpoint
   # gated behind the compile-time `admin-purge` feature and is NOT present in
   # production release builds (decentralized KMS has no admin surface). The public
@@ -741,3 +822,55 @@ components:
         keyId: { type: string }
         payload: { type: string, description: "hex userOpHash 32 bytes" }
         accountAddress: { type: string }
+    # ── DVT Confirm (#124) ──
+    VerifyConfirmAssertionRequest:
+      type: object
+      required: [account, userOpHash, passkey]
+      properties:
+        account: { type: string, description: "Wallet address or key_id" }
+        userOpHash: { type: string, description: "hex, used as the WebAuthn challenge (WYSIWYS)" }
+        passkey: { type: object, description: "WebAuthn AuthenticationResponseJSON (base64url fields under .response)" }
+    # ── Contact Binding (#129) ──
+    BeginBindingRequest:
+      type: object
+      # WebAuthn is required: the handler hard-rejects a missing assertion
+      # ("owner WebAuthn ceremony required") — owner-gate, not optional.
+      required: [account, channel, WebAuthn]
+      properties:
+        account: { type: string, description: "Wallet address or key_id" }
+        channel: { type: string, enum: [telegram], description: "Channel to bind (telegram; email pending)" }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    ClaimBindingRequest:
+      type: object
+      required: [bindingCode, telegramChatId]
+      properties:
+        bindingCode: { type: string, description: "256-bit code from begin-binding" }
+        telegramChatId: { type: string }
+        telegramUsername: { type: string }
+        botId: { type: string }
+    ConfirmBindingRequest:
+      type: object
+      # WebAuthn required — owner ceremony hard-enforced server-side (see BeginBindingRequest).
+      required: [account, bindingCode, verifyToken, WebAuthn]
+      properties:
+        account: { type: string, description: "Wallet address or key_id" }
+        bindingCode: { type: string }
+        verifyToken: { type: string, description: "token from claim-binding" }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    UnbindRequest:
+      type: object
+      # WebAuthn required — owner ceremony hard-enforced server-side (see BeginBindingRequest).
+      required: [account, channel, WebAuthn]
+      properties:
+        account: { type: string, description: "Wallet address or key_id" }
+        channel: { type: string, enum: [telegram] }
+        WebAuthn: { $ref: '#/components/schemas/WebAuthnAssertion' }
+    ContactView:
+      type: object
+      required: [channel, status]
+      properties:
+        channel: { type: string, example: telegram }
+        contactRef: { type: string, nullable: true, description: "channel-specific ref (e.g. chat id)" }
+        displayHint: { type: string, nullable: true, description: "non-sensitive display hint" }
+        status: { type: string, example: verified }
+        verifiedAt: { type: integer, format: int64, nullable: true, description: "unix seconds" }

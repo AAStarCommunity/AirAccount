@@ -4430,8 +4430,8 @@ async fn health_check(server: Arc<KmsApiServer>) -> Result<impl warp::Reply, war
         "ta_mode": "real",
         "attestation_available": attestation_available,
         "endpoints": {
-            "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication"],
-            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats", "/RollbackCounter", "/attestation?nonce=<hex>"]
+            "POST": ["/CreateKey", "/DeleteKey", "/UnfreezeKey", "/DescribeKey", "/ListKeys", "/DeriveAddress", "/Sign", "/SignHash", "/ChangePasskey", "/BeginRegistration", "/CompleteRegistration", "/BeginAuthentication", "/verify-confirm-assertion", "/contact/begin-binding", "/contact/claim-binding", "/contact/confirm-binding", "/contact/unbind"],
+            "GET": ["/health", "/version", "/KeyStatus?KeyId=xxx", "/QueueStatus", "/stats", "/RollbackCounter", "/attestation?nonce=<hex>", "/contact/{account}"]
         }
     })))
 }
