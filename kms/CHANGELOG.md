@@ -13,6 +13,9 @@
   - `address_cache.rs`（legacy JSON 缓存，无活跃调用）：同步加小写（防将来被接上重现）。
 - 测试：`lookup_address_is_case_insensitive`、`last_used_at_resolves_checksummed_tx_addr` + 修 `address_for_key_path_lookup`。67 host 单测全过。codex round-13 确认 DB 不变量 airtight。
 
+### 文档 (Docs) — OpenAPI 规范追平 deployed surface
+- `openapi.yaml` 版本号 0.26.1 → **0.27.2**，补齐 0.27.0 起新增、却从未写进 spec 的 6 个端点（#124/#129）：`POST /verify-confirm-assertion`、`POST /contact/{begin,claim,confirm}-binding`、`POST /contact/unbind`、`GET /contact/{account}` + 对应 request/response schema 与两个新 tag（Contact Binding / DVT Confirm）。纯文档，二进制不变。
+
 > 双轨：CA(host) **0.27.2** · TA 0.8.0 · proto 0.7.0。CA-only，重编 CA + 重启。
 
 ## 0.27.1 (2026-06-26) — Beta5 — contact/verify 端点 account 接受 address 或 key_id（修复）
