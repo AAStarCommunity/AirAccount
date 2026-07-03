@@ -3,8 +3,8 @@
 # Usage: ./test-full-api.sh [host:port]
 # Default: 192.168.7.2:3000
 #
-# API key: if the target server has API-key auth enabled (DB has keys, or
-# KMS_REQUIRE_API_KEY=1), every protected route needs an `x-api-key` header.
+# API key: auth is fail-closed by default, so unless the server runs in open
+# mode (KMS_ALLOW_OPEN_MODE=1), every protected route needs an `x-api-key` header.
 # Export it before running, e.g.:
 #   KMS_API_KEY=kms_xxxx ./test-full-api.sh kms.aastar.io
 # Leave KMS_API_KEY unset for an open-mode (dev) server.

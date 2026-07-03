@@ -1,6 +1,14 @@
 # KMS Changelog
 
-> Updated: 2026-06-28
+> Updated: 2026-07-03
+
+## Unreleased
+
+### 安全 (Security) — API-key 认证改为 fail-closed 默认
+- **认证默认 fail-closed**：此前 DB 无 key、`KMS_API_KEY`/`KMS_REQUIRE_API_KEY` 均未设时，服务**静默开放**（`has_api_keys()` 出错也默认放行）。现在认证**无条件默认要求 key**，未 provision key 则全拒。
+- **移除 `KMS_REQUIRE_API_KEY`**（其行为已成为默认）；新增 `KMS_ALLOW_OPEN_MODE=1` 作为**显式** dev/test 开放开关。旧的 `KMS_REQUIRE_API_KEY` 部署不变量（见 0.x 历史条目）不再适用。
+- ⚠️ **部署前提**：升级到此版本前必须先 provision 一个 API key（`kms-admin api-key generate` 或设 `KMS_API_KEY`），否则 fail-closed 二进制会拒绝所有请求。
+- 注：签名路径（SignHash）本就由 TA 内 WebAuthn assertion 独立把关，不受此 filter 影响——本次加固的是 CreateKey/ListKeys/DescribeKey 等管理端点，防未授权滥用与元数据泄漏。
 
 ## 0.27.3 (2026-06-28) — Beta5 — /health 端点清单追平 + 全仓版本号 sync
 
