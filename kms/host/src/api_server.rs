@@ -4299,8 +4299,12 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
-        let masked_desc = if w.description.len() > 8 {
-            format!("{}…", &w.description[..8])
+        // Truncate by characters, not bytes: `&s[..8]` panics if byte 8 lands
+        // mid-UTF-8-codepoint (e.g. 7 ASCII + a multibyte char). Description is
+        // user-controlled (CreateKey), so a crafted value would panic every
+        // render of this page — a DoS on the stats dashboard.
+        let masked_desc = if w.description.chars().count() > 8 {
+            format!("{}…", w.description.chars().take(8).collect::<String>())
         } else {
             w.description.clone()
         };
