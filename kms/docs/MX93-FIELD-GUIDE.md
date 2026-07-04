@@ -58,7 +58,7 @@ fd=open('/dev/cu.usbmodem5B6D0044901','rb+',buffering=0)
 ### 登录
 ```
 login: root
-password: airaccount
+password: <串口登录密码——不入库，见 1Password / 板子本地>
 ```
 
 ---
@@ -95,15 +95,17 @@ ssh root@<IP> 'hostname; systemctl is-active kms-api.service'
 
 ### 当前已配置的网络（优先级从高到低）
 
-| SSID | 类型 | 密码/说明 | 地点 |
+> **凭据一律不入库**。PSK / EAP 账号 / 密码只存 1Password 或板子本地 `/etc/wpa_supplicant.conf`。下表只列 SSID 与来源，不列明文。
+
+| SSID | 类型 | 密码来源 | 地点 |
 |------|------|----------|------|
-| `@JumboPlusIoT5GHz` | WPA-PSK | `bopxnryr` | CMU Thailand 学校机房 |
-| `@JumboPlusIoT` | WPA-PSK | `bopxnryr` | CMU Thailand（2.4GHz 备用） |
-| `@JumboPlus5GHz` | WPA2-EAP PEAP | huifeng_jiao@cmu.ac.th（凭证待修） | CMU（暂时不通） |
-| `eduroam` | WPA2-EAP PEAP | huifeng_jiao@cmu.ac.th（凭证待修） | CMU eduroam（暂时不通） |
+| `@JumboPlusIoT5GHz` | WPA-PSK | CMU IoT 门户申请 PSK（见 1Password） | CMU Thailand 学校机房 |
+| `@JumboPlusIoT` | WPA-PSK | 同上（2.4GHz 备用） | CMU Thailand |
+| `@JumboPlus5GHz` | WPA2-EAP PEAP | EAP 账号（凭证待修，见 1Password） | CMU（暂时不通） |
+| `eduroam` | WPA2-EAP PEAP | EAP 账号（凭证待修，见 1Password） | CMU eduroam（暂时不通） |
 | `OneplusCMU3 5Ghz` | 开放 | 无密码（需门户登录） | CMU 区域 |
-| `ChinaNet-AuRfsu-5G` | WPA-PSK | `ucdb4543` | 家（中国） |
-| `ChinaNet-AuRfsu` | WPA-PSK | `ucdb4543` | 家（中国，2.4GHz） |
+| `ChinaNet-AuRfsu-5G` | WPA-PSK | 家庭 WiFi 密码（见 1Password） | 家（中国） |
+| `ChinaNet-AuRfsu` | WPA-PSK | 同上（2.4GHz） | 家（中国，2.4GHz） |
 
 ### 加新 WiFi
 ```bash
