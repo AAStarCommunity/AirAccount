@@ -4269,6 +4269,25 @@ impl KmsApiServer {
 
 const KMS_VERSION: &str = "0.27.3";
 
+/// Minimal HTML-escaping for user-controlled strings interpolated into the
+/// (unauthenticated) stats dashboard. Fields like `description` come straight
+/// from CreateKey with no sanitization, so `&<>"'` must be neutralized to
+/// prevent stored XSS on a page any anonymous visitor can load.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
@@ -4299,14 +4318,23 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
-        let masked_desc = if w.description.len() > 8 {
-            format!("{}…", &w.description[..8])
+        // Truncate by characters, not bytes: `&s[..8]` panics if byte 8 lands
+        // mid-UTF-8-codepoint (e.g. 7 ASCII + a multibyte char). Description is
+        // user-controlled (CreateKey), so a crafted value would panic every
+        // render of this page — a DoS on the stats dashboard.
+        let desc_trunc = if w.description.chars().count() > 8 {
+            format!("{}…", w.description.chars().take(8).collect::<String>())
         } else {
             w.description.clone()
         };
+        // This dashboard is served unauthenticated and `description` is fully
+        // user-controlled via CreateKey, so escape it (and status) before
+        // splicing into HTML to prevent stored XSS.
+        let masked_desc = html_escape(&desc_trunc);
+        let status_disp = html_escape(&w.status);
         rows.push_str(&format!(
             "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{}</td><td>{created}</td><td>{}</td></tr>\n",
-            short_id, w.status, w.sign_count, masked_desc
+            short_id, status_disp, w.sign_count, masked_desc
         ));
     }
 
