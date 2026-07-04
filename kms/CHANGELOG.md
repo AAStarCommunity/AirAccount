@@ -1,10 +1,16 @@
 # KMS Changelog
 
-> Updated: 2026-07-03
+> Updated: 2026-07-04
 
-## Unreleased
+## 0.27.4 (2026-07-04) — Beta5 — 安全加固（stats 页 XSS/panic + 认证 fail-closed）
 
-### 安全 (Security) — API-key 认证改为 fail-closed 默认
+> **CA-only**（host 改动，TA/proto 不变）——重编 `kms-api-server` + 重启 kms-api.service，TA 不刷。
+
+### 安全 (Security) — 公开 stats 面板加固（#144）
+- **修 Stored XSS**：`render_stats_page`（根路径、**无认证**公开页）此前把用户可控的钱包 `description`（CreateKey 传入、无过滤）直插 `<td>` 且**零 HTML 转义** → 任意访客浏览器执行 JS。新增 `html_escape()` 转义 description/status。
+- **修 UTF-8 panic → DoS**：`&description[..8]` 按字节切片，多字节字符落在边界即 panic，用户可构造让面板每次渲染崩溃。改为按字符截断。
+
+### 安全 (Security) — API-key 认证改为 fail-closed 默认（#145）
 - **认证默认 fail-closed**：此前 DB 无 key、`KMS_API_KEY`/`KMS_REQUIRE_API_KEY` 均未设时，服务**静默开放**（`has_api_keys()` 出错也默认放行）。现在认证**无条件默认要求 key**，未 provision key 则全拒。
 - **移除 `KMS_REQUIRE_API_KEY`**（其行为已成为默认）；新增 `KMS_ALLOW_OPEN_MODE=1` 作为**显式** dev/test 开放开关。旧的 `KMS_REQUIRE_API_KEY` 部署不变量（见 0.x 历史条目）不再适用。
 - ⚠️ **部署前提**：升级到此版本前必须先 provision 一个 API key（`kms-admin api-key generate` 或设 `KMS_API_KEY`），否则 fail-closed 二进制会拒绝所有请求。
