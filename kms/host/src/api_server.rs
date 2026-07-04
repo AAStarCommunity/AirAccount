@@ -5953,30 +5953,28 @@ pub async fn start_kms_server() -> Result<()> {
 
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
-    // API Key guard.
-    // Enabled if DB has keys OR KMS_API_KEY env var is set.
-    // If neither is configured, access is open unless KMS_REQUIRE_API_KEY=1 is set.
-    // In production, set KMS_REQUIRE_API_KEY=1 to fail-closed even before key provisioning.
+    // API Key guard — FAIL-CLOSED by default.
+    // Authentication is REQUIRED unless the operator explicitly opts into open
+    // mode with KMS_ALLOW_OPEN_MODE=1 (dev/test only). This inverts the previous
+    // fail-open default, where a board with no keys provisioned and no env set
+    // would silently accept unauthenticated requests. A public KMS must never
+    // default to open.
     let legacy_key = std::env::var("KMS_API_KEY").ok();
-    let has_db_keys = db.has_api_keys().unwrap_or(false);
-    let force_required = std::env::var("KMS_REQUIRE_API_KEY")
+    // On a DB error we cannot confirm keys exist; treat as "keys required"
+    // (fail-closed), never as open.
+    let has_db_keys = db.has_api_keys().unwrap_or(true);
+    let allow_open = std::env::var("KMS_ALLOW_OPEN_MODE")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let api_key_enabled = has_db_keys || legacy_key.is_some() || force_required;
-    if api_key_enabled {
-        let source = match (has_db_keys, legacy_key.is_some(), force_required) {
-            (true, true, _) => "DB + env",
-            (true, false, _) => "DB",
-            (false, true, _) => "env (KMS_API_KEY)",
-            (false, false, true) => {
-                "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)"
-            }
-            _ => unreachable!(),
-        };
-        println!("🔑 API Key authentication: ENABLED (source: {})", source);
+    let api_key_enabled = !allow_open;
+    if allow_open {
+        println!("⚠️  API Key authentication: DISABLED (KMS_ALLOW_OPEN_MODE=1) — all requests are unauthenticated. DEV/TEST ONLY.");
     } else {
-        println!("⚠️  API Key authentication: DISABLED — all requests are unauthenticated.");
-        println!("⚠️  To enable: run `kms-admin api-key generate` or set KMS_API_KEY / KMS_REQUIRE_API_KEY=1");
+        println!("🔑 API Key authentication: ENABLED (fail-closed default)");
+        if !has_db_keys && legacy_key.is_none() {
+            println!("⚠️  No API key provisioned — all requests will be REJECTED until you run `kms-admin api-key generate` or set KMS_API_KEY.");
+            println!("⚠️  For an intentionally open dev instance, set KMS_ALLOW_OPEN_MODE=1.");
+        }
     }
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
     let rl_filter = rate_limit_filter(server.rate_limiter.clone());
