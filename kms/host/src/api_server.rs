@@ -4269,6 +4269,25 @@ impl KmsApiServer {
 
 const KMS_VERSION: &str = "0.27.3";
 
+/// Minimal HTML-escaping for user-controlled strings interpolated into the
+/// (unauthenticated) stats dashboard. Fields like `description` come straight
+/// from CreateKey with no sanitization, so `&<>"'` must be neutralized to
+/// prevent stored XSS on a page any anonymous visitor can load.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
@@ -4299,14 +4318,23 @@ fn render_stats_page(server: &KmsApiServer) -> String {
         let st_cls = if w.status == "ready" { "ok" } else { "warn" };
         let short_id = &w.key_id[..8.min(w.key_id.len())];
         let created = w.created_at.split('T').next().unwrap_or(&w.created_at);
-        let masked_desc = if w.description.len() > 8 {
-            format!("{}…", &w.description[..8])
+        // Truncate by characters, not bytes: `&s[..8]` panics if byte 8 lands
+        // mid-UTF-8-codepoint (e.g. 7 ASCII + a multibyte char). Description is
+        // user-controlled (CreateKey), so a crafted value would panic every
+        // render of this page — a DoS on the stats dashboard.
+        let desc_trunc = if w.description.chars().count() > 8 {
+            format!("{}…", w.description.chars().take(8).collect::<String>())
         } else {
             w.description.clone()
         };
+        // This dashboard is served unauthenticated and `description` is fully
+        // user-controlled via CreateKey, so escape it (and status) before
+        // splicing into HTML to prevent stored XSS.
+        let masked_desc = html_escape(&desc_trunc);
+        let status_disp = html_escape(&w.status);
         rows.push_str(&format!(
             "<tr><td><code>{}&hellip;</code></td><td class=\"{addr_cls}\">{addr}</td><td class=\"{pk_cls}\">{pk}</td><td class=\"{st_cls}\">{}</td><td>{}</td><td>{created}</td><td>{}</td></tr>\n",
-            short_id, w.status, w.sign_count, masked_desc
+            short_id, status_disp, w.sign_count, masked_desc
         ));
     }
 
@@ -5925,30 +5953,28 @@ pub async fn start_kms_server() -> Result<()> {
 
     let server = Arc::new(KmsApiServer::new(db.clone()));
 
-    // API Key guard.
-    // Enabled if DB has keys OR KMS_API_KEY env var is set.
-    // If neither is configured, access is open unless KMS_REQUIRE_API_KEY=1 is set.
-    // In production, set KMS_REQUIRE_API_KEY=1 to fail-closed even before key provisioning.
+    // API Key guard — FAIL-CLOSED by default.
+    // Authentication is REQUIRED unless the operator explicitly opts into open
+    // mode with KMS_ALLOW_OPEN_MODE=1 (dev/test only). This inverts the previous
+    // fail-open default, where a board with no keys provisioned and no env set
+    // would silently accept unauthenticated requests. A public KMS must never
+    // default to open.
     let legacy_key = std::env::var("KMS_API_KEY").ok();
-    let has_db_keys = db.has_api_keys().unwrap_or(false);
-    let force_required = std::env::var("KMS_REQUIRE_API_KEY")
+    // On a DB error we cannot confirm keys exist; treat as "keys required"
+    // (fail-closed), never as open.
+    let has_db_keys = db.has_api_keys().unwrap_or(true);
+    let allow_open = std::env::var("KMS_ALLOW_OPEN_MODE")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let api_key_enabled = has_db_keys || legacy_key.is_some() || force_required;
-    if api_key_enabled {
-        let source = match (has_db_keys, legacy_key.is_some(), force_required) {
-            (true, true, _) => "DB + env",
-            (true, false, _) => "DB",
-            (false, true, _) => "env (KMS_API_KEY)",
-            (false, false, true) => {
-                "KMS_REQUIRE_API_KEY=1 (no keys configured — all requests will be rejected)"
-            }
-            _ => unreachable!(),
-        };
-        println!("🔑 API Key authentication: ENABLED (source: {})", source);
+    let api_key_enabled = !allow_open;
+    if allow_open {
+        println!("⚠️  API Key authentication: DISABLED (KMS_ALLOW_OPEN_MODE=1) — all requests are unauthenticated. DEV/TEST ONLY.");
     } else {
-        println!("⚠️  API Key authentication: DISABLED — all requests are unauthenticated.");
-        println!("⚠️  To enable: run `kms-admin api-key generate` or set KMS_API_KEY / KMS_REQUIRE_API_KEY=1");
+        println!("🔑 API Key authentication: ENABLED (fail-closed default)");
+        if !has_db_keys && legacy_key.is_none() {
+            println!("⚠️  No API key provisioned — all requests will be REJECTED until you run `kms-admin api-key generate` or set KMS_API_KEY.");
+            println!("⚠️  For an intentionally open dev instance, set KMS_ALLOW_OPEN_MODE=1.");
+        }
     }
     let api_key_filter = db_api_key_filter(db, legacy_key, api_key_enabled);
     let rl_filter = rate_limit_filter(server.rate_limiter.clone());
