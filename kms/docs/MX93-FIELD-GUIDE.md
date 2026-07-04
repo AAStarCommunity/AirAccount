@@ -13,11 +13,14 @@
 | 电源 | USB-C 电源口 | 5V/3A 以上 |
 | Debug USB | USB-C debug 口（靠近角落） | 串口控制台，接 Mac/PC |
 
+> 凭据一律不存 repo，见下方说明。
+
 ### 板子启动后自动做的事
 ```
 wpa_supplicant@mlan0.service  → WiFi 连接
 kms-api.service               → KMS API (port 3000)
 cloudflared.service           → Cloudflare Tunnel → kms.aastar.io
+tailscaled.service            → Tailscale VPN → 远程 SSH 入口
 ```
 **无需任何手动操作**，约 30 秒后 `https://kms.aastar.io/health` 可访问。
 
@@ -58,28 +61,43 @@ fd=open('/dev/cu.usbmodem5B6D0044901','rb+',buffering=0)
 ### 登录
 ```
 login: root
-password: REDACTED-see-1Password
+password: <串口密码，见内部凭据管理>
 ```
+> 密码不存 repo。
 
 ---
 
-## 3. SSH 连接（板子已联网时首选）
+## 3. SSH 连接
 
-板子 IP 是 DHCP 动态分配，需先扫网段：
+### 3.1 Tailscale（首选，全球任意网络可用）
+
+板子已安装 Tailscale，加入账号 `mushroomjiao82@`，**固定 IP `100.121.187.3`**，不随 DHCP 变化。
 
 ```bash
-# 如果你在同一局域网（如 192.168.2.x）
+# Mac 上直接：
+ssh mx93
+# 等价于：
+ssh root@100.121.187.3 -i ~/.ssh/id_ed25519
+
+# ~/.ssh/config 已配置：
+# Host mx93
+#   HostName 100.121.187.3
+#   User root
+#   IdentityFile ~/.ssh/id_ed25519
+#   StrictHostKeyChecking no
+```
+
+前提：Mac 和板子都在同一个 Tailscale 网络（`mushroomjiao82@`）。Mac 上运行 `tailscale status` 确认在线。
+
+### 3.2 局域网 SSH（同一 WiFi 时）
+
+```bash
+# 扫网段找板子（CMU IoT 网段 10.82.8.0/22）
 for ip in $(seq 1 254); do
-  ( nc -z -G 1 192.168.2.$ip 22 2>/dev/null && echo "192.168.2.$ip OPEN" ) &
+  ( nc -z -w 1 10.82.8.$ip 22 2>/dev/null && echo "10.82.8.$ip OPEN" ) &
 done; wait
 
-# 连接（root 无密码）
-ssh root@<IP>
-
-# 确认是正确的板子
-ssh root@<IP> 'hostname; systemctl is-active kms-api.service'
-# 期望输出: imx93-11x11-lpddr4x-frdm
-#           active
+ssh root@<IP>  # 公钥免密
 ```
 
 ---
@@ -95,25 +113,27 @@ ssh root@<IP> 'hostname; systemctl is-active kms-api.service'
 
 ### 当前已配置的网络（优先级从高到低）
 
-| SSID | 类型 | 密码/说明 | 地点 |
-|------|------|----------|------|
-| `@JumboPlusIoT5GHz` | WPA-PSK | `REDACTED-CMU-IoT-PSK-see-1Password` | CMU Thailand 学校机房 |
-| `@JumboPlusIoT` | WPA-PSK | `REDACTED-CMU-IoT-PSK-see-1Password` | CMU Thailand（2.4GHz 备用） |
-| `@JumboPlus5GHz` | WPA2-EAP PEAP | REDACTED-email（凭证待修） | CMU（暂时不通） |
-| `eduroam` | WPA2-EAP PEAP | REDACTED-email（凭证待修） | CMU eduroam（暂时不通） |
+> **注意：凭据不存 repo**。PSK/密码保存在板子 `/etc/wpa_supplicant.conf` 本地，查询方式见下方。
+
+| SSID | 类型 | 密码来源 | 地点 |
+|------|------|---------|------|
+| `@JumboPlusIoT5GHz` | WPA-PSK | CMU IoT 设备入网门户申请，登板查 `/etc/wpa_supplicant.conf` | CMU Thailand 学校机房 |
+| `@JumboPlusIoT` | WPA-PSK | 同上（2.4GHz 备用） | CMU Thailand |
+| `@JumboPlus5GHz` | WPA2-EAP PEAP | EAP 账号（凭证待确认，暂不可用） | CMU |
+| `eduroam` | WPA2-EAP PEAP | EAP 账号（凭证待确认，暂不可用） | CMU eduroam |
 | `OneplusCMU3 5Ghz` | 开放 | 无密码（需门户登录） | CMU 区域 |
-| `ChinaNet-AuRfsu-5G` | WPA-PSK | `REDACTED-home-WiFi-PSK` | 家（中国） |
-| `ChinaNet-AuRfsu` | WPA-PSK | `REDACTED-home-WiFi-PSK` | 家（中国，2.4GHz） |
+| `ChinaNet-AuRfsu-5G` | WPA-PSK | 家庭 WiFi，登板查配置 | 家（中国） |
+| `ChinaNet-AuRfsu` | WPA-PSK | 家庭 WiFi，登板查配置 | 家（中国，2.4GHz） |
 
 ### 加新 WiFi
 ```bash
-# 在板子上编辑
+# 在板子上编辑（凭据只存板子本地，不要放 repo）
 vi /etc/wpa_supplicant.conf
 
 # 加一个 PSK 网络块：
 # network={
 #     ssid="新SSID"
-#     psk="密码"
+#     psk="<PSK>"          ← 实际密码只填板子本地
 #     key_mgmt=WPA-PSK
 #     priority=40
 # }
@@ -131,7 +151,7 @@ udhcpc -i mlan0 -n -q
 1. 确认板子 WiFi MAC：`ip link show mlan0 | grep ether`（`80:a1:97:50:21:2d`）
 2. 找学校 IT/网络管理员填写 IoT 设备申请表单
 3. 填写：MAC = `80:a1:97:50:21:2d`，名称 = `AirAccount-MX93`，点 GENERATE PSK
-4. 把生成的 PSK 和 SSID 加入 wpa_supplicant.conf（见上方）
+4. **PSK 只写到板子 `/etc/wpa_supplicant.conf`，不提交 repo**
 
 ---
 
@@ -247,7 +267,39 @@ df -h /
 
 ---
 
-## 9. 关键路径汇总
+## 9. 远程部署（CA 二进制更新）
+
+板子通过 Tailscale 可从任意地方 SSH，标准部署流程：
+
+```bash
+# Step 1：本地 Docker 交叉编译（Mac 上执行）
+./scripts/mx93-build.sh ca
+# 输出：build/mx93/kms-api-server（aarch64 ELF）
+
+# Step 2：备份 + 上传 + 重启（一条命令）
+BIN=/root/AirAccount/target/release/kms-api-server
+scp build/mx93/kms-api-server mx93:/tmp/kms-api-server.new && \
+ssh mx93 "
+  cp \$BIN \${BIN}.bak-\$(date +%Y%m%d-%H%M%S) && \
+  mv /tmp/kms-api-server.new \$BIN && \
+  systemctl restart kms-api.service && \
+  sleep 3 && curl -s http://127.0.0.1:3000/health
+"
+
+# Step 3：验证公网
+curl https://kms.aastar.io/health
+```
+
+**回滚：**
+```bash
+ssh mx93 "ls /root/AirAccount/target/release/kms-api-server.bak-* | tail -1 | \
+  xargs -I{} cp {} /root/AirAccount/target/release/kms-api-server && \
+  systemctl restart kms-api.service"
+```
+
+---
+
+## 10. 关键路径汇总
 
 | 文件/路径 | 说明 |
 |----------|------|
@@ -256,9 +308,12 @@ df -h /
 | `/etc/wpa_supplicant/action.sh` | 连接成功后触发 DHCP |
 | `/root/AirAccount/target/release/kms-api-server` | KMS 二进制 |
 | `/etc/systemd/system/kms-api.service` | KMS systemd 单元 |
-| `/etc/cloudflared/` | Cloudflare 隧道配置 |
-| `/var/log/` | 系统日志 |
+| `/root/.cloudflared/config.yml` | Cloudflare 隧道配置（含 SSH ingress） |
+| `/var/lib/tailscale/tailscaled.state` | Tailscale 认证状态（持久化） |
+| `/root/kms-check.sh` | 启动自检脚本 |
+| `/var/log/kms-api.log` | KMS 服务日志 |
+| `/var/log/kms-startup-check.log` | 启动自检日志 |
 
 ---
 
-*最后更新: 2026-07-01 · MAC: 80:a1:97:50:21:2d · 公网: https://kms.aastar.io*
+*最后更新: 2026-07-01 · MAC: 80:a1:97:50:21:2d · Tailscale: 100.121.187.3 · 公网: https://kms.aastar.io*
