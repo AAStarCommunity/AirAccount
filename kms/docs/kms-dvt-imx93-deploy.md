@@ -30,13 +30,31 @@ kms/deploy/deploy-dvt.sh --config community.toml --dvt-repo ~/Dev/aastar/YetAnot
 ```
 脚本步骤(全部实测跑通):
 1. 板上装 glibc Node20（缺则下）
-2. `git archive vX.Y.Z` DVT 源码 → 上板解压
+2. `git archive vX.Y.Z` DVT 源码 → 上板解压（`--exclude node_state.json`，见下 footgun）
 3. `npm ci && npm run build`（→ dist/main.js）
-4. 生成**独立 BLS12-381** `node_state.json`（chmod 600，已存在则跳过，不复用不覆盖）
-   - ⚠️ **DVT 仓库 committed 了一个 `node_state.json` 测试 fixture**（`bls-node-001`，公共 BLS_TEST 键，"谁都能签"）。脚本解压源码时 `--exclude node_state.json` 排除它,否则会覆盖本节点独立密钥 → 跑在公共测试键上（严重）。已回报 @repo:dvt 建议 gitignore 该文件。
-5. 从 community.toml 写 `dvt.env`
-6. 装 `dvt.service`（独立端口/服务，**不碰 `kms-api.service`**）
-7. 验收：DVT `/health` + `/node/info` + KMS `/health` + RAM
+4. **手动输入 `NODE_KEY_PASSPHRASE`** → 只进 tmpfs `/run/dvt/pass`（内存，绝不落盘）
+5. 生成**独立 BLS12-381** 密钥 → **EIP-2335 加密 keystore**（scrypt，明文即刻 `shred`；已加密则跳过）
+   - ⚠️ **DVT 仓库 committed 了一个 `node_state.json` 测试 fixture**（`bls-node-001`，公共 BLS_TEST 键，"谁都能签"）。`--exclude` 排除它,否则覆盖独立密钥 → 跑在公共测试键上（严重）。已回报 @repo:dvt 建议 gitignore。
+6. 写 `dvt.env`（非秘密，600）；合约地址取 `contracts.active`（testnet/mainnet 切换）
+7. 装**加固** `dvt.service`（`ProtectSystem=strict`/`NoNewPrivileges`/... ，`EnvironmentFile=/run/dvt/pass`，**禁开机自启**，崩溃从 tmpfs 自动重启，不碰 `kms-api.service`）
+8. 验收：DVT `/health` + `/node/info`（keystore 解密） + KMS `/health` + RAM
+
+## 生产安全模型（实测验证）
+- **BLS 私钥盘上只密文**（EIP-2335 keystore，scrypt）。`NODE_KEY_PASSPHRASE` 只在 tmpfs（内存）。
+- **硬盘离线拿不到私钥**：只有密文 + scrypt，无密码。实测:清掉 `/run/dvt/pass` → 服务 fail-closed 起不来。
+- **崩溃 vs 断电**:进程崩溃 → systemd 从 tmpfs 自动重启（无需重输）；断电/重启 → tmpfs 清空 → 运维跑 `dvt-unlock.sh` 重输密码。
+- **重启恢复**:`ssh <board> 'bash /opt/dvt-build/dvt-unlock.sh'`（交互输密码 → 启动 → 验证）。
+- **KMS 私钥本就在 TEE**（永不出）；两服务只绑 127.0.0.1，公网仅 Cloudflare Tunnel。
+- **秘密清单**（全不入库，手动 provision）:keystore 密码 · operator key(ETH_PRIVATE_KEY，注册+gas) · KMS API key · tunnel token · x402 secret。
+
+## 链上注册（E2E 前置，用 DVT 现成路径，不新增功能）
+配 `ETH_PRIVATE_KEY`（= validator owner）→ `curl -XPOST 127.0.0.1:8080/node/register` 把节点 BLS 公钥
+注册到 validator（`registerPublicKey`，付 gas）。注册后才能跑 `realnode-e2e.mjs` 的链上 `validate=0`。
+p2p/DHT 自动发现以后再补。
+
+## 合约地址配置化（测试↔生产切换）
+`community.toml` 的 `[contracts_testnet]` / `[contracts_mainnet]` 两组 + `contracts.active` 选择器。
+生产合约部署后填 `contracts_mainnet` → 改 `active=mainnet` → 重跑部署/E2E,不动代码。
 
 ## §E BLS 功能验证（部署后自证节点"真能签"）
 节点 = 独立 BLS12-381 密钥,`/signature/sign` 走 owner 闸门(ERC-1271 风格,fail-closed)。验证 BLS 密码学(不依赖链上注册):
