@@ -25,9 +25,11 @@ version       = "1.9.0"
 port          = 8080                    # 独立端口,不碰 KMS
 node_name     = "example-dvt-1"
 policy_enabled = false                  # layer-2 策略门;开启需 contracts.*.policy_registry
-kdf           = "scrypt"                # BLS keystore KDF:scrypt(强,建议) | pbkdf2(轻)
-# BLS 私钥:部署脚本生成后用 EIP-2335 加密(NODE_KEY_PASSPHRASE 手动输入,见 [secrets])
-# 链上注册:配好 [secrets].ETH_PRIVATE_KEY 后,部署脚本跑 POST /node/register 注册 BLS 公钥
+kdf           = "pbkdf2"                # A55 上 DVT 官方建议 pbkdf2(scrypt 内存/CPU 偏重;解密是启动一次性)
+# build = bare-node(DVT `scripts/build-bare-node.sh`,受限板官方姿势);gen 密钥用 DVT `scripts/gen-node-state.mjs`
+# BLS 私钥:生成后 EIP-2335 加密(NODE_KEY_PASSPHRASE 手动输入 → tmpfs,见 [secrets])
+# 链上注册:配好 [secrets].ETH_PRIVATE_KEY 后 POST /node/register(registerPublicKey)—— E2E 前置
+# ownerAuth 格式(客户端签 UserOp 用):k1 owner = `0x01 ‖ personal_sign(userOpHash)`;passkey owner = `0x02 ‖ ...`
 
 [chain]
 chain_id    = 11155111                  # sepolia=11155111 · mainnet=1
@@ -39,9 +41,10 @@ entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"  # ERC-4337 EntryPoin
 [contracts]
 active = "testnet"                      # testnet | mainnet
 
+# 权威源:DVT repo `deploy/sdk-dvt-config.testnet.json`(validator 地址唯一入口)
 [contracts_testnet]
-validator       = "0xF780Cc3FB161F8df8C076f86E89CE8B685985395"  # ⚠️ 权威值待 repo:dvt 确认
-e2e_account     = "0x0000000000000000000000000000000000000000"  # ⚠️ 待 repo:airaccount-contract 给「实现 isValidOwnerAuth 的当前 AAStarAirAccountV7 测试账户」
+validator       = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"  # v1.9.0+ stake-bound validator(repo:dvt 确认)
+e2e_account     = "0x92EA8b02D34A4D5d10f0Db9Ea894e8bC72e292e8"  # AAStarAirAccountV7 v0.27.0;owner=0xb56000…(=dvt1 operator key)
 policy_registry = ""
 
 [contracts_mainnet]

@@ -41,7 +41,7 @@ RPC=$(cfg chain eth_rpc_url);       ENTRY=$(cfg chain entry_point)
 ACTIVE=$(cfg contracts active)
 VALIDATOR=$(cfg "contracts_${ACTIVE}" validator)
 NODE_VER=$(cfg runtime node_version); NODE_DIR=$(cfg runtime node_dir); DVT_DIR=$(cfg runtime dvt_dir)
-KEY="${KEY/#\~/$HOME}"; KDF="${KDF:-scrypt}"
+KEY="${KEY/#\~/$HOME}"; KDF="${KDF:-pbkdf2}"   # A55 上 DVT 建议 pbkdf2(scrypt 偏重)
 # config 校验(缺关键项就拒)
 for v in BOARD DVT_VER PORT VALIDATOR RPC DVT_DIR; do
   eval "val=\$$v"; [ -n "$val" ] || { echo "config parse failed: $v 空(检查 [contracts_$ACTIVE].validator 等)"; exit 2; }
