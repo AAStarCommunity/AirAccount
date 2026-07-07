@@ -1,0 +1,68 @@
+# community.toml — AAStar KMS+DVT 二合一单板部署 · 一个社区一份
+#
+# 复制为 community.toml,改域名/链/合约即可部署你自己的 KMS+DVT。
+# ⚠️ 秘密(密码/私钥/token)绝不写本文件 —— 见 [secrets] 段,部署时手动 provision。
+# 用法: deploy-kms-dvt.sh --config community.toml --dvt-repo <path>
+
+[community]
+name      = "example-community"
+# 域名 = KMS passkey rpId 锚点 + DVT 公网 URL。换社区 = 换域名 = 换 passkey。
+domain    = "kms.example.io"
+board_ssh = "root@100.121.187.3"        # Tailscale 固定 IP 优先
+ssh_key   = "~/.ssh/id_ed25519"
+
+# ── KMS(AirAccount)── rpId 运行期可配(KMS_RP_ID/KMS_ORIGIN env,不用重编)
+[kms]
+version = "0.27.4"
+port    = 3000                          # 只绑 127.0.0.1,公网走 Cloudflare Tunnel
+rp_id   = "kms.example.io"              # → KMS_RP_ID(passkey 域名锚点,填 community.domain)
+origin  = "https://kms.example.io"      # → KMS_ORIGIN
+profile = "prod"                        # prod=只认本域名 rpId;dev=额外认 localhost(仅开发板)
+
+# ── DVT(aNode / YetAnotherAA-Validator)──
+[dvt]
+version       = "1.9.0"
+port          = 8080                    # 独立端口,不碰 KMS
+node_name     = "example-dvt-1"
+policy_enabled = false                  # layer-2 策略门;开启需 contracts.*.policy_registry
+kdf           = "pbkdf2"                # A55 上 DVT 官方建议 pbkdf2(scrypt 内存/CPU 偏重;解密是启动一次性)
+# build = bare-node(DVT `scripts/build-bare-node.sh`,受限板官方姿势);gen 密钥用 DVT `scripts/gen-node-state.mjs`
+# BLS 私钥:生成后 EIP-2335 加密(NODE_KEY_PASSPHRASE 手动输入 → tmpfs,见 [secrets])
+# 链上注册:配好 [secrets].ETH_PRIVATE_KEY 后 POST /node/register(registerPublicKey)—— E2E 前置
+# ownerAuth 格式(客户端签 UserOp 用):k1 owner = `0x01 ‖ personal_sign(userOpHash)`;passkey owner = `0x02 ‖ ...`
+
+[chain]
+chain_id    = 11155111                  # sepolia=11155111 · mainnet=1
+# ⚠️ 公共 RPC 会 flaky 导致 owner 闸门失败,用带 key 的可靠 RPC(URL 含 key → 视作秘密,建议走 env 注入)
+eth_rpc_url = "https://eth-sepolia.g.alchemy.com/v2/<KEY>"
+entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"  # ERC-4337 EntryPoint v0.7 canonical
+
+# ── 合约地址:测试/生产双组,改 active 一键切换(需求3)──
+[contracts]
+active = "testnet"                      # testnet | mainnet
+
+# 权威源:DVT repo `deploy/sdk-dvt-config.testnet.json`(validator 地址唯一入口)
+[contracts_testnet]
+validator       = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"  # v1.9.0+ stake-bound validator(repo:dvt 确认)
+e2e_account     = "0x92EA8b02D34A4D5d10f0Db9Ea894e8bC72e292e8"  # AAStarAirAccountV7 v0.27.0;owner=0xb56000…(=dvt1 operator key)
+policy_registry = ""
+
+[contracts_mainnet]
+validator       = ""                    # ⚠️ 生产合约部署后填入
+e2e_account     = ""                    # ⚠️ 生产账户部署后填入
+policy_registry = ""
+
+[runtime]
+node_version = "v20.20.2"               # 官方 glibc linux-arm64(嵌入式板 Docker 常残缺,用 bare-node)
+node_dir     = "/opt/node20"
+dvt_dir      = "/opt/dvt-build"
+
+# ── 秘密清单(全部不在本文件,部署时手动 provision)──
+# 部署脚本会逐项提示输入,写入 tmpfs(/run,内存,重启即失)或调对应工具:
+[secrets]
+# NODE_KEY_PASSPHRASE   —— BLS keystore 解密密码,启动时手动输入,只进 tmpfs,绝不落盘。
+#                          断电重启需重输(安全);服务崩溃 systemd 从 tmpfs 自动重启。
+# ETH_PRIVATE_KEY       —— operator EOA(付 gas + 链上注册 registerPublicKey;须是 validator owner)
+# KMS_API_KEY           —— KMS API key,用 `api-key generate` 生成(hash 存 kms.db)
+# CLOUDFLARE_TUNNEL_TOKEN —— 本社区域名的 tunnel token
+# X402_AUTH_SECRET      —— (可选)x402 facilitator HMAC secret
