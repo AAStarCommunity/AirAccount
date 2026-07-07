@@ -1,7 +1,7 @@
 {
   "body": {
     "schema": "airaccount.attestation-measurements.v1",
-    "sequence": 2,
+    "sequence": 3,
     "updated": "2026-07-07",
     "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
     "measurements": [
@@ -13,6 +13,16 @@
           "features": "ree-fs-only,strict-challenge",
           "toolchain": "nightly-2024-05-15",
           "note": "Variant B + T3; PR #152/#153/#154"
+        }
+      },
+      {
+        "version": "v0.28.0-dev-strict",
+        "ta_measurement": "222fbd4dba9bffe8e3533f0c50bc5523990f1a65681d4cf88f8c9b23366d81cf",
+        "status": "current",
+        "build": {
+          "features": "ree-fs-only,strict-challenge,dev-rpid",
+          "toolchain": "nightly-2024-05-15",
+          "note": "dev-rpid 实例(kms.aastar.io,额外接受 localhost rpId);prod 板用 v0.28.0-strict"
         }
       },
       {
@@ -46,5 +56,5 @@
     ]
   },
   "publisher_key": "d0c380e835db4a7accff631961eb860980491af069278933037f970d5801711b",
-  "signature": "73241cea9796e3fc65e4d8d0a7bd14b36ba67d91841608fcaadeed22285cebb4401b143bfcb7d0a566985ef5754a588b607473ed1b561cf7669ee69b878c0a0c"
+  "signature": "185d7fa63b1414c79ab97261eb3e61b2fa60bd02731753dcefa4decac39962b9597a4934a3f14c3d7695d35dba46cb72a958fe5265c342274817eb3c1e06ef0c"
 }
