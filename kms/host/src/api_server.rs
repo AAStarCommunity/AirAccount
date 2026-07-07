@@ -5750,6 +5750,12 @@ async fn handle_rejection(
     if let Some(api_error) = err.find::<ApiError>() {
         let status = if api_error.0.contains("API key") {
             warp::http::StatusCode::UNAUTHORIZED
+        } else if api_error.0.contains("TEE queue full") {
+            // T3: bounded-queue fast-fail — honest backpressure, client should retry.
+            warp::http::StatusCode::TOO_MANY_REQUESTS
+        } else if api_error.0.contains("TEE request dropped") {
+            // T3: shed past the queue deadline — server overloaded.
+            warp::http::StatusCode::SERVICE_UNAVAILABLE
         } else if api_error.0.contains("circuit breaker") {
             warp::http::StatusCode::SERVICE_UNAVAILABLE
         } else if api_error.0.contains("TEE call timeout") {

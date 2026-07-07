@@ -341,7 +341,27 @@ struct TeeCommand {
     command: proto::Command,
     input: Vec<u8>,
     reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
+    /// T3 backpressure: when this command was enqueued. The worker drops it
+    /// (without invoking the TA) if it has waited past MAX_QUEUE_WAIT_SECS.
+    enqueued_at: Instant,
 }
+
+// ── T3 queue backpressure ──
+// The TA is a single serial worker (see TeeHandle). Under a burst, an unbounded
+// mpsc queue would accept every request and push each toward the 30s timeout —
+// the client waits 30s for a 503 it could have had instantly. Two guards:
+
+/// Max in-flight + queued TEE commands. Beyond this, `call()` fast-fails with a
+/// "TEE queue full" error (→ HTTP 429) instead of enqueuing. Sized for the
+/// single worker: at ~80 warm-sign/s, 32 deep ≈ <0.5s drain — honest backpressure.
+const MAX_QUEUE_DEPTH: usize = 32;
+
+/// A command that has waited longer than this is dropped by the worker BEFORE
+/// invoking the TA: the caller has almost certainly moved on, so spending a
+/// serial TA slot on it only delays live requests. Kept below
+/// TEE_CALL_TIMEOUT_SECS (30s) so a doomed request is shed before the caller's
+/// own timeout fires.
+const MAX_QUEUE_WAIT_SECS: u64 = 20;
 
 // ---- Circuit Breaker ----
 // Tracks consecutive TA failures. Opens circuit after threshold, blocking
@@ -480,6 +500,18 @@ impl TeeHandle {
         // Circuit breaker: reject immediately if TA is repeatedly failing
         self.cb.check()?;
 
+        // T3: bounded queue. Fast-fail with 429 rather than enqueue behind a
+        // backlog that would only time out. Checked before the counter bump so
+        // MAX_QUEUE_DEPTH is the true ceiling of accepted-but-unfinished work.
+        let depth = self.pending.load(Ordering::SeqCst);
+        if depth >= MAX_QUEUE_DEPTH {
+            return Err(anyhow::anyhow!(
+                "TEE queue full: {} in-flight (max {}) — retry shortly",
+                depth,
+                MAX_QUEUE_DEPTH
+            ));
+        }
+
         self.pending.fetch_add(1, Ordering::SeqCst);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.tx
@@ -487,6 +519,7 @@ impl TeeHandle {
                 command,
                 input,
                 reply: reply_tx,
+                enqueued_at: Instant::now(),
             })
             .map_err(|_| anyhow::anyhow!("TEE worker thread has exited"))?;
         // P0-1: bound the wait. The worker itself cannot be interrupted (the
@@ -1034,6 +1067,16 @@ fn tee_worker_loop(rx: std::sync::mpsc::Receiver<TeeCommand>) {
     println!("🔗 TEE worker: session opened");
 
     for cmd in rx.iter() {
+        // T3: shed a command that has waited past the deadline BEFORE spending a
+        // serial TA slot on it — the caller has very likely already timed out.
+        let waited = cmd.enqueued_at.elapsed().as_secs();
+        if waited >= MAX_QUEUE_WAIT_SECS {
+            let _ = cmd.reply.send(Err(anyhow::anyhow!(
+                "TEE request dropped: queued {waited}s (> {MAX_QUEUE_WAIT_SECS}s deadline) — server overloaded"
+            )));
+            continue;
+        }
+
         let result = invoke_on_session(&mut session, cmd.command, &cmd.input);
 
         if is_session_error(&result) {
