@@ -27,6 +27,9 @@ use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
 use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random, Time};
+
+// SPIKE
+mod bls_spike;
 use proto::Command;
 use secure_db::{SecureStorageClient, Storable};
 
