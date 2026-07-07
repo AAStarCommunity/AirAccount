@@ -73,7 +73,10 @@ def finalize():
         try:
             subprocess.run(cmd, check=True, timeout=30, capture_output=True)
         except Exception as e:
-            warnings.append(f"{' '.join(cmd)}: {e}")
+            # #159 review Low: 带上 systemd stderr,否则只有 return code 无从排障。
+            err = getattr(e, "stderr", b"") or b""
+            detail = err.decode(errors="replace").strip() if isinstance(err, (bytes, bytearray)) else str(err)
+            warnings.append(f"{' '.join(cmd)}: {e}" + (f" — {detail}" if detail else ""))
 
     prov = "/etc/systemd/system/kms-api.service.d/prov.conf"
     if os.path.exists(prov):
