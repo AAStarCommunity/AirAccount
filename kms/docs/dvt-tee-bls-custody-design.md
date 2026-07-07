@@ -1,0 +1,94 @@
+<!-- Created: 2026-07-07 -->
+# DVT BLS 私钥托管:KMS TEE 托管 + 自启(安全分析与实现方案)
+
+> 两轮讨论(2026-07-07)的分析背景、决策、结论与实现方案。
+> 问题:DVT 的 BLS 签名私钥现在是盘上 EIP-2335 keystore + 手动密码(断电需重输)。
+> 能否像 KMS 一样把密钥交给板子 TEE 托管、做到**自启不要密码**,且安全?
+
+---
+
+## 1. 背景
+
+- **KMS**:用户私钥在 TEE,永不可导出;每次 Sign 要**当场 passkey/WebAuthn**,且 **TA 在安全世界内部验 passkey**(纯密码学,不联网)。→ 自启安全:密钥出不来 + 不给 passkey 签不了 + 被攻破的 host 也没法让 TA 乱签。
+- **DVT**:职责是给 UserOp 做 BLS 门限共签(**第二因子**,防 owner key 被盗)。私钥现在盘上 keystore。
+- **诉求**:让 DVT 也能自启(断电后自动恢复,不用人工输密码),同时不牺牲安全。
+
+## 2. DVT 签名不是"无门槛"—— 三道门
+
+担心"DVT 起来就执行、无门槛"是误解。DVT 签名被三道门管着,**门在每次签名/链上/门限,不在开机**:
+
+1. **owner-auth 门(每操作)**:DVT 只在 `isValidOwnerAuth(userOpHash, ownerAuth)→0xa0cf00cf` 通过(账户 owner 授权了这个具体 userOp)才签。= DVT 版的 passkey 门。
+2. **链上验证门**:DVT 签名是第二因子,**单独授权不了任何事**;链上账户自己的 owner-auth 不过 → 交易废。
+3. **门限门(≥3 独立节点)**:伪造需 **≥门限个独立节点同时被攻破**,不是一个。
+
+## 3. 三种密钥托管方案对比(抗提取 vs 抗滥用)
+
+| 方案 | BLS 私钥在哪 | 抗提取(偷密钥) | 抗滥用(逼它乱签) | 自启 |
+|---|---|---|---|---|
+| **现:EIP-2335 + tmpfs 密码** | 解密后在 DVT 进程内存 | 盘窃安全;攻破运行中 DVT 可从 RAM 挖出 | owner-auth(host)+链上+门限 | ❌ 断电需重输 |
+| **A:TEE 存密码,开机解封给 DVT** | 仍进 DVT 内存 | 同上(RAM 可挖) | 同上 | ✅ |
+| **B:密钥封 TEE,TA 内软件 BLS 签名,只回签名** | **永不出 TEE** | **强(= KMS 级,攻破 DVT 也挖不到)** | owner-auth(**仍 host**)+链上+门限 | ✅ |
+
+**方案 B = 用户描述的"DVT 验证通过 → 调内部 API 让 TA 签 → 只收签名"。**
+
+## 4. KMS 与 DVT 的本质差异(为什么 B 补不了"抗滥用")
+
+- **KMS 的 TA 能自己验 passkey**(纯密码学,不联网)→ 被攻破的 host 也没法让 TA 乱签。**抗提取 + 抗滥用都强。**
+- **DVT 的 owner-auth 在链上**(要 `eth_call isValidOwnerAuth`)→ TA 在安全世界联不了网、**验不了** → owner-auth 门只能在 host(DVT)做 → **被攻破的 host 能绕过它、逼 TA 签任意 userOp**。B 把"抗提取"提到 KMS 级,但"抗滥用"补不上。
+
+## 5. 但"抗滥用"漏洞被后两道门兜住 —— 方案整体安全
+
+被攻破的 DVT 逼 TA 签了恶意 userOp:
+- **链上账户自己的 owner-auth 不过 → 废**(DVT 只是第二因子);
+- 要真得手,攻击者需 **owner key(用户 UA passkey)+ ≥门限个独立节点** —— **两个独立、都难的攻破**;
+- **攻破板子只拿到 DVT 这层,拿不到用户 owner-auth 这层**(passkey 在用户设备/TEE,板上没有)。
+
+**两层互补**:owner-auth 防 DVT 被攻破;DVT 防 owner key 被盗。单独攻破任一层都不够。
+
+**承重安全 = 门限 + 运营方独立性 > 单节点密钥托管。** 单节点用密码还是 TEE 是次要防线(defense-in-depth);真正的安全在 ≥3 个独立社区节点。
+
+## 6. 结论(决策)
+
+1. **"自启就执行"不危险** —— 签名被 owner-auth + 链上 + 门限管着,开机不解门。前提不成立。
+2. **现方案(EIP-2335 + 手动密码)已够用** —— 手动密码是盘窃/物理的额外防线,非主门。
+3. **方案 B(BLS 密钥封 TEE + TA 软件签名)= 单节点抗提取到 KMS 级 + 自启** —— 补掉"密钥可从 DVT 内存挖出"这唯一比 KMS 弱的点。**采纳为目标方案。**
+4. **B 的残留抗滥用面**(被攻破 host 逼 TA 签)由链上第二因子 + 门限 + 用户 owner-auth 兜底,**系统整体安全**。
+5. **投资优先级**:门限 + 独立性(Community Node Kit,≥3 独立节点)> 单节点托管。
+
+## 7. 实现方案(方案 B)
+
+复用 DVT 已有的 **`RUST_SIGNER_URL` 抽象**(DVT 本就把 BLS 签名可外包给一个 signer 服务)——让 **KMS TEE 充当这个 signer**:
+
+```
+DVT(host, 做 owner-auth 验证)
+   │ 验证通过 → 内部调用(localhost only)
+   ▼
+KMS 内部 BLS-sign 端点(不对公网)
+   │ CA → TA 命令
+   ▼
+KMS TA(安全世界):软件 BLS12-381 签名,密钥密封在 secure storage,永不出 TEE
+   ▲ 只回签名(EIP-2537 G2)
+```
+
+**改动分工**:
+1. **TA(kms/ta)**:引入 **no_std 软件 BLS12-381**(如 zkcrypto `bls12_381` crate + hash-to-curve),新增命令 `BlsGenKey`(生成+密封)/`BlsSign(keyId, msg)`/`BlsPubKey`;私钥密封进 secure storage(复用 wallet key 模式)。**必须**与 DVT/validator 的 DST=`BLS_SIG_..._POP_` + EIP-2537 编码**字节一致**(对 `hash-to-g2.golden` 向量)。
+2. **Host(kms/host)**:internal BLS-sign 端点(仅 127.0.0.1,不进公网 KMS API),实现 DVT `RUST_SIGNER_URL` 期望的 signer 契约。
+3. **DVT**:`RUST_SIGNER_URL=http://127.0.0.1:<port>` + `RUST_SIGNER_REQUIRED=true`;`node_state.json` 不再持有私钥(密钥在 TEE)。
+4. **自启**:BLS 密钥密封 TEE(device-bound,TA 开 session 时解封,无密码)→ KMS + DVT 都自启;手动密码保留为可选"高安全模式"。
+5. **验证**:签名与现有 @noble 路径**字节一致**(golden 向量)+ 链上 `validate=0` 通过;fail-closed 与门限不变。
+
+## 8. 风险 / 待验证(实现前先攻关)
+
+- ⚠️ **最大风险:no_std OP-TEE TA 里跑软件 BLS12-381 是否可行** —— crate 能否编到 TA 目标(no_std)、hash-to-curve 能否匹配 golden 向量、A55 安全世界内签名延迟。**先做可行性 spike(一个 TA 里 BLS sign + 对 golden 向量),过了再全量做。**
+- 需要给 TA 加命令 + 重编 + 刷 TA + 重算 measurement(生产板流程)。
+- signer 契约:核对 DVT `RUST_SIGNER_URL` 期望的请求/响应格式。
+- 迁移:现有盘上 keystore 节点 → 迁到 TEE(一次性,注意链上已注册的 slot 对应的是公钥,公钥不变即可平滑)。
+
+## 9. 落地顺序(待 review 后执行)
+
+1. **可行性 spike**:TA 里软件 BLS sign,对 `hash-to-g2.golden` + 一个 @noble 签名互验字节一致。**gate:过了才继续。**
+2. TA 命令(gen/seal/sign/pubkey)+ secure storage 密封。
+3. Host internal signer 端点(localhost)。
+4. DVT 接 `RUST_SIGNER_URL` + 去掉盘上私钥。
+5. 端到端:自启(无密码)+ 签名字节一致 + 链上 validate=0 + fail-closed/门限不变。
+6. 生产板:重编刷 TA + measurement + 迁移。
