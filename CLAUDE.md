@@ -48,6 +48,16 @@ Storage Layer    → Secure Storage in TEE
 - Brood TASK-12: AirAccount 隐形账户（70%，In Progress）
 - 进度追踪：https://www.mushroom.cv
 
+## 中国大陆社区部署（China Community Deployment）
+
+中国大陆社区成员运行自己的 KMS 节点时，Cloudflare Tunnel 被 GFW 封锁，
+需通过**香港 VPS + frp 中继**替代。完整部署指南：
+
+@/Users/jason/Dev/Brood/backlog/docs/doc-8 - 🌐-China-KMS-Tunnel-Setup.md
+
+架构分析：
+@/Users/jason/Dev/Brood/research/global-network/cloudflare-tunnel-global-availability.md
+
 ## 不要做的事
 - 不要在 TEE 之外存储或打印私钥
 - 不要绕过 WebAuthn 验证流程
