@@ -41,10 +41,18 @@ if (existsSync(keyPath)) {
   privateKey = createPrivateKey(readFileSync(keyPath, "utf8"));
   console.error(`[sign-manifest] loaded signing key from ${keyPath}`);
 } else {
-  const kp = generateKeyPairSync("ed25519");
-  privateKey = kp.privateKey;
-  writeFileSync(keyPath, privateKey.export({ type: "pkcs8", format: "pem" }));
-  console.error(`[sign-manifest] generated NEW signing key → ${keyPath} (keep offline!)`);
+  // HARDENED: never auto-generate. Auto-generating silently ROTATES the publisher
+  // key (breaks every pinned verifier) and can drop a private key into the CWD —
+  // e.g. this package dir, which then risks being shipped/committed. The publisher
+  // key must be managed explicitly and stored OUTSIDE any repo (e.g. ~/.ssh).
+  console.error(
+    `[sign-manifest] signing key NOT found at ${keyPath}\n` +
+      `  Pass the offline publisher key explicitly, e.g.:\n` +
+      `    node sign-manifest.mjs <body.json> ~/.ssh/airaccount-manifest-publisher-key.pem <out.json>\n` +
+      `  To INTENTIONALLY rotate: generate a new key OUTSIDE any repo and re-pin its\n` +
+      `  pubkey in ALL verifiers (monitor-manifest.mjs, README, deployed configs).`
+  );
+  process.exit(1);
 }
 
 // Derive the raw 32-byte public key (hex) — this is what verifiers PIN.

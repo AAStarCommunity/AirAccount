@@ -163,3 +163,6 @@ kms/host/Cargo.lock
 kms/proto/Cargo.lock
 .env.kms-test
 kms-e2e-report.md
+
+# Attestation publisher signing key — NEVER commit; lives in ~/.ssh (offline)
+packages/attestation-verifier/*.pem

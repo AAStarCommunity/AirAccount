@@ -1,14 +1,24 @@
 {
   "body": {
     "schema": "airaccount.attestation-measurements.v1",
-    "sequence": 1,
-    "updated": "2026-06-14",
+    "sequence": 2,
+    "updated": "2026-07-07",
     "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
     "measurements": [
       {
+        "version": "v0.28.0-strict",
+        "ta_measurement": "3e2651ef12f0190b42ff570185073d2f4ce7c81f138245edb6061b87247f6675",
+        "status": "current",
+        "build": {
+          "features": "ree-fs-only,strict-challenge",
+          "toolchain": "nightly-2024-05-15",
+          "note": "Variant B + T3; PR #152/#153/#154"
+        }
+      },
+      {
         "version": "v0.21.0-strict",
         "ta_measurement": "188359595eab3c9e25dbd6126f11898a5b8e3fbf8d3a303a1be2676cca6071a1",
-        "status": "current",
+        "status": "previous",
         "build": {
           "features": "ree-fs-only,strict-challenge",
           "toolchain": "nightly-2024-05-15",
@@ -36,5 +46,5 @@
     ]
   },
   "publisher_key": "d0c380e835db4a7accff631961eb860980491af069278933037f970d5801711b",
-  "signature": "092cc0c2dde68b8dbb9954cd03a1cdcadc1521510d09e26ee15aaed601b7f6d4122dac4aaee758c777c9a1576c823f40fd8b4525d3e56146300c5ec6762d0004"
+  "signature": "73241cea9796e3fc65e4d8d0a7bd14b36ba67d91841608fcaadeed22285cebb4401b143bfcb7d0a566985ef5754a588b607473ed1b561cf7669ee69b878c0a0c"
 }
