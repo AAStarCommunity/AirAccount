@@ -36,14 +36,17 @@ pub fn pubkey_valid(pk_compressed: &[u8; 48]) -> bool {
     PublicKey::from_bytes(pk_compressed).is_ok()
 }
 
-/// blst uncompressed G2(192B = 4×48 field elements)→ EIP-2537(256B = 4×64,每个 48B
-/// 左填充到 64B)。blst serialize 顺序与 EIP-2537 一致(x.c0,x.c1,y.c0,y.c1)。
-/// ⚠️ 需对 hash-to-g2.golden 向量验字节一致(实现后 benchmark + 验证阶段做)。
+/// blst uncompressed G2(192B)→ EIP-2537(256B = 4×64,每个 48B 右对齐进 64B 槽,前 16B 零)。
+/// ⚠️ blst serialize 的 Fp2 顺序是 [x.c1, x.c0, y.c1, y.c0],而 EIP-2537 precompile +
+/// DVT validator 要 [x.c0, x.c1, y.c0, y.c1] —— **每对 c0/c1 必须交换**(src_order=[1,0,3,2])。
+/// 已对 DVT `encodeG2Point` 规范编码实测字节一致(2026-07-07)。
 fn encode_g2_eip2537(uncompressed_192: &[u8; 192]) -> [u8; 256] {
     let mut out = [0u8; 256];
+    // EIP-2537 slot i ← blst chunk SRC[i](交换 c0/c1)。
+    const SRC: [usize; 4] = [1, 0, 3, 2];
     for i in 0..4 {
-        // 每个 48B field element 右对齐进 64B 槽(前 16B 零填充)。
-        out[i * 64 + 16..i * 64 + 64].copy_from_slice(&uncompressed_192[i * 48..i * 48 + 48]);
+        let src = SRC[i] * 48;
+        out[i * 64 + 16..i * 64 + 64].copy_from_slice(&uncompressed_192[src..src + 48]);
     }
     out
 }
