@@ -1,0 +1,25 @@
+# AAStar 节点自助配置向导 —— 首启拉起(社区上手 Phase 1)
+# 装:cp 到 /etc/systemd/system/ ; systemctl enable --now aastar-node-setup
+[Unit]
+Description=AAStar node self-service setup wizard (first-boot)
+After=network-online.target kms-api.service
+Wants=network-online.target
+# 幂等:已配置(kms.env 存在)则不启 —— 配置完成后本服务自然不再拉起。
+ConditionPathExists=!/etc/airaccount/kms.env
+
+[Service]
+Type=simple
+# 路径按预刷板布局调整(见 README)。
+ExecStart=/usr/bin/python3 /opt/aastar/node-setup/setup-server.py
+Restart=on-failure
+RestartSec=3
+# 向导只需写 /etc/airaccount(config)+ /run(token)。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/airaccount /run
+# 注:setup 期间 kms-api.service 需带 KMS_BLS_PROVISIONING=1(向导调 /gen-key);
+# 配置完成后运维脚本关掉 provisioning + 重启 kms-api/dvt(见 README「首启编排」)。
+
+[Install]
+WantedBy=multi-user.target

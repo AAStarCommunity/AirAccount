@@ -11,17 +11,26 @@
 
 ## 跑
 ```bash
-# 板子上（需先让 KMS 允许 provisioning）
-KMS_BLS_PROVISIONING=1 KMS_BLS_SIGNER_TOKEN=<可选> python3 setup-server.py
-# 社区浏览器访问 http://<板子IP>:8088
+# 板子上（kms-api 需带 KMS_BLS_PROVISIONING=1 才能 /gen-key）
+python3 setup-server.py          # 启动时把 SETUP TOKEN 打到 console/串口
+# 社区浏览器访问 http://<板子IP>:8088，表单里填那个 token
 ```
+或用 systemd 首启：`cp aastar-node-setup.service /etc/systemd/system/ && systemctl enable --now aastar-node-setup`（已配置则 ConditionPathExists 自动不启）。
 
-## Phase 1 骨架边界（生产前 TODO）
-- **认证**：setup 页现无认证 —— 生产要加一次性 setup token（防同网他人配置）。
-- **幂等**：重复提交应检测已配置状态。
-- **校验**：operator/rpId 格式、KMS 可达性、provisioning 是否已开。
-- **首启集成**：systemd 首启拉起本向导；配置完成后自动关闭 provisioning 开关 + 重启服务。
-- **链上注册**：接 SDK `dvtOperatorActions.registerWithProof`（Phase 3 一键）。
+## 已做（本轮加固）
+- ✅ **认证**：一次性 setup token（首启生成、打到 console/串口、只 root 可读；表单提交 constant-time 比对）→ 防同网他人配置。
+- ✅ **幂等**：已写 `kms.env` 则拒（409），systemd 层也 `ConditionPathExists` 双保险。
+- ✅ **校验**：operator 合法地址正则、rpId 非空/非 aastar.io、network 白名单、body ≤8KB、**KMS 可达性预检**（不可达给人话 503）。
+- ✅ **首启 unit**：`aastar-node-setup.service`（首启拉起、配置后自动不启）。
+
+## 首启编排（预刷板出厂状态）
+1. 出厂：kms-api.service 带 `KMS_BLS_PROVISIONING=1`；`aastar-node-setup` enabled。
+2. 社区通电联网 → 向导跑（token 打到串口/日志）→ 社区填表 → provision + 写 config。
+3. **finalize（待接线）**：配置成功后运维脚本关掉 `KMS_BLS_PROVISIONING` + 重启 kms-api/dvt + disable 本向导。
+
+## 仍待做（Phase 1→3）
+- **finalize 自动化**：向导成功后自动关 provisioning + 重启服务（上面第 3 步现为手动/脚本）。
+- **链上注册**：接 SDK `dvtOperatorActions.registerWithProof`（现为 next_steps 指引 → Phase 3 一键）。
 
 ## 只用来 web 服务的子域名（可选）
 AAStar 可给社区一个 `<community>.aastar.io` **仅用于 web 访问向导/面板**；passkey 的 rpId **必须**是社区自己的域名（身份独立）。
