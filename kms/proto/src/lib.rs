@@ -62,6 +62,16 @@ pub enum Command {
     /// No auth required — the evidence contains no secrets and is meant to be
     /// verified by anyone holding the (TOFU-registered) attestation public key.
     GetAttestation = 26,
+    /// Variant B (DVT TEE BLS custody): generate an independent BLS12-381 keypair
+    /// inside the TEE, seal the private key in secure storage (never leaves the TA),
+    /// return the 48-byte compressed G1 public key. One-time provisioning.
+    BlsGenKey = 27,
+    /// BLS-sign a 32-byte message (userOpHash) with the sealed key using the
+    /// DST BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_ (min_pk: G1 pk / G2 sig).
+    /// The private key never enters the CA/DVT — only the signature is returned.
+    BlsSign = 28,
+    /// Return the sealed BLS key's 48-byte compressed G1 public key.
+    BlsPubKey = 29,
     #[default]
     Unknown,
 }

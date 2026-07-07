@@ -8,6 +8,22 @@
 
 A production-ready private key management system built on Trusted Execution Environment (TEE) using the eth_wallet sample from Teaclave TrustZone SDK. Provides enterprise-grade security with AWS KMS API compatibility.
 
+## 部署方案 / Deployment Modes
+
+AirAccount(KMS)与 DVT([aNode](https://github.com/AAStarCommunity/YetAnotherAA-Validator) BLS 门限共签)可**独立**或**合并**部署 —— **一个方案、配置切换,改动很小**。
+
+| 场景 | 部署什么 | BLS/私钥托管 | 关键配置 |
+|---|---|---|---|
+| **① 独立 KMS** | 只 KMS | 用户私钥在 TEE,每次 passkey/WebAuthn 签、永不导出 | — |
+| **② 独立 DVT** | 只 DVT | DVT 的 BLS 私钥在 EIP-2335 keystore(盘上加密 + 手动密码) | `RUST_SIGNER_URL` 不设 |
+| **③ KMS + DVT 合并** | 单板 co-located | DVT 的 BLS 私钥托管进 **KMS TEE**(永不出、自启无需密码) | `RUST_SIGNER_URL=http://127.0.0.1:3100` |
+
+- **只想跑密钥/签名服务**(SuperPaymaster/SuperRelay 等消费方直接调 AWS-KMS 兼容 API)→ **①**。
+- **只想跑 DVT 门限节点、不跑 KMS** → **②**(标准 DVT 部署,密钥自管)。
+- **跑完整节点、要最强安全** → **③**(BLS 密钥抗提取提到 KMS 级,断电自启不用重输密码)。
+
+③ 是 ② 的**可选增强,不强绑定**:同一个 DVT 二进制,`RUST_SIGNER_URL` 一个 env 切换模式。设计与安全分析见 [`kms/docs/dvt-tee-bls-custody-design.md`](kms/docs/dvt-tee-bls-custody-design.md)。
+
 ## 🌐 Live Service
 
 **Production URL**: https://kms.aastar.io

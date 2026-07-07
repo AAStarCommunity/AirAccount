@@ -5888,6 +5888,129 @@ fn db_api_key_filter(
 // Main Server Startup
 // ========================================
 
+// Variant B: internal BLS signer for DVT — mirrors the aastar-bls-signer contract
+// (POST /sign {node_id, user_op_hash} → {signature, signature_compact, public_key}).
+// Bound to 127.0.0.1:3100 ONLY (never via the Cloudflare tunnel). DVT points its
+// RUST_SIGNER_URL here; the BLS private key stays sealed in the TA and never leaves.
+#[derive(serde::Deserialize)]
+struct BlsSignReq {
+    #[allow(dead_code)]
+    node_id: String,
+    user_op_hash: String,
+}
+
+#[derive(serde::Serialize)]
+struct BlsSignResp {
+    signature: String,
+    signature_compact: String,
+    public_key: String,
+}
+
+#[derive(serde::Serialize)]
+struct BlsGenResp {
+    key_id: String,
+    public_key: String,
+}
+
+// Codex High#2/Med#3: :3100 is localhost-only, but a co-located process could still
+// reach it. If KMS_BLS_SIGNER_TOKEN is set, require it (X-Signer-Token header) on
+// /sign + /gen-key. Unset = localhost-only default (dev / backward-compat). The token
+// gates which local process (the DVT node) may sign, not just "any local process".
+fn check_signer_token(token: &Option<String>) -> Result<(), warp::Rejection> {
+    match std::env::var("KMS_BLS_SIGNER_TOKEN") {
+        Ok(expected) if !expected.is_empty() => {
+            if token.as_deref() == Some(expected.as_str()) {
+                Ok(())
+            } else {
+                Err(warp::reject::custom(ApiError(
+                    "invalid or missing X-Signer-Token".into(),
+                )))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Provision: generate the board's single BLS key in the TA (one-time). Returns
+/// key_id + pubkey. Operator then sets KMS_BLS_KEY_ID + KMS_BLS_PUBKEY and restarts.
+/// Codex Med#3: gated behind KMS_BLS_PROVISIONING=1 (off by default) + token; the TA
+/// enforces a singleton so a loop can't fill secure storage.
+async fn bls_gen_handler(
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if std::env::var("KMS_BLS_PROVISIONING").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS provisioning disabled (set KMS_BLS_PROVISIONING=1 to enable)".into(),
+        )));
+    }
+    check_signer_token(&token)?;
+    let key_id = Uuid::new_v4();
+    match server.tee.bls_gen_key(key_id).await {
+        Ok(pk) => Ok(warp::reply::json(&BlsGenResp {
+            key_id: key_id.to_string(),
+            public_key: format!("0x{}", hex::encode(pk)),
+        })),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "BLS gen failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn bls_sign_handler(
+    req: BlsSignReq,
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    check_signer_token(&token)?;
+    // Single BLS key per board; key_id from env (set at provisioning after BlsGenKey).
+    let key_id = match std::env::var("KMS_BLS_KEY_ID")
+        .ok()
+        .and_then(|s| Uuid::parse_str(&s).ok())
+    {
+        Some(k) => k,
+        None => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_BLS_KEY_ID not configured".into(),
+            )))
+        }
+    };
+    // Codex Med#4/#5: use the provisioned pubkey from env — avoids a second TA call
+    // per sign AND avoids masking a bls_pubkey failure as public_key:"0x".
+    let pk_hex = match std::env::var("KMS_BLS_PUBKEY") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_BLS_PUBKEY not configured".into(),
+            )))
+        }
+    };
+    let hh = req.user_op_hash.trim_start_matches("0x");
+    let hb = match hex::decode(hh) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "user_op_hash must be 32-byte hex".into(),
+            )))
+        }
+    };
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hb);
+    // ta_client.bls_sign validates the 256B/96B lengths (fail-closed on ABI drift).
+    match server.tee.bls_sign(key_id, hash).await {
+        Ok((sig, compact)) => Ok(warp::reply::json(&BlsSignResp {
+            signature: format!("0x{}", hex::encode(sig)),
+            signature_compact: hex::encode(compact),
+            public_key: pk_hex,
+        })),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "BLS sign failed: {}",
+            e
+        )))),
+    }
+}
+
 pub async fn start_kms_server() -> Result<()> {
     // Initialize SQLite DB (default: /data/kms/kms.db, fallback: ./kms.db)
     let db_path = std::env::var("KMS_DB_PATH").unwrap_or_else(|_| {
@@ -6707,7 +6830,36 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
 
-    warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
+    // Variant B: internal BLS signer for DVT on 127.0.0.1:3100 ONLY (localhost,
+    // NOT exposed via the Cloudflare tunnel which only routes :3000). DVT points
+    // RUST_SIGNER_URL here so the BLS private key stays sealed in the TA.
+    let signer_server = server.clone();
+    let bls_sign_route = warp::post()
+        .and(warp::path("sign"))
+        .and(warp::path::end())
+        .and(warp::body::json())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || signer_server.clone()))
+        .and_then(bls_sign_handler);
+    let gen_server = server.clone();
+    let bls_gen_route = warp::post()
+        .and(warp::path("gen-key"))
+        .and(warp::path::end())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || gen_server.clone()))
+        .and_then(bls_gen_handler);
+    let bls_health = warp::path("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({"status": "ok", "service": "kms-bls-signer"}))
+    });
+    let signer_routes = bls_sign_route
+        .or(bls_gen_route)
+        .or(bls_health)
+        .recover(handle_rejection);
+    println!("🔏 Internal BLS signer (DVT) on http://127.0.0.1:3100 (localhost only, not via tunnel)");
+
+    let main_srv = warp::serve(routes).run(([0, 0, 0, 0], 3000));
+    let signer_srv = warp::serve(signer_routes).run(([127, 0, 0, 1], 3100));
+    tokio::join!(main_srv, signer_srv);
 
     Ok(())
 }

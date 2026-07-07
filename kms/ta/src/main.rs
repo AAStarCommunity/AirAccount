@@ -27,6 +27,9 @@ use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
 use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random, Time};
+
+// SPIKE
+mod bls;
 use proto::Command;
 use secure_db::{SecureStorageClient, Storable};
 
@@ -147,6 +150,24 @@ impl Storable for JwtSecretStore {
 
     fn unique_id(&self) -> Self::Key {
         self.id.clone()
+    }
+}
+
+/// Variant B: a sealed BLS12-381 key. The private key is stored in TEE-encrypted
+/// secure storage (like wallets) and NEVER leaves the TA — only signatures do.
+/// Codex Low#7: no `Debug` derive — the private key must never reach a log/panic.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct BlsKey {
+    key_id: String,
+    private_key: [u8; 32],
+    public_key: Vec<u8>, // 48-byte compressed G1
+}
+
+impl Storable for BlsKey {
+    type Key = String;
+
+    fn unique_id(&self) -> Self::Key {
+        self.key_id.clone()
     }
 }
 
@@ -1408,6 +1429,64 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
     Ok(proto::SignHashOutput { signature })
 }
 
+// ── Variant B: BLS (DVT 共签)—— 密钥在 TA 内生成+密封，永不出 TEE ──
+
+/// 生成独立 BLS12-381 密钥(TEE TRNG 熵)→ 密封 secure storage → 返回 48B 压缩公钥。
+/// 一次性 provision;已存在则拒绝(不覆盖）。无 passkey 门（DVT 自主签名，授权在 host owner-auth）。
+fn bls_gen_key(input: &proto::BlsGenKeyInput) -> Result<proto::BlsGenKeyOutput> {
+    let db = open_storage()?;
+    let key_id = input.key_id.to_string();
+    // Codex Med#3: enforce a singleton — one BLS key per board. Stops a looped
+    // /gen-key from filling secure storage. Removing the key is an explicit op.
+    if db.count_entries::<BlsKey>()? > 0 {
+        return Err(anyhow!(
+            "a BLS key already exists (singleton); remove it before provisioning a new one"
+        ));
+    }
+    if db.get::<BlsKey>(&key_id).is_ok() {
+        return Err(anyhow!("BLS key already exists: {}", key_id));
+    }
+    let mut ikm = [0u8; 32];
+    Random::generate(&mut ikm);
+    let (sk, pk) = bls::gen_keypair(&ikm)?;
+    if !bls::pubkey_valid(&pk) {
+        return Err(anyhow!("BLS keygen produced invalid pubkey"));
+    }
+    db.put(&BlsKey {
+        key_id: key_id.clone(),
+        private_key: sk,
+        public_key: pk.to_vec(),
+    })?;
+    Ok(proto::BlsGenKeyOutput {
+        key_id: input.key_id,
+        public_key: pk.to_vec(),
+    })
+}
+
+/// 用密封的 BLS 私钥签 32B message（userOpHash）。私钥不出 TEE，只回签名。
+fn bls_sign(input: &proto::BlsSignInput) -> Result<proto::BlsSignOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<BlsKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("BLS key not found: {}", input.key_id))?;
+    let (eip2537, compact) = bls::sign(&k.private_key, &input.message)?;
+    Ok(proto::BlsSignOutput {
+        signature: eip2537.to_vec(),
+        signature_compact: compact.to_vec(),
+    })
+}
+
+/// 返回密封 BLS 密钥的 48B 压缩公钥。
+fn bls_pubkey(input: &proto::BlsPubKeyInput) -> Result<proto::BlsPubKeyOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<BlsKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("BLS key not found: {}", input.key_id))?;
+    Ok(proto::BlsPubKeyOutput {
+        public_key: k.public_key,
+    })
+}
+
 // H-1 (DOWNGRADED to Medium — tracked as an accepted limitation / follow-up issue):
 // DeriveAddressAuto carries no passkey assertion and mutates+persists wallet state
 // (next_address_index). It is invoked by the CA immediately after wallet creation,
@@ -2544,6 +2623,9 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::ReadRollbackCounter => process(serialized_input, read_rollback_counter),
         Command::GetChallenge => process(serialized_input, get_challenge),
         Command::GetAttestation => process(serialized_input, attestation::get_attestation),
+        Command::BlsGenKey => process(serialized_input, bls_gen_key),
+        Command::BlsSign => process(serialized_input, bls_sign),
+        Command::BlsPubKey => process(serialized_input, bls_pubkey),
         _ => bail!("Unsupported command"),
     }
 }

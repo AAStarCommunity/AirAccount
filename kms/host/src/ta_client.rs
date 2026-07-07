@@ -616,6 +616,49 @@ impl TeeHandle {
         Ok(output.nonce)
     }
 
+    // ── Variant B: BLS(DVT 共签)—— 密钥在 TA 内,CA 只发命令、取签名 ──
+
+    /// 生成独立 BLS12-381 密钥(TA 内 TEE-TRNG 生成+密封)。返回 48B 压缩 G1 公钥。
+    pub async fn bls_gen_key(&self, key_id: uuid::Uuid) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::BlsGenKeyInput { key_id })
+            .context("Failed to serialize BlsGenKeyInput")?;
+        let out = self.call(proto::Command::BlsGenKey, input).await?;
+        let output: proto::BlsGenKeyOutput =
+            bincode::deserialize(&out).context("Failed to deserialize BlsGenKeyOutput")?;
+        anyhow::ensure!(
+            output.public_key.len() == 48,
+            "BLS pubkey length invalid (expected 48, got {})",
+            output.public_key.len()
+        );
+        Ok(output.public_key)
+    }
+
+    /// BLS-sign a 32-byte message with the sealed key. Returns (EIP-2537 G2 256B, compact G2 96B).
+    pub async fn bls_sign(&self, key_id: uuid::Uuid, message: [u8; 32]) -> Result<(Vec<u8>, Vec<u8>)> {
+        let input = bincode::serialize(&proto::BlsSignInput { key_id, message })
+            .context("Failed to serialize BlsSignInput")?;
+        let out = self.call(proto::Command::BlsSign, input).await?;
+        let output: proto::BlsSignOutput =
+            bincode::deserialize(&out).context("Failed to deserialize BlsSignOutput")?;
+        anyhow::ensure!(
+            output.signature.len() == 256 && output.signature_compact.len() == 96,
+            "BLS signature length invalid (EIP-2537 {} want 256, compact {} want 96)",
+            output.signature.len(),
+            output.signature_compact.len()
+        );
+        Ok((output.signature, output.signature_compact))
+    }
+
+    /// Return the sealed BLS key's 48B compressed G1 public key.
+    pub async fn bls_pubkey(&self, key_id: uuid::Uuid) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::BlsPubKeyInput { key_id })
+            .context("Failed to serialize BlsPubKeyInput")?;
+        let out = self.call(proto::Command::BlsPubKey, input).await?;
+        let output: proto::BlsPubKeyOutput =
+            bincode::deserialize(&out).context("Failed to deserialize BlsPubKeyOutput")?;
+        Ok(output.public_key)
+    }
+
     /// Force-remove a gap key from TEE secure storage.
     /// Only called when `api_server` has confirmed the wallet's passkey_pubkey
     /// is not a valid P-256 curve point. Requires TA v0.20.0+ (ForceRemoveWallet = 23).
