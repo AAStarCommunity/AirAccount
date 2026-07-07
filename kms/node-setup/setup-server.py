@@ -31,26 +31,32 @@ def provision_bls_key():
     return d["key_id"], d["public_key"]
 
 
+def _write_secure(path, content):
+    """0600 原子创建(O_CREAT 带 mode)——消除先 open(默认 umask 可能 0644)后
+    chmod 之间文件短暂 world-readable 的 TOCTOU 窗口(#156 review Low)。"""
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+
+
 def write_config(cfg):
-    """写 KMS + DVT env(config 化,社区只改这里)。0600,只 root 可读。"""
+    """写 KMS + DVT env(config 化,社区只改这里)。0600 原子创建,只 root 可读。"""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     kms_env = os.path.join(CONFIG_DIR, "kms.env")
     dvt_env = os.path.join(CONFIG_DIR, "dvt.env")
-    with open(kms_env, "w") as f:
-        f.write(
-            f"KMS_RP_ID={cfg['rp_id']}\n"
-            f"KMS_BLS_KEY_ID={cfg['key_id']}\n"
-            f"KMS_BLS_PUBKEY={cfg['bls_pubkey']}\n"
-            f"KMS_BLS_SIGNER_TOKEN={cfg['token']}\n"
-        )
-    os.chmod(kms_env, 0o600)
-    with open(dvt_env, "w") as f:
-        f.write(
-            f"RUST_SIGNER_URL={SIGNER_URL}\n"
-            f"RUST_SIGNER_REQUIRED=true\n"
-            f"RUST_SIGNER_TOKEN={cfg['token']}\n"
-        )
-    os.chmod(dvt_env, 0o600)
+    _write_secure(
+        kms_env,
+        f"KMS_RP_ID={cfg['rp_id']}\n"
+        f"KMS_BLS_KEY_ID={cfg['key_id']}\n"
+        f"KMS_BLS_PUBKEY={cfg['bls_pubkey']}\n"
+        f"KMS_BLS_SIGNER_TOKEN={cfg['token']}\n",
+    )
+    _write_secure(
+        dvt_env,
+        f"RUST_SIGNER_URL={SIGNER_URL}\n"
+        f"RUST_SIGNER_REQUIRED=true\n"
+        f"RUST_SIGNER_TOKEN={cfg['token']}\n",
+    )
     return kms_env, dvt_env
 
 
@@ -81,6 +87,9 @@ class Handler(BaseHTTPRequestHandler):
             rp_id = data["rp_id"].strip()
             operator = data["operator"].strip()
             network = data.get("network", "testnet")
+            # #156 review Low: 空字符串会绕过后续校验(rp_id="" 不 endswith aastar.io)。
+            if not rp_id or not operator:
+                raise ValueError("rp_id 和 operator 必填,不能为空")
             if rp_id.endswith("aastar.io"):
                 raise ValueError("rpId 必须是你自己的域名,不能用 aastar.io(身份独立)")
             # 1. TEE 内生成密封 BLS 密钥
