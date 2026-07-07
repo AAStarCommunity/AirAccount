@@ -53,6 +53,29 @@ ceremony() {
   echo "{\"ChallengeId\":\"$cid\",\"Credential\":$cred}"
 }
 
+# keccak256 of a hex string → hex digest (Ethereum keccak, not NIST SHA3). pycryptodome.
+keccak256_hex() { python3 -c "from Crypto.Hash import keccak; h=keccak.new(digest_bits=256); h.update(bytes.fromhex('$1')); print(h.hexdigest())"; }
+
+# ceremony_payload <keyid> <payload_hex> → assertion for a SIGNING op (Issue #68).
+# The WebAuthn challenge must COMMIT to the payload: challenge = SHA256(nonce||payload).
+# payload_hex = the 32-byte digest the TA will actually sign (SignHash=hash;
+# Sign message=keccak256(msg); Sign tx=RLP-keccak tx hash).
+ceremony_payload() {
+  local kid="$1" payload_hex="$2" ba cid chal committed cred sc
+  sc=$(cat "$SCF"); sc=$((sc+1)); echo "$sc" > "$SCF"
+  ba=$(curl -s --max-time 15 "${AK[@]}" -X POST "$BASE/BeginAuthentication" -H "Content-Type: application/json" -H "x-amz-target: TrentService.BeginAuthentication" -d "{\"KeyId\":\"$kid\"}")
+  cid=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['ChallengeId'])" 2>/dev/null)
+  chal=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['Options']['challenge'])" 2>/dev/null)
+  [ -z "$cid" ] && { echo "{}"; return 1; }
+  committed=$(python3 -c "
+import hashlib,base64
+chal='$chal'; payload=bytes.fromhex('$payload_hex')
+nonce=base64.urlsafe_b64decode(chal+'='*(-len(chal)%4))
+print(base64.urlsafe_b64encode(hashlib.sha256(nonce+payload).digest()).rstrip(b'=').decode())")
+  cred=$(python3 "$HELPER" ceremony "$PEM" "$committed" "dGVzdC1jcmVkZW50aWFs" "$sc")
+  echo "{\"ChallengeId\":\"$cid\",\"Credential\":$cred}"
+}
+
 # ceremony_grant <keyid> → assertion bound to a purpose="grant-session" challenge
 # (sign-grant-session rejects the plain 'authentication' purpose to prevent cross-op replay)
 ceremony_grant() {
@@ -91,9 +114,9 @@ chk "POST /GetPublicKey" "$(post_code GetPublicKey "{\"KeyId\":\"$KEYID\"}")" 20
 echo -e "${YEL}[4] Key ops (WebAuthn ceremony)${NC}"
 WA=$(ceremony "$KEYID")
 chk "POST /DeriveAddress" "$(post_code DeriveAddress "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/1\",\"WebAuthn\":$WA}")" 200
-WA=$(ceremony "$KEYID")
+WA=$(ceremony_payload "$KEYID" "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")  # #68: payload = the hash
 chk "POST /SignHash" "$(post_code SignHash "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"WebAuthn\":$WA}")" 200
-WA=$(ceremony "$KEYID")
+WA=$(ceremony_payload "$KEYID" "$(keccak256_hex 48656c6c6f)")  # #68: payload = keccak256(message)
 chk "POST /Sign (message)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f\",\"WebAuthn\":$WA}")" 200
 WA=$(ceremony "$KEYID")
 chk "POST /Sign (transaction)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"WebAuthn\":$WA}")" 200
