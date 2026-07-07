@@ -11,6 +11,10 @@
 set -uo pipefail
 HOST="${1:-127.0.0.1:3000}"
 BASE="http://$HOST"
+# #145 fail-closed 认证:板子有 API key 时必须发 x-api-key,否则所有 auth 端点 401。
+# 用数组保证含空格的 header 值不被 word-split。set KMS_API_KEY=... 传入。
+AK=()
+[ -n "${KMS_API_KEY:-}" ] && AK=(-H "x-api-key: $KMS_API_KEY")
 DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$DIR/p256_helper.py"
 LASTF="$(mktemp)"; SCF="$(mktemp)"; echo 1 > "$SCF"; trap 'rm -f "$LASTF" "$SCF"' EXIT
@@ -25,11 +29,11 @@ PK2=$(python3 -c "import json;print(json.load(open('$DIR/test-fixtures/user2.jso
 jbody() { python3 -c "import sys,json;d=json.load(open('$LASTF'));print(d$1)" 2>/dev/null; }
 
 # *_code: write body to $LASTF, echo http_code
-get_code()  { curl -s --max-time 15 -o "$LASTF" -w '%{http_code}' "$BASE$1"; }
-post_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' -X POST "$BASE/$1" -H "Content-Type: application/json" -H "x-amz-target: TrentService.$1" -d "$2"; }
-post_path_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' -X POST "$BASE$1" -H "Content-Type: application/json" -H "x-amz-target: TrentService.$2" ${4:+-H "$4"} -d "$3"; }
+get_code()  { curl -s --max-time 15 -o "$LASTF" -w '%{http_code}' "${AK[@]}" "$BASE$1"; }
+post_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' "${AK[@]}" -X POST "$BASE/$1" -H "Content-Type: application/json" -H "x-amz-target: TrentService.$1" -d "$2"; }
+post_path_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' "${AK[@]}" -X POST "$BASE$1" -H "Content-Type: application/json" -H "x-amz-target: TrentService.$2" ${4:+-H "$4"} -d "$3"; }
 # DeleteKey is exposed at path /DeleteKey but its AWS-KMS action name is ScheduleKeyDeletion
-del_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' -X POST "$BASE/DeleteKey" -H "Content-Type: application/json" -H "x-amz-target: TrentService.ScheduleKeyDeletion" -d "$1"; }
+del_code() { curl -s --max-time 30 -o "$LASTF" -w '%{http_code}' "${AK[@]}" -X POST "$BASE/DeleteKey" -H "Content-Type: application/json" -H "x-amz-target: TrentService.ScheduleKeyDeletion" -d "$1"; }
 
 # chk <name> <got_code> <expect_code>  (body context read from $LASTF)
 chk() {
@@ -41,7 +45,7 @@ chk() {
 ceremony() {
   local kid="$1" ba cid chal cred sc
   sc=$(cat "$SCF"); sc=$((sc+1)); echo "$sc" > "$SCF"   # strictly increasing signCount
-  ba=$(curl -s --max-time 15 -X POST "$BASE/BeginAuthentication" -H "Content-Type: application/json" -H "x-amz-target: TrentService.BeginAuthentication" -d "{\"KeyId\":\"$kid\"}")
+  ba=$(curl -s --max-time 15 "${AK[@]}" -X POST "$BASE/BeginAuthentication" -H "Content-Type: application/json" -H "x-amz-target: TrentService.BeginAuthentication" -d "{\"KeyId\":\"$kid\"}")
   cid=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['ChallengeId'])" 2>/dev/null)
   chal=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['Options']['challenge'])" 2>/dev/null)
   [ -z "$cid" ] && { echo "{}"; return 1; }
@@ -54,7 +58,7 @@ ceremony() {
 ceremony_grant() {
   local kid="$1" ba cid chal cred sc
   sc=$(cat "$SCF"); sc=$((sc+1)); echo "$sc" > "$SCF"
-  ba=$(curl -s --max-time 15 "$BASE/kms/begin-grant-session-auth?keyId=$kid")
+  ba=$(curl -s --max-time 15 "${AK[@]}" "$BASE/kms/begin-grant-session-auth?keyId=$kid")
   cid=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['ChallengeId'])" 2>/dev/null)
   chal=$(echo "$ba" | python3 -c "import sys,json;print(json.load(sys.stdin)['Options']['challenge'])" 2>/dev/null)
   [ -z "$cid" ] && { echo "{}"; return 1; }
