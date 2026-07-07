@@ -1,6 +1,19 @@
 # KMS Changelog
 
-> Updated: 2026-07-04
+> Updated: 2026-07-07
+
+## 0.28.0 (2026-07-07) — Beta6 — DVT BLS 私钥 TEE 托管(Variant B)+ 队列背压(T3)
+
+### 新增 (Feature) — Variant B:DVT BLS 私钥 KMS TEE 托管(#153）
+- TA 内软件 BLS12-381 签名(blst,DST=`_POP_`),BLS 私钥在 secure storage 密封、**永不出 TEE**、自启无需密码。
+- proto BLS 命令 27/28/29 + `BlsKey` Storable 密封 + host TeeHandle wrappers。
+- internal signer 端点 `127.0.0.1:3100`(**不经 tunnel 公网**)`POST /sign`,对齐 DVT `RUST_SIGNER_URL` 契约;`/gen-key` provision(门在 `KMS_BLS_PROVISIONING=1`)。
+- 真机 FRDM-IMX93 验证:golden verify compact + **256B EIP-2537 == DVT `encodeG2Point` 规范字节一致**(修了 EIP-2537 c0/c1 字节序 Critical)。
+- Codex review 修复:`X-Signer-Token` 认证 / TA singleton / pubkey fail-closed / ABI 长度校验 / 去 `BlsKey` Debug。
+- **不强绑定**:`RUST_SIGNER_URL` 一个 env 切换 keystore(独立 DVT)/ KMS-TEE(合并)。设计见 `kms/docs/dvt-tee-bls-custody-design.md`。
+
+### 新增 (Feature) — T3:TEE 队列背压(#152)
+- 有界队列(`MAX_QUEUE_DEPTH=32`)饱和时 **429 快速失败**;排队 >20s 丢弃 → 503。实机压测(`ab -c 300`)确认。
 
 ## 0.27.4 (2026-07-04) — Beta5 — 安全加固（stats 页 XSS/panic + 认证 fail-closed）
 

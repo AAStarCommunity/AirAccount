@@ -122,3 +122,12 @@ KMS 侧 Variant B **实现完成 + 部署板子 + 真机验证全绿**:
 4. DVT 接 `RUST_SIGNER_URL` + 去掉盘上私钥。
 5. 端到端:自启(无密码)+ 签名字节一致 + 链上 validate=0 + fail-closed/门限不变。
 6. 生产板:重编刷 TA + measurement + 迁移。
+
+## 10. X-Signer-Token 部署 wiring(co-location)
+
+signer 端点(`:3100`)默认 localhost-only。要收紧到「只有 DVT 进程能调」:
+1. 部署时生成一个随机共享密钥:`TOKEN=$(openssl rand -hex 32)`。
+2. **KMS 侧**:`KMS_BLS_SIGNER_TOKEN=$TOKEN` 写进 kms-api.service 的 EnvironmentFile(只 root 可读)。
+3. **DVT 侧**:`RUST_SIGNER_TOKEN=$TOKEN` 写进 DVT 的 env(同一密钥)。
+4. DVT 调 `/sign` 自动带 `X-Signer-Token: $TOKEN`(v1.10.0+);KMS 比对放行,读不到该 env 的其他本地进程签不了。
+- **不设 = 不强制**(向后兼容;门限 + owner-auth 仍兜底)。KMS 已支持(#153),DVT 侧 v1.10.0(PR AAStarCommunity/YetAnotherAA-Validator#182)。

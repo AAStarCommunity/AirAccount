@@ -4267,7 +4267,7 @@ impl KmsApiServer {
 // HTTP Server Routes
 // ========================================
 
-const KMS_VERSION: &str = "0.27.4";
+const KMS_VERSION: &str = "0.28.0";
 
 /// Minimal HTML-escaping for user-controlled strings interpolated into the
 /// (unauthenticated) stats dashboard. Fields like `description` come straight
