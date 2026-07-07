@@ -614,3 +614,43 @@ pub struct GetAttestationOutput {
     /// Informational only — REE time is untrusted; freshness is enforced by `nonce`.
     pub ree_time_secs: u64,
 }
+
+// ── Variant B: DVT BLS 私钥 TEE 托管(TA 内软件 BLS 签名,密钥永不出 TEE)──
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsGenKeyInput {
+    /// Caller-chosen key id (like wallet_id) to address this BLS key later.
+    pub key_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsGenKeyOutput {
+    pub key_id: Uuid,
+    /// 48-byte compressed BLS12-381 G1 public key.
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsSignInput {
+    pub key_id: Uuid,
+    /// 32-byte message (userOpHash) to hash-to-curve + sign.
+    pub message: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsSignOutput {
+    /// EIP-2537 uncompressed G2 signature (256 bytes) — matches DVT/@noble.
+    pub signature: Vec<u8>,
+    /// Compressed G2 (96 bytes) — matches noble .toHex().
+    pub signature_compact: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPubKeyInput {
+    pub key_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPubKeyOutput {
+    pub public_key: Vec<u8>,
+}
