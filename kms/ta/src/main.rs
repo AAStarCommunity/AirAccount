@@ -155,7 +155,8 @@ impl Storable for JwtSecretStore {
 
 /// Variant B: a sealed BLS12-381 key. The private key is stored in TEE-encrypted
 /// secure storage (like wallets) and NEVER leaves the TA — only signatures do.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Codex Low#7: no `Debug` derive — the private key must never reach a log/panic.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 struct BlsKey {
     key_id: String,
     private_key: [u8; 32],
@@ -1435,6 +1436,13 @@ fn sign_hash(input: &proto::SignHashInput) -> Result<proto::SignHashOutput> {
 fn bls_gen_key(input: &proto::BlsGenKeyInput) -> Result<proto::BlsGenKeyOutput> {
     let db = open_storage()?;
     let key_id = input.key_id.to_string();
+    // Codex Med#3: enforce a singleton — one BLS key per board. Stops a looped
+    // /gen-key from filling secure storage. Removing the key is an explicit op.
+    if db.count_entries::<BlsKey>()? > 0 {
+        return Err(anyhow!(
+            "a BLS key already exists (singleton); remove it before provisioning a new one"
+        ));
+    }
     if db.get::<BlsKey>(&key_id).is_ok() {
         return Err(anyhow!("BLS key already exists: {}", key_id));
     }

@@ -592,6 +592,11 @@ impl TeeHandle {
         let out = self.call(proto::Command::BlsGenKey, input).await?;
         let output: proto::BlsGenKeyOutput =
             bincode::deserialize(&out).context("Failed to deserialize BlsGenKeyOutput")?;
+        anyhow::ensure!(
+            output.public_key.len() == 48,
+            "BLS pubkey length invalid (expected 48, got {})",
+            output.public_key.len()
+        );
         Ok(output.public_key)
     }
 
@@ -602,6 +607,12 @@ impl TeeHandle {
         let out = self.call(proto::Command::BlsSign, input).await?;
         let output: proto::BlsSignOutput =
             bincode::deserialize(&out).context("Failed to deserialize BlsSignOutput")?;
+        anyhow::ensure!(
+            output.signature.len() == 256 && output.signature_compact.len() == 96,
+            "BLS signature length invalid (EIP-2537 {} want 256, compact {} want 96)",
+            output.signature.len(),
+            output.signature_compact.len()
+        );
         Ok((output.signature, output.signature_compact))
     }
 

@@ -5906,11 +5906,39 @@ struct BlsGenResp {
     public_key: String,
 }
 
-/// Provision: generate a BLS key in the TA (one-time). Returns key_id + pubkey.
-/// Operator sets KMS_BLS_KEY_ID=<key_id> and restarts. localhost:3100 only.
+// Codex High#2/Med#3: :3100 is localhost-only, but a co-located process could still
+// reach it. If KMS_BLS_SIGNER_TOKEN is set, require it (X-Signer-Token header) on
+// /sign + /gen-key. Unset = localhost-only default (dev / backward-compat). The token
+// gates which local process (the DVT node) may sign, not just "any local process".
+fn check_signer_token(token: &Option<String>) -> Result<(), warp::Rejection> {
+    match std::env::var("KMS_BLS_SIGNER_TOKEN") {
+        Ok(expected) if !expected.is_empty() => {
+            if token.as_deref() == Some(expected.as_str()) {
+                Ok(())
+            } else {
+                Err(warp::reject::custom(ApiError(
+                    "invalid or missing X-Signer-Token".into(),
+                )))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Provision: generate the board's single BLS key in the TA (one-time). Returns
+/// key_id + pubkey. Operator then sets KMS_BLS_KEY_ID + KMS_BLS_PUBKEY and restarts.
+/// Codex Med#3: gated behind KMS_BLS_PROVISIONING=1 (off by default) + token; the TA
+/// enforces a singleton so a loop can't fill secure storage.
 async fn bls_gen_handler(
+    token: Option<String>,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    if std::env::var("KMS_BLS_PROVISIONING").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS provisioning disabled (set KMS_BLS_PROVISIONING=1 to enable)".into(),
+        )));
+    }
+    check_signer_token(&token)?;
     let key_id = Uuid::new_v4();
     match server.tee.bls_gen_key(key_id).await {
         Ok(pk) => Ok(warp::reply::json(&BlsGenResp {
@@ -5926,8 +5954,10 @@ async fn bls_gen_handler(
 
 async fn bls_sign_handler(
     req: BlsSignReq,
+    token: Option<String>,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    check_signer_token(&token)?;
     // Single BLS key per board; key_id from env (set at provisioning after BlsGenKey).
     let key_id = match std::env::var("KMS_BLS_KEY_ID")
         .ok()
@@ -5937,6 +5967,16 @@ async fn bls_sign_handler(
         None => {
             return Err(warp::reject::custom(ApiError(
                 "KMS_BLS_KEY_ID not configured".into(),
+            )))
+        }
+    };
+    // Codex Med#4/#5: use the provisioned pubkey from env — avoids a second TA call
+    // per sign AND avoids masking a bls_pubkey failure as public_key:"0x".
+    let pk_hex = match std::env::var("KMS_BLS_PUBKEY") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_BLS_PUBKEY not configured".into(),
             )))
         }
     };
@@ -5951,15 +5991,13 @@ async fn bls_sign_handler(
     };
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&hb);
+    // ta_client.bls_sign validates the 256B/96B lengths (fail-closed on ABI drift).
     match server.tee.bls_sign(key_id, hash).await {
-        Ok((sig, compact)) => {
-            let pk = server.tee.bls_pubkey(key_id).await.unwrap_or_default();
-            Ok(warp::reply::json(&BlsSignResp {
-                signature: format!("0x{}", hex::encode(sig)),
-                signature_compact: hex::encode(compact),
-                public_key: format!("0x{}", hex::encode(pk)),
-            }))
-        }
+        Ok((sig, compact)) => Ok(warp::reply::json(&BlsSignResp {
+            signature: format!("0x{}", hex::encode(sig)),
+            signature_compact: hex::encode(compact),
+            public_key: pk_hex,
+        })),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS sign failed: {}",
             e
@@ -6794,12 +6832,14 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::path("sign"))
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || signer_server.clone()))
         .and_then(bls_sign_handler);
     let gen_server = server.clone();
     let bls_gen_route = warp::post()
         .and(warp::path("gen-key"))
         .and(warp::path::end())
+        .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || gen_server.clone()))
         .and_then(bls_gen_handler);
     let bls_health = warp::path("health").and(warp::get()).map(|| {
