@@ -53,7 +53,7 @@ Storage Layer    → Secure Storage in TEE
 中国大陆社区成员运行自己的 KMS 节点时，Cloudflare Tunnel 被 GFW 封锁，
 需通过**香港 VPS + frp 中继**替代。完整部署指南：
 
-@/Users/jason/Dev/Brood/backlog/docs/doc-8 - 🌐-China-KMS-Tunnel-Setup.md
+@/Users/jason/Dev/Brood/research/global-network/china-kms-tunnel-setup.md
 
 架构分析：
 @/Users/jason/Dev/Brood/research/global-network/cloudflare-tunnel-global-availability.md
