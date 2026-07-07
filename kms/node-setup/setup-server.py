@@ -11,7 +11,7 @@ aastar-node-setup — Phase 1 极简 web 向导(社区自助上手,见 docs/comm
 ⚠️ 骨架:steps 1-3 已接线,step 4 先给指引。生产前需加认证(setup token)+ 幂等 + 校验。
 用法:  KMS_BLS_PROVISIONING=1 python3 setup-server.py   # 需先让 KMS 允许 provisioning
 """
-import json, os, re, secrets, urllib.request
+import json, os, re, secrets, subprocess, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +58,37 @@ def kms_reachable():
             return r.status == 200
     except Exception:
         return False
+
+
+def finalize():
+    """配置成功后收尾(向导以 root 跑,可调 systemctl):
+    ① 关 KMS provisioning(删 drop-in,防再被 /gen-key 灌)② 重启 kms-api/dvt 让它们
+    读新 /etc/airaccount/*.env ③ disable 本向导(下次不再首启)。
+    尽力而为:某步失败不阻断,收集 warnings 回给前端。SKIP_FINALIZE=1 可跳过(测试)。"""
+    warnings = []
+    if os.environ.get("SKIP_FINALIZE") == "1":
+        return ["finalize 跳过(SKIP_FINALIZE=1)"]
+
+    def run(cmd):
+        try:
+            subprocess.run(cmd, check=True, timeout=30, capture_output=True)
+        except Exception as e:
+            # #159 review Low: 带上 systemd stderr,否则只有 return code 无从排障。
+            err = getattr(e, "stderr", b"") or b""
+            detail = err.decode(errors="replace").strip() if isinstance(err, (bytes, bytearray)) else str(err)
+            warnings.append(f"{' '.join(cmd)}: {e}" + (f" — {detail}" if detail else ""))
+
+    prov = "/etc/systemd/system/kms-api.service.d/prov.conf"
+    if os.path.exists(prov):
+        try:
+            os.remove(prov)
+        except OSError as e:
+            warnings.append(f"删 {prov}: {e}")
+    run(["systemctl", "daemon-reload"])
+    run(["systemctl", "restart", "kms-api.service"])
+    run(["systemctl", "restart", "dvt.service"])
+    run(["systemctl", "disable", "aastar-node-setup.service"])
+    return warnings
 
 
 def provision_bls_key():
@@ -153,16 +184,23 @@ class Handler(BaseHTTPRequestHandler):
             token = os.environ.get("KMS_BLS_SIGNER_TOKEN") or secrets.token_hex(32)
             # 3. 写 config
             write_config({"rp_id": rp_id, "key_id": key_id, "bls_pubkey": bls_pubkey, "token": token})
-            # 4. [Phase 1 stub] 链上注册指引
+            # 4. finalize:关 provisioning + 重启服务 + disable 向导(自动收尾)
+            warns = finalize()
+            # 5. 链上注册指引(节点不能自注册 → validator owner=AAStar 注册,或社区自建 validator)
             next_steps = (
-                "下一步(Phase 1 手动;Phase 3 一键):\n"
-                f"链上注册 TEE pubkey({network}):用 SDK dvtOperatorActions.registerWithProof\n"
-                f"  operator={operator}\n"
-                f"  blsPubkey={bls_pubkey}\n"
-                "AAStar 可用 SuperPaymaster gasless 代付这笔注册。\n"
-                "注册后重启 kms-api + dvt 服务即加入门限网络。"
+                "✅ 本地配置完成,KMS+DVT 已带新配置重启。\n\n"
+                "链上注册(节点无法自注册,需 validator owner 注册你的 pubkey):\n"
+                f"  network:   {network}\n"
+                f"  operator:  {operator}\n"
+                f"  blsPubkey: {bls_pubkey}\n"
+                "→ 把上面三项发给 AAStar(开 issue / 协同中枢)登记到 validator;\n"
+                "  AAStar 可用 SuperPaymaster gasless 代付。注册通过后你的节点即加入 ≥3 门限池。\n"
+                "  (Phase 3 会把这步做成向导内一键 gasless 提交。)"
             )
-            self._send(200, json.dumps({"bls_pubkey": bls_pubkey, "rp_id": rp_id, "next_steps": next_steps}))
+            resp = {"bls_pubkey": bls_pubkey, "rp_id": rp_id, "next_steps": next_steps}
+            if warns:
+                resp["finalize_warnings"] = warns  # 收尾有非致命告警时告知(如某服务名不同)
+            self._send(200, json.dumps(resp))
         except Exception as e:
             self._send(400, json.dumps({"error": str(e)}))
 
