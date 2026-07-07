@@ -51,10 +51,22 @@ SCP="scp -o ConnectTimeout=15 -i $KEY"
 
 echo "▶ DVT v$DVT_VER → $BOARD:$PORT (KMS 共存, bare-node, 加密 keystore, contracts=$ACTIVE)"
 
-# 1. glibc node
+# 1. glibc node —— ⚠️ 校验 sha256 防 MITM 注入恶意 runtime(否则被投毒的 node 能偷 BLS 私钥)。
+#    默认版本 pin 死 hash(MITM 改不了本脚本/git);非默认版本回退官方 SHASUMS(自证,非硬化,告警)。
+if [ "$NODE_VER" = "v20.20.2" ]; then
+  NODE_SHA256="73093db209e4e9e09dd7d15a47aeaab1b74833830df03efa5f942a1122c5fa71"
+else
+  echo "⚠️ node_version 非默认($NODE_VER):从 nodejs.org SHASUMS 取 hash(非 pin 硬化)"
+  NODE_SHA256=$(curl -fsSL "https://nodejs.org/dist/$NODE_VER/SHASUMS256.txt" | awk "/node-$NODE_VER-linux-arm64\.tar\.xz/{print \$1}")
+  [ -n "$NODE_SHA256" ] || { echo "取 SHASUMS 失败,中止"; exit 1; }
+fi
 $SSH "test -x $NODE_DIR/bin/node" || {
-  echo "▶ 安装 Node $NODE_VER (glibc arm64)"
-  $SSH "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-arm64.tar.xz && rm -rf $NODE_DIR && mkdir -p $NODE_DIR && tar xJf /tmp/node.tar.xz -C $NODE_DIR --strip-components=1"
+  echo "▶ 安装 Node $NODE_VER (glibc arm64), 校验 sha256=$NODE_SHA256"
+  $SSH "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-arm64.tar.xz \
+    && echo '$NODE_SHA256  /tmp/node.tar.xz' | sha256sum -c - \
+    && rm -rf $NODE_DIR && mkdir -p $NODE_DIR && tar xJf /tmp/node.tar.xz -C $NODE_DIR --strip-components=1 \
+    && rm -f /tmp/node.tar.xz" \
+    || { echo '❌ node 下载/校验失败(sha256 不符 = 可能 MITM 投毒)— 中止'; exit 1; }
 }
 $SSH "$NODE_DIR/bin/node --version"
 
@@ -76,27 +88,31 @@ printf "  NODE_KEY_PASSPHRASE: " >&2; read -rs PASS; echo >&2
 $SSH "mkdir -p /run/dvt && chmod 700 /run/dvt"
 printf 'NODE_KEY_PASSPHRASE=%s\n' "$PASS" | $SSH "cat > /run/dvt/pass && chmod 600 /run/dvt/pass"
 
-# 5. 生成独立 BLS 密钥(缺则生成)→ 加密成 EIP-2335 keystore(明文即刻抹除)
-echo "▶ node_state.json(独立 BLS 密钥 + EIP-2335 加密, kdf=$KDF)"
+# 5. 生成独立 BLS 密钥 → EIP-2335 加密
+#    ⚠️ 明文 BLS 私钥只在 tmpfs(/run/dvt/gen, RAM)生成+加密,**绝不落 flash**。
+#    原因:flash(eMMC/SD)有 wear-leveling,writeFileSync 覆盖/shred 前的明文扇区会残留,
+#    芯片级读可恢复。只把密文 cp 到 flash;明文全程只在 RAM,随重启清。
+echo "▶ node_state.json(独立 BLS 密钥 + EIP-2335 加密, kdf=$KDF, 明文只在 RAM)"
 $SSH "export PATH=$NODE_DIR/bin:\$PATH; cd $DVT_DIR
-  if [ ! -f node_state.json ]; then
-    node --input-type=module -e '
+  if [ -f node_state.json ] && node -e 'process.exit(require(\"./node_state.json\").keystore?0:1)'; then
+    echo '  已是加密 keystore,跳过'
+  else
+    mkdir -p /run/dvt/gen && chmod 700 /run/dvt/gen
+    # ① tmpfs 里生成明文密钥
+    NODE_NAME=\"$NODE_NAME\" node --input-type=module -e '
 import { bls12_381 as bls } from \"@noble/curves/bls12-381.js\";
 import { randomBytes } from \"crypto\"; import { writeFileSync } from \"fs\";
 const s=bls.longSignatures; let sk; do{sk=randomBytes(32);try{s.getPublicKey(sk);break}catch{}}while(true);
-writeFileSync(\"node_state.json\", JSON.stringify({nodeId:\"0x\"+randomBytes(32).toString(\"hex\"),nodeName:\"$NODE_NAME\",privateKey:\"0x\"+Buffer.from(sk).toString(\"hex\"),publicKey:s.getPublicKey(sk).toHex(),createdAt:new Date().toISOString(),description:\"production DVT node\"},null,2));
+writeFileSync(\"/run/dvt/gen/node_state.json\", JSON.stringify({nodeId:\"0x\"+randomBytes(32).toString(\"hex\"),nodeName:process.env.NODE_NAME,privateKey:\"0x\"+Buffer.from(sk).toString(\"hex\"),publicKey:s.getPublicKey(sk).toHex(),createdAt:new Date().toISOString(),description:\"production DVT node\"},null,2));
 console.log(\"  new BLS pubkey\", s.getPublicKey(sk).toHex().slice(0,24)+\"...\");'
-  fi
-  # 若还是明文(有 privateKey 无 keystore)→ 加密 + 抹明文
-  if node -e 'const s=require(\"./node_state.json\"); process.exit(s.keystore?0:1)'; then
-    echo '  已是加密 keystore,跳过'
-  else
+    # ② tmpfs 里加密(encrypt-node-key.mjs 从 scripts 找 dist;file 参数可任意路径)
     set -a; . /run/dvt/pass; set +a
-    KDF=$KDF node scripts/encrypt-node-key.mjs node_state.json >/dev/null
-    shred -u node_state.json.bak 2>/dev/null || rm -f node_state.json.bak
-    echo '  已加密为 EIP-2335 keystore,明文已抹'
-  fi
-  chmod 600 node_state.json"
+    KDF=$KDF node scripts/encrypt-node-key.mjs /run/dvt/gen/node_state.json >/dev/null
+    # ③ 只把密文搬到 flash;明文(含 .bak)shred + 随 tmpfs/重启清
+    cp /run/dvt/gen/node_state.json node_state.json && chmod 600 node_state.json
+    shred -u /run/dvt/gen/node_state.json /run/dvt/gen/node_state.json.bak 2>/dev/null; rm -rf /run/dvt/gen
+    echo '  BLS 密钥在 RAM 生成+加密,只密文落盘(明文从未触 flash)'
+  fi"
 
 # 6. env(非秘密)
 echo "▶ dvt.env"

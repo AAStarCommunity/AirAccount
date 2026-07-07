@@ -18,9 +18,12 @@ unset PASS
 
 systemctl reset-failed dvt.service 2>/dev/null || true
 systemctl start dvt.service
-echo "▶ 已启动,等 25s 验证..."
+# 端口从 dvt.env 读(与 community.toml 配置一致),不硬编码 8080
+PORT="$(grep -E '^PORT=' /opt/dvt-build/dvt.env 2>/dev/null | cut -d= -f2 | tr -d ' ')"
+PORT="${PORT:-8080}"
+echo "▶ 已启动,等 25s 验证(:$PORT)..."
 sleep 25
-if curl -sf -m5 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+if curl -sf -m5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   echo "✅ DVT 已解锁并运行(keystore 解密成功)"
   grep -aiE "encrypted keystore" /opt/dvt-build/dvt.log 2>/dev/null | tail -1 | sed 's/\x1b\[[0-9;]*m//g'
 else
