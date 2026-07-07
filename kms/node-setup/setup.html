@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AAStar 节点自助配置 / Node Setup</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  label { display: block; margin: 1rem 0 0.3rem; font-weight: 600; }
+  input, select { width: 100%; padding: 0.5rem; font-size: 1rem; box-sizing: border-box; }
+  .hint { color: #666; font-size: 0.85rem; margin-top: 0.2rem; }
+  button { margin-top: 1.5rem; padding: 0.7rem 1.5rem; font-size: 1rem; cursor: pointer; }
+  #status { margin-top: 1.5rem; padding: 1rem; border-radius: 6px; white-space: pre-wrap; display: none; }
+  .ok { background: #e6f7e6; } .err { background: #fdeaea; }
+</style>
+</head>
+<body>
+<h1>🍄 AAStar 社区节点自助配置</h1>
+<p>填几项,点提交,板子会自动生成密钥、写配置、准备注册。<b>密钥全程在 TEE 内,不会显示或离开板子。</b></p>
+
+<form id="f">
+  <label>社区节点名 / Node name</label>
+  <input name="node_name" required placeholder="my-community-node" />
+
+  <label>你的域名(passkey rpId)/ Your domain</label>
+  <input name="rp_id" required placeholder="node.mycommunity.org" />
+  <div class="hint">⚠️ 必须是你自己的域名(身份独立)。子域名也行。不要用 aastar.io。</div>
+
+  <label>Operator 钱包地址 / Operator address</label>
+  <input name="operator" required placeholder="0x..." pattern="0x[0-9a-fA-F]{40}" />
+  <div class="hint">链上注册用。没有 ETH 也行——AAStar 用 SuperPaymaster gasless 代付。</div>
+
+  <label>网络 / Network</label>
+  <select name="network">
+    <option value="testnet">测试网 Sepolia(推荐先试)</option>
+    <option value="mainnet">主网 Mainnet</option>
+  </select>
+
+  <button type="submit">提交并配置 / Configure</button>
+</form>
+
+<div id="status"></div>
+
+<script>
+const f = document.getElementById('f'), s = document.getElementById('status');
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  s.style.display = 'block'; s.className = ''; s.textContent = '配置中…';
+  const data = Object.fromEntries(new FormData(f));
+  try {
+    const r = await fetch('/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const j = await r.json();
+    if (r.ok) {
+      s.className = 'ok';
+      s.textContent = '✅ 配置完成!\n\n' +
+        'BLS 公钥(链上注册用): ' + j.bls_pubkey + '\n' +
+        'rpId: ' + j.rp_id + '\n\n' + (j.next_steps || '');
+    } else {
+      s.className = 'err'; s.textContent = '❌ 失败: ' + (j.error || r.status);
+    }
+  } catch (err) { s.className = 'err'; s.textContent = '❌ 网络错误: ' + err.message; }
+});
+</script>
+</body>
+</html>
