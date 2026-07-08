@@ -63,8 +63,38 @@
 </div>
 
 <h2>下载</h2>
-<a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.28.0">airaccount-node（KMS+DVT 合并）</a>
-<a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-kms-v0.28.0">airaccount-kms（独立 KMS）</a>
+<div id="dl-dynamic">
+  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.28.0">airaccount-node（KMS+DVT 合并）</a>
+  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-kms-v0.28.0">airaccount-kms（独立 KMS）</a>
+  <span class="note" id="dl-status">（默认链接;正在拉取最新版本…）</span>
+</div>
+<script>
+// 动态拉 GitHub Releases,列出最新的 airaccount-kms / airaccount-node(带 tarball)。
+(async () => {
+  const box = document.getElementById('dl-dynamic'), status = document.getElementById('dl-status');
+  try {
+    const r = await fetch('https://api.github.com/repos/AAStarCommunity/AirAccount/releases?per_page=30');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rels = await r.json();
+    const pick = p => rels.filter(x => x.tag_name.startsWith(p) && !x.draft).sort((a,b)=> (a.created_at<b.created_at?1:-1))[0];
+    const node = pick('airaccount-node'), kms = pick('airaccount-kms');
+    if (!node && !kms) throw new Error('无 release');
+    box.innerHTML = '';
+    for (const [rel, label] of [[node,'airaccount-node（KMS+DVT 合并）'],[kms,'airaccount-kms（独立 KMS）']]) {
+      if (!rel) continue;
+      const asset = (rel.assets||[]).find(a => a.name.endsWith('.tar.gz'));
+      const href = asset ? asset.browser_download_url : rel.html_url;
+      const a = document.createElement('a'); a.className='dl'; a.href=href;
+      a.textContent = `${label} · ${rel.tag_name.replace(/^airaccount-(kms|node)-/,'')}`;
+      box.appendChild(a);
+    }
+    const note = document.createElement('span'); note.className='note';
+    note.textContent = '（GitHub Releases 实时;点击直接下 tarball）'; box.appendChild(note);
+  } catch (e) {
+    if (status) status.textContent = '（拉取失败,用上方默认链接:' + e.message + '）';
+  }
+})();
+</script>
 <table>
   <tr><th>发布物</th><th>用途</th><th>含</th></tr>
   <tr><td><b>airaccount-node</b></td><td>完整社区节点(KMS+DVT 门限共签)</td><td>KMS TA/CA + 签名 manifest + DVT v1.10.0 引用 + 部署配置</td></tr>

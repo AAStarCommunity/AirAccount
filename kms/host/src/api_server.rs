@@ -6130,6 +6130,12 @@ pub async fn start_kms_server() -> Result<()> {
             warp::reply::html(html)
         });
 
+    // Community node download portal (Phase 3 onboarding) — compiled in, served at /portal.
+    let portal = warp::path("portal")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| warp::reply::html(include_str!("../../portal/index.html")));
+
     // Health check (Issue #73: probes real attestation capability)
     let server_health = server.clone();
     let health = warp::path("health")
@@ -6705,6 +6711,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     // Box route groups to break warp's recursive type nesting (>~20 .or() chains overflow).
     let group1 = index
         .or(test_ui)
+        .or(portal)
         .or(health)
         .or(measurements_manifest)
         .or(measurements_manifest_proof)
