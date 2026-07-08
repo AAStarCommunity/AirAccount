@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AAStar 社区节点 · 下载与自助部署</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f6f7f9; --border:#e2e4e8; --accent:#5e6ad2; --ok:#27a644; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16171a; --fg:#eceef1; --muted:#9aa0aa; --card:#1e2024; --border:#2c2f36; --accent:#8b93e8; } }
+  * { box-sizing:border-box; }
+  body { font-family:system-ui,-apple-system,sans-serif; max-width:860px; margin:0 auto; padding:2rem 1rem 4rem; line-height:1.6; background:var(--bg); color:var(--fg); }
+  h1 { font-size:1.8rem; margin-bottom:.2rem; } h2 { font-size:1.3rem; margin-top:2.5rem; border-bottom:1px solid var(--border); padding-bottom:.4rem; }
+  .sub { color:var(--muted); margin-top:0; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:.8rem; margin:1.5rem 0; }
+  .step { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem; }
+  .step b { color:var(--accent); }
+  .tier { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1.2rem; margin:1rem 0; }
+  .tier h3 { margin:0 0 .3rem; } .badge { font-size:.75rem; color:var(--ok); font-weight:600; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,monospace; }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:.8rem; overflow-x:auto; font-size:.85rem; }
+  code { background:var(--card); padding:.1rem .3rem; border-radius:4px; font-size:.9em; }
+  a { color:var(--accent); }
+  .dl { display:inline-block; margin:.3rem .5rem .3rem 0; padding:.5rem 1rem; background:var(--accent); color:#fff; border-radius:8px; text-decoration:none; font-weight:600; font-size:.9rem; }
+  .note { color:var(--muted); font-size:.85rem; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; font-size:.9rem; }
+  th,td { border:1px solid var(--border); padding:.5rem .6rem; text-align:left; } th { background:var(--card); }
+  .scaffold { background:#fff3cd; color:#664d03; border-radius:8px; padding:.6rem 1rem; font-size:.85rem; margin:1rem 0; }
+  @media (prefers-color-scheme: dark){ .scaffold{ background:#3a2e00; color:#ffe08a; } }
+</style>
+</head>
+<body>
+<h1>🍄 AAStar 社区节点</h1>
+<p class="sub">买一块 MX93 主板,自助起你自己的 <b>KMS + DVT 节点</b>,加入 Mycelium 门限网络。不需要懂 CLI / 编译 / Git。</p>
+
+<div class="scaffold">⚠️ 脚手架版(Phase 3 起步)—— 下载链接与 gasless 一键注册待接线;当前引导到 GitHub Releases + 自助向导。</div>
+
+<h2>三步走</h2>
+<div class="steps">
+  <div class="step"><b>① 拿到板子</b><br>买 NXP FRDM-IMX93,或找 AAStar 要预刷板(邮寄)。</div>
+  <div class="step"><b>② 装上节点</b><br>预刷板直接开机;或刷镜像 / 跑一条 installer 命令。</div>
+  <div class="step"><b>③ 浏览器配置</b><br>开机联网 → 打开板子 IP:8088 → 填几项 → 完成,加入门限网络。</div>
+</div>
+
+<h2>选一档傻瓜度</h2>
+
+<div class="tier">
+  <h3>A · 预刷板(最省心)<span class="badge">★★★ 零刷机</span></h3>
+  AAStar 刷好板子邮寄给你。通电 → 联网 → 浏览器打开 <code>http://&lt;板子IP&gt;:8088</code> 跑配置向导。
+  <p class="note">适合:不想碰刷机的社区。找 AAStar 申请预刷板。</p>
+</div>
+
+<div class="tier">
+  <h3>B · 下载镜像自刷 <span class="badge">★★ 有 GUI</span></h3>
+  下 <code>.wic</code> 整盘镜像 → <a href="https://etcher.balena.io/">balenaEtcher</a> 拖拽刷 SD/eMMC → 开机 → 同 A 的向导。
+  <p class="note">⏳ 镜像发布待 CI(Yocto)就绪。暂用下面 C 档 installer。</p>
+</div>
+
+<div class="tier">
+  <h3>C · 基础镜像 + 一条命令 <span class="badge">★ 需一条命令</span></h3>
+  刷 NXP 官方 FRDM-IMX93 OP-TEE 基础镜像(含 OP-TEE),然后:
+  <pre>curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/aastar-node-installer.sh | sudo bash</pre>
+  自动装 KMS + DVT + 配置向导。详见 <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/phase2-image.md">Phase 2 镜像文档</a>。
+</div>
+
+<h2>下载</h2>
+<a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.28.0">airaccount-node（KMS+DVT 合并）</a>
+<a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-kms-v0.28.0">airaccount-kms（独立 KMS）</a>
+<table>
+  <tr><th>发布物</th><th>用途</th><th>含</th></tr>
+  <tr><td><b>airaccount-node</b></td><td>完整社区节点(KMS+DVT 门限共签)</td><td>KMS TA/CA + 签名 manifest + DVT v1.10.0 引用 + 部署配置</td></tr>
+  <tr><td><b>airaccount-kms</b></td><td>只跑密钥/签名服务(不做 DVT)</td><td>KMS TA/CA + 签名 manifest + 部署脚本</td></tr>
+</table>
+<p class="note">DVT 独立部署(只跑 DVT、不跑 KMS)见 <a href="https://github.com/AAStarCommunity/YetAnotherAA-Validator">YetAnotherAA-Validator</a>。</p>
+
+<h2>配置向导会问什么</h2>
+<table>
+  <tr><th>项</th><th>说明</th></tr>
+  <tr><td>Setup Token</td><td>板子串口/日志打印的一次性令牌(证明你能访问板子)</td></tr>
+  <tr><td>你的域名(rpId)</td><td>⚠️ 必须是你自己的域名(passkey 身份独立),不能用 aastar.io</td></tr>
+  <tr><td>Operator 地址</td><td>链上注册用;没 ETH 也行,AAStar 可 gasless 代付</td></tr>
+  <tr><td>网络</td><td>测试网 Sepolia(先试)/ 主网</td></tr>
+</table>
+<p class="note">向导做:TEE 内生成密封 BLS 密钥(永不出板)→ 写配置 → 收尾重启 → 给出注册指引。私钥全程不显示、不离开 TEE。</p>
+
+<h2>了解更多</h2>
+<ul>
+  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/community-onboarding-program.md">社区自助上手程序(三阶段设计)</a></li>
+  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/dvt-tee-bls-custody-design.md">KMS-TEE BLS 托管(设计 + 安全分析)</a></li>
+  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/README.md">AirAccount KMS README</a> · <a href="https://www.mushroom.cv">Mycelium Protocol</a></li>
+</ul>
+<p class="note">© AAStar · 数字公共物品 · 开源免费无许可</p>
+</body>
+</html>
