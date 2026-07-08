@@ -56,6 +56,33 @@ ceremony() {
 # keccak256 of a hex string → hex digest (Ethereum keccak, not NIST SHA3). pycryptodome.
 keccak256_hex() { python3 -c "from Crypto.Hash import keccak; h=keccak.new(digest_bits=256); h.update(bytes.fromhex('$1')); print(h.hexdigest())"; }
 
+# #115 mint_label_digest = SHA256(tag ‖ wallet_id[16] ‖ SHA256(label)). $1=uuid $2=label $3=tag
+mint_digest() { python3 -c "
+import hashlib,uuid
+u=uuid.UUID('$1').bytes
+print(hashlib.sha256(b'$3'+u+hashlib.sha256(b'$2').digest()).hexdigest())"; }
+
+# #115 refresh digest = SHA256("AA-AGENT-REFRESH-v2" ‖ wallet[16] ‖ agent_index_u32_be). $1=uuid $2=index
+refresh_digest() { python3 -c "
+import hashlib,uuid
+print(hashlib.sha256(b'AA-AGENT-REFRESH-v2'+uuid.UUID('$1').bytes+int('$2').to_bytes(4,'big')).hexdigest())"; }
+
+# legacy tx signing hash (EIP-155): keccak(RLP([nonce,gasPrice,gas,to,value,data,chainId,0,0]))
+# matches Wallet::tx_signing_hash. args via env TX_* (hex 0x or int).
+tx_sign_hash() { python3 -c "
+from Crypto.Hash import keccak
+def rlp(x):
+    if isinstance(x,list):
+        b=b''.join(rlp(i) for i in x); return _len(0xc0,b)
+    return _len(0x80,x) if not(len(x)==1 and x[0]<0x80) else x
+def _len(off,b):
+    if len(b)<56: return bytes([off+len(b)])+b
+    L=len(b).to_bytes((len(b).bit_length()+7)//8,'big'); return bytes([off+55+len(L)])+L+b
+def i2b(n): return b'' if n==0 else n.to_bytes((n.bit_length()+7)//8,'big')
+h='$1'  # to address (0x + 40 hex)
+fields=[i2b($2),i2b($3),i2b($4),bytes.fromhex(h[2:]),i2b($5),bytes.fromhex('$6'),i2b($7),b'',b'']
+k=keccak.new(digest_bits=256); k.update(rlp(fields)); print(k.hexdigest())"; }
+
 # ceremony_payload <keyid> <payload_hex> → assertion for a SIGNING op (Issue #68).
 # The WebAuthn challenge must COMMIT to the payload: challenge = SHA256(nonce||payload).
 # payload_hex = the 32-byte digest the TA will actually sign (SignHash=hash;
@@ -118,7 +145,7 @@ WA=$(ceremony_payload "$KEYID" "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6
 chk "POST /SignHash" "$(post_code SignHash "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Hash\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"WebAuthn\":$WA}")" 200
 WA=$(ceremony_payload "$KEYID" "$(keccak256_hex 48656c6c6f)")  # #68: payload = keccak256(message)
 chk "POST /Sign (message)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Message\":\"0x48656c6c6f\",\"WebAuthn\":$WA}")" 200
-WA=$(ceremony "$KEYID")
+WA=$(ceremony_payload "$KEYID" "$(tx_sign_hash 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18 0 0x4a817c800 21000 0xde0b6b3a7640000 "" 1)")  # #68: payload = RLP-keccak tx hash
 chk "POST /Sign (transaction)" "$(post_code Sign "{\"KeyId\":\"$KEYID\",\"DerivationPath\":\"m/44'/60'/0'/0/0\",\"Transaction\":{\"chainId\":1,\"nonce\":0,\"to\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\"value\":\"0xde0b6b3a7640000\",\"gasPrice\":\"0x4a817c800\",\"gas\":21000,\"data\":\"\"},\"WebAuthn\":$WA}")" 200
 
 echo -e "${YEL}[5] ChangePasskey (isolated key — avoids changing main key's passkey)${NC}"
@@ -146,11 +173,11 @@ chk "admin/purge-key absent in release → 404" "$(post_path_code /admin/purge-k
 echo -e "${YEL}[7b] Agent key flow (ceremony → Bearer JWT)${NC}"
 post_code CreateKey "{\"Description\":\"ak\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
 HKID=$(jbody "['KeyMetadata']['KeyId']"); sleep 2
-WA=$(ceremony "$HKID")
+WA=$(ceremony_payload "$HKID" "$(mint_digest "$HKID" e2e AA-AGENT-MINT-v2)")  # #68: mint_label_digest
 chk "POST /kms/create-agent-key" "$(post_path_code /kms/create-agent-key CreateAgentKey "{\"humanKeyId\":\"$HKID\",\"label\":\"e2e\",\"webAuthnAssertion\":$WA}")" 200
 ACRED=$(jbody "['agentCredential']"); AKID=$(jbody "['keyId']")
 chk "POST /kms/sign-agent (Bearer JWT)" "$(post_path_code /kms/sign-agent SignAgent "{\"keyId\":\"$AKID\",\"payload\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"accountAddress\":\"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\"}" "Authorization: Bearer $ACRED")" 200
-WA=$(ceremony "$HKID")
+WA=$(ceremony_payload "$HKID" "$(refresh_digest "$HKID" "$(echo "$AKID" | cut -d: -f2)")")  # #68: agent_refresh_digest(wallet,index)
 chk "POST /kms/refresh-agent-credential" "$(post_path_code /kms/refresh-agent-credential RefreshAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}" "Authorization: Bearer $ACRED")" 200
 WA=$(ceremony "$HKID")
 chk "POST /kms/revoke-agent-credential" "$(post_path_code /kms/revoke-agent-credential RevokeAgentCredential "{\"keyId\":\"$AKID\",\"webAuthnAssertion\":$WA}")" 200
@@ -169,7 +196,7 @@ chk "POST /kms/sign-p256-grant-session" "$(post_path_code /kms/sign-p256-grant-s
 # P256 session key: create (ceremony) → returns agentCredential → sign-p256-user-op (Bearer)
 post_code CreateKey "{\"Description\":\"p256s\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_SECG_P256K1\",\"Origin\":\"AWS_KMS\",\"PasskeyPublicKey\":\"$PK\"}" >/dev/null
 PHKID=$(jbody "['KeyMetadata']['KeyId']"); sleep 2
-WA=$(ceremony "$PHKID")
+WA=$(ceremony_payload "$PHKID" "$(mint_digest "$PHKID" e2e AA-P256-SESSION-MINT-v2)")  # #68: mint_label_digest
 chk "POST /kms/create-p256-session-key" "$(post_path_code /kms/create-p256-session-key CreateP256SessionKey "{\"humanKeyId\":\"$PHKID\",\"label\":\"e2e\",\"webAuthnAssertion\":$WA}")" 200
 PCRED=$(jbody "['agentCredential']"); PKID=$(jbody "['keyId']")
 chk "POST /kms/sign-p256-user-op (Bearer JWT)" "$(post_path_code /kms/sign-p256-user-op SignP256UserOp "{\"keyId\":\"$PKID\",\"payload\":\"0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\",\"accountAddress\":\"$ADDR\"}" "Authorization: Bearer $PCRED")" 200
