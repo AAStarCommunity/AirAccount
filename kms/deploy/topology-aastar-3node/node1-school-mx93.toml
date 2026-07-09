@@ -1,0 +1,59 @@
+# node1 · 学校机房 MX93（新到板）· KMS 生产 + DVT1
+# BLS 私钥 = KMS TEE 托管（Variant B / CC-24）：RUST_SIGNER_URL=http://127.0.0.1:3100
+# 秘密绝不写本文件 —— 见 [secrets]，部署时手动 provision。
+
+[community]
+name      = "aastar"
+domain    = "kms.aastar.io"                 # KMS passkey rpId 锚点 + DVT 公网 URL
+board_ssh = "root@TODO_TAILSCALE_IP"        # ⚠️ 到货刷板后填 Tailscale 固定 IP
+ssh_key   = "~/.ssh/id_ed25519"
+
+[kms]
+version = "0.28.1"
+port    = 3000                              # 只绑 127.0.0.1，公网走 Cloudflare Tunnel
+rp_id   = "kms.aastar.io"
+origin  = "https://kms.aastar.io"
+profile = "prod"                            # prod=只认本域名 rpId（生产板必须 prod）
+
+[dvt]
+version        = "1.9.0"
+port           = 8080
+node_name      = "aastar-dvt-1"
+policy_enabled = false
+kdf            = "pbkdf2"
+# ── 本节点特有：DVT BLS 私钥托管进 KMS TEE（私钥永不出 TEE，断电自启无需密码）──
+# 部署时在 DVT env 注入（deploy-dvt.sh 未消费此段，见 runbook）：
+#   RUST_SIGNER_URL=http://127.0.0.1:3100
+#   RUST_SIGNER_REQUIRED=true
+#   RUST_SIGNER_TOKEN=<KMS_BLS_SIGNER_TOKEN>   # 若 KMS 设了 token（Codex High#2）
+# 迁移：KMS gen-key 出新 BLS pubkey → 链上 registerBLSPublicKey 重注册 → 切 RUST_SIGNER_URL
+
+[chain]
+chain_id    = 11155111                      # sepolia；主网切 1
+eth_rpc_url = "https://eth-sepolia.g.alchemy.com/v2/<KEY>"   # URL 含 key → 走 env 注入
+entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"  # ERC-4337 EntryPoint v0.7
+
+[contracts]
+active = "testnet"                          # 测试网正式版；主网前改 mainnet
+
+[contracts_testnet]
+validator       = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"  # v1.9.0（repo:dvt 权威源）
+e2e_account     = "0x92EA8b02D34A4D5d10f0Db9Ea894e8bC72e292e8"  # AAStarAirAccountV7 v0.27.0
+policy_registry = ""
+
+[contracts_mainnet]
+validator       = ""                        # ⚠️ 生产合约部署后填（CC-30）
+e2e_account     = ""
+policy_registry = ""
+
+[runtime]
+node_version = "v20.20.2"
+node_dir     = "/opt/node20"
+dvt_dir      = "/opt/dvt-build"
+
+[secrets]
+# NODE_KEY_PASSPHRASE     —— node1 用 TEE 托管，DVT 本地 keystore 密码非必需（TEE 自启）
+# ETH_PRIVATE_KEY         —— dvt-1 operator EOA（付 gas + registerBLSPublicKey；须是 validator owner）
+# KMS_API_KEY             —— KMS API key（api-key generate）
+# KMS_BLS_SIGNER_TOKEN    —— :3100 signer 访问 token（防同主机任意进程调 /sign）
+# CLOUDFLARE_TUNNEL_TOKEN —— kms.aastar.io tunnel token
