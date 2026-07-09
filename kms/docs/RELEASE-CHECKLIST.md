@@ -46,6 +46,7 @@
 - [ ] `kms/CHANGELOG.md`：新增 `## vX.Y.Z (<日期>) — BetaN — <主题>` 段（新增/安全/文档/测试/版本 分节）+ 更新顶部 `> Updated:` 日期。
 - [ ] **feature 变动文档**：行为/接口变了就更新对应设计文档 + `README.md` 正文相关段（端点数、测试计数、特性列表）。
 - [ ] `docs/design/vX.Y+1.0-plan.md`：滚动出下一版计划（归拢未做项 + 主题）。
+- [ ] **对外版本号带产品名**（Cooperation-Center CC-14 约定）：CHANGELOG / Release notes / PR 标题 / 跨仓通知等人类可读文本一律写全 **`AirAccount KMS openapi X.Y.Z`**，禁止裸报「0.27」这类无产品名数字；tag 与 `Cargo.toml`/`openapi.yaml` 的 version 字段保持干净 semver（不塞产品名）。报同步两边都写。
 
 ## 3. 构建 + 部署 + 验证
 - [ ] 交叉编译：`./scripts/mx93-build.sh ca`（仅 host 变）/ `all`（TA 也变）—— aarch64 green。

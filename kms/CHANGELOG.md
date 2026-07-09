@@ -1,6 +1,21 @@
 # KMS Changelog
 
-> Updated: 2026-07-07
+> Updated: 2026-07-09
+
+## 0.28.1 (2026-07-09) — Beta6 — 社区自助上手(Phase 1/2/3)+ 下载门户 + E2E 41/41
+
+> **纯 CA + 脚本发布,TA 零改动** —— TA measurement `3e2651ef` 不变,attestation manifest(seq-2)复用不重签。DVT pin 保持 v1.10.0(等 DVT 稳定发版再升)。
+
+### 新增 (Feature) — 社区自助上手程序(T10)
+- **Phase 1** 首启 web 向导(`kms/node-setup/`):setup token 认证 + 幂等 + 校验 + TEE 内 provision 密封 BLS 密钥 + 收尾自动重启(#156/#158/#159)。
+- **Phase 2** 一条命令 installer(`kms/deploy/aastar-node-installer.sh`):刷基础 OP-TEE 镜像 → curl|bash 装 KMS+DVT+向导(#160)。
+- **Phase 3** 下载门户(`kms/portal/index.html` + KMS `/portal` 路由,编进 CA):三步走 + 三档部署 + 动态拉 GitHub Releases + 向导说明。**已上线 https://kms.aastar.io/portal**(#162)。review Low 修复:门户过滤 prerelease + installer 命令动态钉 release tag(#164)。
+
+### 测试 (Test)
+- **`run-full-e2e.sh` 41/41 全绿**(T12,#163):补齐全部 15 个签名 op 的 #68 payload-commitment(Sign tx RLP / agent+p256 mint_digest / refresh / EIP-712 SignTypedData / grant-session + p256-grant eip191 ABI / x402+gtoken+micropay host EIP-712)。
+
+### 性能 (Perf)
+- T4 收口:0.28.0 板重测 Variant B 无回归(TA 往返 2.0ms / KMS RSS 6.7MB),perf 对目标充足,不优化。
 
 ## 0.28.0 (2026-07-07) — Beta6 — DVT BLS 私钥 TEE 托管(Variant B)+ 队列背压(T3)
 

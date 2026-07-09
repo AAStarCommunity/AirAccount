@@ -3,7 +3,7 @@
 # 社区上手 Phase 2 路径 A(见 kms/docs/phase2-image.md)。
 #
 #   curl -fsSL .../aastar-node-installer.sh | sudo bash
-#   curl -fsSL .../aastar-node-installer.sh | sudo VERSION=v0.28.0 bash
+#   curl -fsSL .../aastar-node-installer.sh | sudo VERSION=v0.28.1 bash
 #
 # 幂等:可重复跑(升级)。装完:KMS+DVT 起来、首启向导 aastar-node-setup 在 :8088 等配置。
 # 前提:基础镜像已含 OP-TEE + tee-supplicant;有网;root。
@@ -31,7 +31,7 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # ── 1. 下 airaccount-node release ────────────────────────────────────
 if [[ "$VERSION" == "latest" ]]; then
-  URL="https://github.com/$REPO/releases/latest/download/airaccount-node-v0.28.0.tar.gz"
+  URL="https://github.com/$REPO/releases/latest/download/airaccount-node-v0.28.1.tar.gz"
 else
   URL="https://github.com/$REPO/releases/download/airaccount-node-$VERSION/airaccount-node-$VERSION.tar.gz"
 fi
