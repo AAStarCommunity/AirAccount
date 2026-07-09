@@ -1,5 +1,14 @@
-<!-- Created: 2026-06-22 -->
+<!-- Created: 2026-06-22 · Modified: 2026-07-09 -->
 # CA/TA challenge-binding consistency matrix
+
+> **Automated coverage (#122, 2026-07-09).** The gate now parses **both**
+> `resolve_passkey_assertion(..)` **and** `resolve_passkey_assertion_strict(..)` call
+> sites (the whole sign / create_key-family routes through `_strict`), auto-checks
+> **cross-named ops** via an audited `OP_MAP` (`refresh_agent_credential→create_agent_key`,
+> `sign→sign_transaction`, `sign_hash`, `change_passkey→register_passkey_ta`), and
+> **asserts host-authoritative ops stay `delegate=false`** (`revoke_*`, contact-binding).
+> The manual matrix below remains the human-readable source of truth; the gate is the
+> executable subset. Ops still shown as `VAR` are resolved through a variable — audit by hand.
 
 **Why this exists.** Twice (#110, #121) the same bug shipped: the TA's
 `verify_passkey_for_wallet(.., payload)` was changed to bind `Some(payload)` for an op,
