@@ -90,48 +90,85 @@ def _fn_for(fn_at, idx):
 
 
 def strip_comments(src):
-    """Blank out // line comments and /* */ block comments, preserving every newline
-    and the total length (so line/offset math stays valid). String literals are copied
-    through so a `//` or `)` inside a string is not mistaken for a comment. Without this,
-    a commented-out or string-embedded fake call site (e.g. `// resolve_passkey_assertion
-    (.., true)` next to a real `.., false)`) would inject a phantom delegate and mask a
-    real mismatch — a false negative (Codex #1/#2/#4)."""
+    """Blank out // and /* */ comments AND the *contents* of string literals, preserving
+    every newline and the total length (so line/offset math stays valid). We never parse
+    inside comments or strings, so blanking their contents removes any call/comment
+    pattern hiding there:
+      - a commented-out fake call site `// resolve_passkey_assertion(.., true)` next to a
+        real `.., false)` no longer injects a phantom delegate (Codex #1/#2/#4);
+      - a string literal that happens to contain `resolve_passkey_assertion(` no longer
+        registers a phantom call site (Codex Low: false alarm).
+    Correct lexing of the surrounding tokens is required so the blanking itself cannot
+    misfire:
+      - char literals `'"'` / `b'"'` are copied through, so their embedded quote does NOT
+        open a string state (which would blank real code after it — a new false negative);
+      - raw strings `r"..."`, `r#"..."#`, `br#"..."#` are handled by hash-count so an
+        interior `"` does not close them early (Codex Low: raw-string boundary)."""
     out = []
     i, n = 0, len(src)
-    state = "code"  # code | line | block | string
     while i < n:
         c = src[i]
         nxt = src[i + 1] if i + 1 < n else ""
-        if state == "code":
-            if c == "/" and nxt == "/":
-                out.append("  "); i += 2; state = "line"; continue
-            if c == "/" and nxt == "*":
-                out.append("  "); i += 2; state = "block"; continue
-            if c == '"':
-                out.append(c); i += 1; state = "string"; continue
-            out.append(c); i += 1
-        elif state == "line":
-            if c == "\n":
-                out.append(c); i += 1; state = "code"
-            else:
-                out.append(" " if c != "\t" else "\t"); i += 1
-        elif state == "block":
-            if c == "*" and nxt == "/":
-                out.append("  "); i += 2; state = "code"
-            else:
-                out.append(c if c == "\n" else " "); i += 1
-        else:  # string
-            if c == "\\":
-                out.append(c); out.append(nxt if nxt else ""); i += 2; continue
-            out.append(c); i += 1
-            if c == '"':
-                state = "code"
+        # line comment
+        if c == "/" and nxt == "/":
+            out.append("  "); i += 2
+            while i < n and src[i] != "\n":
+                out.append("\t" if src[i] == "\t" else " "); i += 1
+            continue
+        # block comment
+        if c == "/" and nxt == "*":
+            out.append("  "); i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                out.append(src[i] if src[i] == "\n" else " "); i += 1
+            if i < n:
+                out.append("  "); i += 2
+            continue
+        # raw string: (b)r#*"  ...  "#*   — r/br not preceded by an identifier char
+        if c == "r" or (c == "b" and nxt == "r"):
+            k = i + (1 if c == "r" else 2)
+            h = 0
+            while k < n and src[k] == "#":
+                h += 1; k += 1
+            prev = src[i - 1] if i > 0 else ""
+            if k < n and src[k] == '"' and not (prev.isalnum() or prev == "_"):
+                out.append(src[i : k + 1])  # keep (b)r#*" delimiter
+                i = k + 1
+                close = '"' + "#" * h
+                while i < n and src[i : i + len(close)] != close:
+                    out.append("\n" if src[i] == "\n" else " "); i += 1
+                if i < n:
+                    out.append(close); i += len(close)
+                continue
+        # char literal or lifetime. Copy char literals through verbatim so an embedded
+        # quote (b'"') can't open a string; lifetimes ('a) have no close and fall through.
+        if c == "'":
+            if nxt == "\\":  # '\n' '\'' '\u{7f}' — escaped, scan to closing '
+                j = i + 2
+                while j < n and src[j] != "'":
+                    j += 1
+                out.append(src[i : j + 1]); i = j + 1; continue
+            if i + 2 < n and src[i + 2] == "'":  # 'X' single char
+                out.append(src[i : i + 3]); i += 3; continue
+            out.append(c); i += 1; continue  # lifetime / lone '
+        # normal or byte string: blank the interior
+        if c == '"':
+            out.append('"'); i += 1
+            while i < n and src[i] != '"':
+                if src[i] == "\\" and i + 1 < n:
+                    out.append("  "); i += 2; continue
+                out.append("\n" if src[i] == "\n" else " "); i += 1
+            if i < n:
+                out.append('"'); i += 1
+            continue
+        out.append(c); i += 1
     return "".join(out)
 
 
 def _args_of_call(src, name_end):
     """Given the index just before the '(' of a call in comment-stripped src, return
-    the top-level arg string, balancing nested parens."""
+    the top-level arg string, balancing nested parens. Fails safe (returns "") on an
+    unbalanced call, but emits a stderr diagnostic so a truncated/malformed call site
+    is not silently classified as `?`/VAR (Codex Low: no diagnostic)."""
     i = src.index("(", name_end)
     depth = 0
     for j in range(i, len(src)):
@@ -142,6 +179,8 @@ def _args_of_call(src, name_end):
             depth -= 1
             if depth == 0:
                 return src[i + 1 : j]
+    print(f"  [warn] unbalanced '(' at line ~{src[:i].count(chr(10)) + 1} — "
+          f"arg extraction incomplete, op left unclassified", file=sys.stderr)
     return ""
 
 
