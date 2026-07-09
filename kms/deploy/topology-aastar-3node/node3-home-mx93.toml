@@ -1,0 +1,54 @@
+# node3 · 家里公寓 MX93（当前主板）· DVT3 独立 + KMS 测试机
+# DVT3 BLS = 本地 EIP-2335 keystore（独立模式）。
+# KMS 是【测试实例】：独立 KMS_DB_PATH，绝不与 node1 生产密钥混库。
+
+[community]
+name      = "aastar"
+domain    = "kms-test.aastar.io"            # 测试域名（与生产 kms.aastar.io 分开）
+board_ssh = "root@TODO_HOME_IP"             # ⚠️ 到货后填（家里网络，IP 可能变→建议 Tailscale）
+ssh_key   = "~/.ssh/id_ed25519"
+
+# KMS 测试实例 —— 独立 DB，独立 rpId（测试域名）
+[kms]
+version = "0.28.1"
+port    = 3000
+rp_id   = "kms-test.aastar.io"
+origin  = "https://kms-test.aastar.io"
+profile = "prod"                            # 测试机也用 prod profile（贴近生产；dev 仅本地开发）
+# ⚠️ 测试实例：部署时 KMS_DB_PATH 指独立路径（如 /var/lib/kms-test/kms.db），不碰生产库。
+
+[dvt]
+version        = "1.9.0"
+port           = 8080
+node_name      = "aastar-dvt-3"
+policy_enabled = false
+kdf            = "pbkdf2"
+# 独立模式：RUST_SIGNER_URL 不设 → DVT3 用本地 keystore（不依赖同板 KMS 测试实例）。
+
+[chain]
+chain_id    = 11155111
+eth_rpc_url = "https://eth-sepolia.g.alchemy.com/v2/<KEY>"
+entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+
+[contracts]
+active = "testnet"
+
+[contracts_testnet]
+validator       = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"
+e2e_account     = "0x92EA8b02D34A4D5d10f0Db9Ea894e8bC72e292e8"
+policy_registry = ""
+
+[contracts_mainnet]
+validator       = ""                        # 家里 node 主网参与与否另议（少数派/略不稳）
+e2e_account     = ""
+policy_registry = ""
+
+[runtime]
+node_version = "v20.20.2"
+node_dir     = "/opt/node20"
+dvt_dir      = "/opt/dvt-build"
+
+[secrets]
+# NODE_KEY_PASSPHRASE —— DVT3 BLS keystore 解密密码
+# ETH_PRIVATE_KEY     —— dvt-3 operator EOA
+# KMS_API_KEY         —— 测试 KMS API key（与生产分开）
