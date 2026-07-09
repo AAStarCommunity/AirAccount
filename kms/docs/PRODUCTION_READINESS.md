@@ -53,9 +53,9 @@
 
 - **KMS：1 份**，跑在最稳的一块 NXP FRDM-IMX93 上（同板 co-located DVT#1）
 - **DVT：3 个 = 2-of-3 门限**（容忍 1 个挂）
-  - 新 MX93：KMS + DVT#1
-  - 当前主板：DVT#2
-  - DK2：DVT#3
+  - 新 MX93（学校机房）：KMS + DVT#1
+  - DK2（学校机房）：DVT#2
+  - 当前主板（家里）：DVT#3
 - **测试环境**：本地虚拟（Mock TEE）跑 DVT1/2/3 + KMS；复用一份生产 KMS 做测试时用**独立 keyspace/DB**，不与生产密钥混库
 
 **风险护栏：**
