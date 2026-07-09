@@ -58,7 +58,7 @@
 <div class="tier">
   <h3>C · 基础镜像 + 一条命令 <span class="badge">★ 需一条命令</span></h3>
   刷 NXP 官方 FRDM-IMX93 OP-TEE 基础镜像(含 OP-TEE),然后:
-  <pre>curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/aastar-node-installer.sh | sudo bash</pre>
+  <pre id="installer-cmd">curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/aastar-node-installer.sh | sudo bash</pre>
   自动装 KMS + DVT + 配置向导。详见 <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/phase2-image.md">Phase 2 镜像文档</a>。
 </div>
 
@@ -76,9 +76,17 @@
     const r = await fetch('https://api.github.com/repos/AAStarCommunity/AirAccount/releases?per_page=30');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const rels = await r.json();
-    const pick = p => rels.filter(x => x.tag_name.startsWith(p) && !x.draft).sort((a,b)=> (a.created_at<b.created_at?1:-1))[0];
+    // 只取正式版:排除 draft + prerelease(rc/beta 不进社区下载列表)。
+    const pick = p => rels.filter(x => x.tag_name.startsWith(p) && !x.draft && !x.prerelease).sort((a,b)=> (a.created_at<b.created_at?1:-1))[0];
     const node = pick('airaccount-node'), kms = pick('airaccount-kms');
-    if (!node && !kms) throw new Error('无 release');
+    if (!node && !kms) throw new Error('无正式 release');
+    // installer 命令钉到最新正式 node release tag(可复现,不随 main 漂移)。
+    if (node) {
+      const ver = node.tag_name.replace(/^airaccount-node-/, '');
+      const cmd = document.getElementById('installer-cmd');
+      if (cmd) cmd.textContent =
+        `curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/${node.tag_name}/kms/deploy/aastar-node-installer.sh | sudo VERSION=${ver} bash`;
+    }
     box.innerHTML = '';
     for (const [rel, label] of [[node,'airaccount-node（KMS+DVT 合并）'],[kms,'airaccount-kms（独立 KMS）']]) {
       if (!rel) continue;
