@@ -654,3 +654,49 @@ pub struct BlsPubKeyInput {
 pub struct BlsPubKeyOutput {
     pub public_key: Vec<u8>,
 }
+
+// ── CC-34: keeper/operator secp256k1 (ECDSA) 私钥 TEE 托管 ──
+// A co-located DVT/keeper runs unattended by delegating its EOA signing to the
+// TEE: the private key is generated + sealed in the TA and never leaves it; the
+// host exposes it on loopback :3100 (same trust boundary as the BLS signer).
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperGenKeyInput {
+    /// Caller-chosen key id (like wallet_id) to address this keeper key later.
+    pub key_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperGenKeyOutput {
+    pub key_id: Uuid,
+    /// 65-byte uncompressed secp256k1 public key (0x04 || X(32) || Y(32)).
+    pub public_key: Vec<u8>,
+    /// 20-byte Ethereum address = keccak256(public_key[1..])[12..] — the funding EOA.
+    pub address: [u8; 20],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperSignInput {
+    pub key_id: Uuid,
+    /// 32-byte raw digest to sign (already hashed by the caller — no extra hashing).
+    pub digest: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperSignOutput {
+    /// 65-byte Ethereum-recoverable signature: r(32) || s(32) || v(1), v = 27/28, low-S.
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperPubKeyInput {
+    pub key_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KeeperPubKeyOutput {
+    /// 65-byte uncompressed secp256k1 public key.
+    pub public_key: Vec<u8>,
+    /// 20-byte Ethereum address.
+    pub address: [u8; 20],
+}

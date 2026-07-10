@@ -72,6 +72,17 @@ pub enum Command {
     BlsSign = 28,
     /// Return the sealed BLS key's 48-byte compressed G1 public key.
     BlsPubKey = 29,
+    /// CC-34 (keeper/operator ECDSA custody): generate an independent secp256k1
+    /// keypair inside the TEE, seal the private key in secure storage (never
+    /// leaves the TA), return the 65-byte uncompressed pubkey + 20-byte Ethereum
+    /// address (= the keeper's funding EOA). One-time provisioning, singleton.
+    KeeperGenKey = 30,
+    /// secp256k1-sign a raw 32-byte digest with the sealed keeper key. Returns a
+    /// 65-byte Ethereum-recoverable signature r(32)||s(32)||v(1), v = 27/28,
+    /// low-S. The private key never enters the CA/DVT — only the signature.
+    KeeperSign = 31,
+    /// Return the sealed keeper key's 65-byte uncompressed pubkey + 20B address.
+    KeeperPubKey = 32,
     #[default]
     Unknown,
 }
@@ -123,6 +134,12 @@ mod tests {
         assert_eq!(u32::from(Command::ReadRollbackCounter), 24);
         assert_eq!(u32::from(Command::GetChallenge), 25);
         assert_eq!(u32::from(Command::GetAttestation), 26);
+        assert_eq!(u32::from(Command::BlsGenKey), 27);
+        assert_eq!(u32::from(Command::BlsSign), 28);
+        assert_eq!(u32::from(Command::BlsPubKey), 29);
+        assert_eq!(u32::from(Command::KeeperGenKey), 30);
+        assert_eq!(u32::from(Command::KeeperSign), 31);
+        assert_eq!(u32::from(Command::KeeperPubKey), 32);
     }
 
     #[test]

@@ -5912,6 +5912,68 @@ struct BlsGenResp {
     public_key: String,
 }
 
+// ── CC-34: keeper/operator ECDSA(secp256k1) signer — mirrors the BLS signer on
+// 127.0.0.1:3100. POST /kms/sign {keeper_id, digest} → {signature(65B r||s||v), address};
+// POST /kms/gen-keeper-eoa → {key_id, address, public_key}. Keeper key sealed in TA.
+#[derive(serde::Deserialize)]
+struct KeeperSignReq {
+    /// Optional: informational only. The signing key is the board's singleton
+    /// keeper key addressed by KMS_KEEPER_KEY_ID (mirrors the BLS key_id-from-env).
+    #[allow(dead_code)]
+    keeper_id: Option<String>,
+    /// 32-byte raw digest (hex, 0x-optional). Signed as-is — DVT hashes.
+    digest: String,
+}
+
+#[derive(serde::Serialize)]
+struct KeeperSignResp {
+    /// 65-byte recoverable signature r(32)||s(32)||v(1), v=27/28, low-S.
+    signature: String,
+    /// 20-byte keeper EOA (0x..) — the funding address.
+    address: String,
+}
+
+#[derive(serde::Serialize)]
+struct KeeperGenResp {
+    key_id: String,
+    address: String,
+    public_key: String,
+}
+
+/// Constant-time byte compare (length-checked). Avoids leaking the token via
+/// early-return timing on the loopback signer auth.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Gate the keeper signer/provisioning on KMS_KEEPER_SIGNER_TOKEN (X-Signer-Token
+/// header), constant-time compared. Unset = localhost-only default (dev / back-compat).
+fn check_keeper_token(token: &Option<String>) -> Result<(), warp::Rejection> {
+    match std::env::var("KMS_KEEPER_SIGNER_TOKEN") {
+        Ok(expected) if !expected.is_empty() => {
+            if token
+                .as_deref()
+                .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false)
+            {
+                Ok(())
+            } else {
+                Err(warp::reject::custom(ApiError(
+                    "invalid or missing X-Signer-Token".into(),
+                )))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 // Codex High#2/Med#3: :3100 is localhost-only, but a co-located process could still
 // reach it. If KMS_BLS_SIGNER_TOKEN is set, require it (X-Signer-Token header) on
 // /sign + /gen-key. Unset = localhost-only default (dev / backward-compat). The token
@@ -6006,6 +6068,87 @@ async fn bls_sign_handler(
         })),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS sign failed: {}",
+            e
+        )))),
+    }
+}
+
+// ── CC-34 keeper/operator ECDSA handlers (loopback :3100) ──
+
+/// Provision the board's singleton keeper EOA (TEE-sealed secp256k1). Returns
+/// key_id + 20B address + 65B pubkey. Operator then sets KMS_KEEPER_KEY_ID +
+/// KMS_KEEPER_ADDRESS and restarts. Gated behind KMS_KEEPER_PROVISIONING=1 (off
+/// by default) + token; the TA enforces a singleton so a loop can't fill storage.
+async fn keeper_gen_handler(
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if std::env::var("KMS_KEEPER_PROVISIONING").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "keeper provisioning disabled (set KMS_KEEPER_PROVISIONING=1 to enable)".into(),
+        )));
+    }
+    check_keeper_token(&token)?;
+    let key_id = Uuid::new_v4();
+    match server.tee.keeper_gen_key(key_id).await {
+        Ok((pk, addr)) => Ok(warp::reply::json(&KeeperGenResp {
+            key_id: key_id.to_string(),
+            address: format!("0x{}", hex::encode(addr)),
+            public_key: format!("0x{}", hex::encode(pk)),
+        })),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "keeper gen failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn keeper_sign_handler(
+    req: KeeperSignReq,
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    check_keeper_token(&token)?;
+    // Single keeper key per board; key_id from env (set at provisioning).
+    let key_id = match std::env::var("KMS_KEEPER_KEY_ID")
+        .ok()
+        .and_then(|s| Uuid::parse_str(&s).ok())
+    {
+        Some(k) => k,
+        None => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_KEEPER_KEY_ID not configured".into(),
+            )))
+        }
+    };
+    // Return the provisioned address from env — avoids a second TA call per sign.
+    let addr = match std::env::var("KMS_KEEPER_ADDRESS") {
+        Ok(a) if !a.is_empty() => a,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_KEEPER_ADDRESS not configured".into(),
+            )))
+        }
+    };
+    let dh = req.digest.trim_start_matches("0x");
+    let db = match hex::decode(dh) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "digest must be 32-byte hex".into(),
+            )))
+        }
+    };
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&db);
+    // keeper_sign validates the 65-byte length (fail-closed on ABI drift).
+    match server.tee.keeper_sign(key_id, digest).await {
+        Ok(sig) => Ok(warp::reply::json(&KeeperSignResp {
+            signature: format!("0x{}", hex::encode(sig)),
+            address: addr,
+        })),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "keeper sign failed: {}",
             e
         )))),
     }
@@ -6855,11 +6998,31 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || gen_server.clone()))
         .and_then(bls_gen_handler);
+    // CC-34: keeper/operator ECDSA on the same loopback signer (distinct /kms/* paths).
+    let keeper_sign_server = server.clone();
+    let keeper_sign_route = warp::post()
+        .and(warp::path("kms"))
+        .and(warp::path("sign"))
+        .and(warp::path::end())
+        .and(warp::body::json())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || keeper_sign_server.clone()))
+        .and_then(keeper_sign_handler);
+    let keeper_gen_server = server.clone();
+    let keeper_gen_route = warp::post()
+        .and(warp::path("kms"))
+        .and(warp::path("gen-keeper-eoa"))
+        .and(warp::path::end())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || keeper_gen_server.clone()))
+        .and_then(keeper_gen_handler);
     let bls_health = warp::path("health").and(warp::get()).map(|| {
         warp::reply::json(&serde_json::json!({"status": "ok", "service": "kms-bls-signer"}))
     });
     let signer_routes = bls_sign_route
         .or(bls_gen_route)
+        .or(keeper_sign_route)
+        .or(keeper_gen_route)
         .or(bls_health)
         .recover(handle_rejection);
     println!("🔏 Internal BLS signer (DVT) on http://127.0.0.1:3100 (localhost only, not via tunnel)");
