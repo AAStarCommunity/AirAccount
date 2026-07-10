@@ -710,3 +710,22 @@ pub struct BlsRemoveOutput {
     /// Number of BLS keys deleted (0 or 1 given the singleton invariant).
     pub removed: u32,
 }
+
+// CC-37 staked registration: BLS proof-of-possession (RFC-standard self-PoP over the node's
+// OWN public key). The TA derives its pubkey from the sealed key and signs it under BLS_DST —
+// the caller supplies NO message, so /pop is not a signing oracle. Byte-identical to SDK
+// buildDvtPop. Input is just the key_id (board singleton); output is the DvtPop tuple.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPopSignInput {
+    pub key_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPopSignOutput {
+    /// G1 public key in 128-byte EIP-2537 layout (registerWithProof's `publicKey`).
+    pub public_key: Vec<u8>,
+    /// hashToCurve(publicKey, BLS_DST) as 256-byte EIP-2537 G2 (registerWithProof's `popPoint`).
+    pub pop_point: Vec<u8>,
+    /// sk · popPoint as 256-byte EIP-2537 G2 (registerWithProof's `popSig`).
+    pub pop_signature: Vec<u8>,
+}

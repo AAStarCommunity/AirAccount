@@ -83,11 +83,100 @@ wait_signer() {
   done
   die "signer $SIGNER not up after 30s — is kms-api running?"
 }
+# non-fatal variant: returns 1 instead of dying (used to health-gate the de-root restart).
+wait_signer_soft() {
+  for _ in $(seq 1 20); do
+    curl -sf -m2 "$SIGNER/health" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+# TA-backed probe: /health is static JSON (liveness only) — it passes even if the process
+# can't open /dev/tee0 (bad DevicePolicy / missing group). A REAL BLS sign proves the TEE is
+# reachable as whatever user kms-api now runs as. Used to gate the de-root (rollback if dead).
+tee_reachable() {
+  [ -n "$BLS_KEY_ID" ] || return 0   # nothing provisioned yet → skip (nothing to prove)
+  local r; r="$(curl -s -m8 -X POST "$SIGNER/sign" -H 'content-type: application/json' \
+    -H "x-signer-token: $TOKEN" \
+    -d '{"node_id":"selfinit-probe","user_op_hash":"0x0000000000000000000000000000000000000000000000000000000000000000"}' 2>/dev/null || true)"
+  printf '%s' "$r" | grep -q '"signature"'
+}
 restart_kms() { # $1 = fatal-on-fail (1) or best-effort (0)
   systemctl restart kms-api.service 2>/dev/null && return 0
   if [ "${1:-0}" = 1 ]; then die "kms-api restart failed — refusing to finish (gate may still be live)"; fi
   log "WARN: kms-api restart failed"
 }
+
+# ── device-auth hardening (CC-25): de-root kms-api + dvt so a compromise of either
+# (especially the network-facing DVT) cannot open /dev/tee* and invoke the sealed
+# keeper/BLS TA directly, bypassing the loopback X-Signer-Token. Idempotent + defensive:
+# writes only systemd drop-ins + ownership (never touches DVT/KMS *code*), and the caller
+# health-gates the follow-up restart with an auto-rollback so it can't brick first boot. ──
+_in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
+harden_device_auth() {
+  # 1. dedicated users. kms in tee/teepriv (may open /dev/tee0); dvt in NEITHER.
+  id kms >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kms 2>/dev/null || useradd --system --no-create-home --shell /bin/false kms
+  id dvt >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin dvt 2>/dev/null || useradd --system --no-create-home --shell /bin/false dvt
+  for g in tee teepriv; do getent group "$g" >/dev/null 2>&1 && ! _in_group kms "$g" && usermod -aG "$g" kms; done
+  # dvt must have NO path to /dev/tee* — actively remove it from tee/teepriv if present
+  # (belt-and-suspenders; the dvt drop-in below ALSO sets DevicePolicy=closed).
+  for g in tee teepriv; do _in_group dvt "$g" && { gpasswd -d dvt "$g" 2>/dev/null || true; log "removed dvt from group $g (TEE must be unreachable from the network-facing node)"; }; done
+
+  # 2. kms deploy must live off /root (a non-root user can't traverse 0700 /root). If the
+  # unit's ExecStart is under /root, COPY it out to /opt/airaccount (copy, not move, so a
+  # rollback that reverts to the /root unit still has its files). kms.db is the live state.
+  local kexec kdir; kexec="$(systemctl show -p ExecStart --value kms-api.service 2>/dev/null | grep -oE '/[^ ;]*kms-api-server' | head -1 || true)"
+  kdir="$(dirname "${kexec:-/opt/airaccount/kms-api-server}")"
+  case "$kexec" in
+    /root/*)
+      local NEW=/opt/airaccount src; src="$(dirname "$kexec")"; mkdir -p "$NEW"
+      systemctl stop kms-api.service 2>/dev/null || true   # release kms.db WAL before copying
+      cp -a "$kexec" "$NEW/kms-api-server"
+      [ -f "$src/kms-test-page.html" ] && cp -a "$src/kms-test-page.html" "$NEW/" 2>/dev/null || true
+      for f in kms.db kms.db-shm kms.db-wal; do [ -e "$src/$f" ] && cp -a "$src/$f" "$NEW/$f"; done
+      kdir="$NEW"; kexec="$NEW/kms-api-server"
+      log "copied kms deploy out of /root -> $NEW (de-root prerequisite; /root copy kept for rollback)"
+      ;;
+  esac
+  chown -R kms:kms "$kdir" 2>/dev/null || true
+
+  # 3. kms-api de-root drop-in: User=kms + tee groups + cgroup-v2 device lockdown.
+  mkdir -p /etc/systemd/system/kms-api.service.d
+  cat > /etc/systemd/system/kms-api.service.d/deroot.conf <<EOF
+# device-auth hardening (aastar-kms-selfinit): non-root kms user in tee/teepriv groups;
+# DevicePolicy=closed restricts even this cgroup to the two OP-TEE devices.
+[Service]
+User=kms
+Group=kms
+SupplementaryGroups=tee teepriv
+WorkingDirectory=$kdir
+ExecStart=
+ExecStart=$kexec
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+DevicePolicy=closed
+DeviceAllow=/dev/tee0 rw
+DeviceAllow=/dev/teepriv0 rw
+EOF
+
+  # 4. dvt de-root drop-in: User=dvt (NO tee groups). Applied whenever dvt.service exists
+  # (harmless if DVT is deployed later — the drop-in waits). chown DVT's dir if present.
+  local ddir; ddir="$(systemctl show -p WorkingDirectory --value dvt.service 2>/dev/null)"
+  { [ -z "$ddir" ] || [ "$ddir" = "[not set]" ]; } && ddir=/opt/dvt-build
+  mkdir -p /etc/systemd/system/dvt.service.d
+  # DevicePolicy=closed with NO DeviceAllow → dvt's cgroup reaches only systemd's default
+  # devices (/dev/null,zero,random,urandom,…) and NEVER /dev/tee* — even if a group leak
+  # ever put dvt back in tee. Node is pure JS; it needs no special device.
+  printf '[Service]\nUser=dvt\nGroup=dvt\nDevicePolicy=closed\n' > /etc/systemd/system/dvt.service.d/deroot.conf
+  [ -d "$ddir" ] && chown -R dvt:dvt "$ddir" 2>/dev/null || true
+
+  systemctl daemon-reload 2>/dev/null || true
+  log "device-auth hardening staged (kms-api=kms + DevicePolicy=closed; dvt=dvt, no TEE access)"
+}
+# Revert the kms-api de-root drop-in (used if the hardened restart fails — never brick).
+unharden_kms() { rm -f /etc/systemd/system/kms-api.service.d/deroot.conf; systemctl daemon-reload 2>/dev/null || true; }
 
 # ── 1. shared signer tokens (generate once, persisted) ──
 if [ -z "$(env_get KMS_BLS_SIGNER_TOKEN)" ]; then
@@ -209,9 +298,13 @@ htmp="$(mktemp "$CONFIG_DIR/.handoff.XXXXXX")"
   echo "KMS_BLS_KEY_ID=$BLS_KEY_ID"
   echo "KMS_BLS_PUBKEY=$BLS_PUBKEY"
   if [ -n "$KEEPER_ADDR" ]; then
-    echo "KEEPER_SIGNER_URL=$SIGNER/kms/sign"
+    # KEEPER_SIGNER_URL is the loopback BASE — DVT's KmsEcdsaSigner appends /kms/sign
+    # itself (and register-node.mjs appends /pop). Emitting the base (not …/kms/sign)
+    # avoids a doubled path.
+    echo "KEEPER_SIGNER_URL=$SIGNER"
     echo "KEEPER_SIGNER_TOKEN=$(env_get KMS_KEEPER_SIGNER_TOKEN)"
     echo "KEEPER_ADDRESS=$KEEPER_ADDR"
+    echo "KEEPER_ID=$(env_get KMS_KEEPER_KEY_ID)"
   fi
 } > "$htmp"
 chmod 600 "$htmp"; mv -f "$htmp" "$HANDOFF"
@@ -224,9 +317,21 @@ env_del KMS_BLS_PROVISIONING
 env_del KMS_KEEPER_PROVISIONING
 rm -f /etc/systemd/system/kms-api.service.d/prov.conf 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
-log "closed provisioning gate; restarting kms-api to load key ids"
-restart_kms 1
-wait_signer
+
+# device-auth hardening (CC-25): de-root kms-api + dvt, then restart so kms-api comes up as
+# the non-root kms user. Health-gated with auto-rollback: if it does NOT come up hardened,
+# revert to the prior (root) config and continue — a running KMS beats a hardened-but-dead one.
+harden_device_auth
+log "closed provisioning gate; restarting kms-api (hardened) to load key ids"
+systemctl restart kms-api.service 2>/dev/null || true
+if wait_signer_soft && tee_reachable; then
+  log "kms-api up as non-root kms (device-auth hardened; TEE reachable via a live BLS sign)"
+else
+  log "WARN: kms-api not healthy+TEE-reachable hardened — rolling back de-root, staying on prior config"
+  unharden_kms
+  restart_kms 1
+  wait_signer
+fi
 
 # ── 7. mark done ──
 : > "$MARKER"; chmod 600 "$MARKER"

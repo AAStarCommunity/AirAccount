@@ -5912,6 +5912,31 @@ struct BlsGenResp {
     public_key: String,
 }
 
+// CC-37 staked registration: BLS proof-of-possession. RFC-standard self-PoP — the TA signs the
+// node's OWN pubkey under BLS_DST (the caller supplies no message), byte-identical to SDK core
+// buildDvtPop. Returns the full DvtPop tuple for registerWithProof. Loopback + token.
+#[derive(serde::Deserialize)]
+struct PopSignReq {
+    /// Informational only (board singleton BLS key is addressed by KMS_BLS_KEY_ID from env).
+    #[allow(dead_code)]
+    node_id: Option<String>,
+}
+
+// camelCase JSON keys — DVT register-node.mjs reads `{ popPoint, popSig }` and SDK's DvtPop
+// is `{ publicKey, popPoint, popSig }`. The exact keys are the cross-repo contract (CC-37).
+#[derive(serde::Serialize)]
+struct PopSignResp {
+    /// G1 pubkey, 128B EIP-2537 (registerWithProof `publicKey`).
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    /// hashToCurve(publicKey, BLS_DST), 256B EIP-2537 G2 (registerWithProof `popPoint`).
+    #[serde(rename = "popPoint")]
+    pop_point: String,
+    /// sk·popPoint, 256B EIP-2537 G2 (registerWithProof `popSig`).
+    #[serde(rename = "popSig")]
+    pop_signature: String,
+}
+
 // ── CC-34: keeper/operator ECDSA(secp256k1) signer — mirrors the BLS signer on
 // 127.0.0.1:3100. POST /kms/sign {keeper_id, digest} → {signature(65B r||s||v), address};
 // POST /kms/gen-keeper-eoa → {key_id, address, public_key}. Keeper key sealed in TA.
@@ -6020,7 +6045,13 @@ fn check_signer_token_required(token: &Option<String>) -> Result<(), warp::Rejec
 fn check_signer_token(token: &Option<String>) -> Result<(), warp::Rejection> {
     match std::env::var("KMS_BLS_SIGNER_TOKEN") {
         Ok(expected) if !expected.is_empty() => {
-            if token.as_deref() == Some(expected.as_str()) {
+            // constant-time compare (mirrors check_keeper_token / _required) — no timing
+            // leak on the bearer token.
+            if token
+                .as_deref()
+                .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false)
+            {
                 Ok(())
             } else {
                 Err(warp::reject::custom(ApiError(
@@ -6135,6 +6166,39 @@ async fn bls_sign_handler(
         })),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS sign failed: {}",
+            e
+        )))),
+    }
+}
+
+/// CC-37 staked registration: return the BLS proof-of-possession tuple so a KMS-TEE key-less
+/// DVT node can call the validator's registerWithProof. Same key_id-from-env + token as /sign.
+/// The TA signs its OWN pubkey under BLS_DST (RFC self-PoP; caller supplies no message).
+async fn pop_sign_handler(
+    _req: PopSignReq,
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    check_signer_token(&token)?;
+    let key_id = match std::env::var("KMS_BLS_KEY_ID")
+        .ok()
+        .and_then(|s| Uuid::parse_str(&s).ok())
+    {
+        Some(k) => k,
+        None => {
+            return Err(warp::reject::custom(ApiError(
+                "KMS_BLS_KEY_ID not configured".into(),
+            )))
+        }
+    };
+    match server.tee.bls_pop_sign(key_id).await {
+        Ok((public_key, pop_point, pop_signature)) => Ok(warp::reply::json(&PopSignResp {
+            public_key: format!("0x{}", hex::encode(public_key)),
+            pop_point: format!("0x{}", hex::encode(pop_point)),
+            pop_signature: format!("0x{}", hex::encode(pop_signature)),
+        })),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "BLS PoP sign failed: {}",
             e
         )))),
     }
@@ -7194,6 +7258,16 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || signer_server.clone()))
         .and_then(bls_sign_handler);
+    // CC-24 staked registration: BLS proof-of-possession over the operator address.
+    let pop_server = server.clone();
+    let pop_route = warp::post()
+        .and(warp::path("pop"))
+        .and(warp::path::end())
+        .and(warp::body::content_length_limit(1024)) // node_id + operator is tiny
+        .and(warp::body::json())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || pop_server.clone()))
+        .and_then(pop_sign_handler);
     let gen_server = server.clone();
     let bls_gen_route = warp::post()
         .and(warp::path("gen-key"))
@@ -7232,6 +7306,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         warp::reply::json(&serde_json::json!({"status": "ok", "service": "kms-bls-signer"}))
     });
     let signer_routes = bls_sign_route
+        .or(pop_route)
         .or(bls_gen_route)
         .or(bls_remove_route)
         .or(keeper_sign_route)

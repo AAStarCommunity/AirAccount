@@ -1492,6 +1492,22 @@ fn bls_sign(input: &proto::BlsSignInput) -> Result<proto::BlsSignOutput> {
     })
 }
 
+/// CC-37 staked registration: BLS proof-of-possession (RFC-standard self-PoP over the node's
+/// OWN pubkey). Derives the pubkey from the sealed key and signs it under BLS_DST — the caller
+/// supplies no message, so /pop is not a signing oracle. Returns the DvtPop tuple.
+fn bls_pop_sign(input: &proto::BlsPopSignInput) -> Result<proto::BlsPopSignOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<BlsKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("BLS key not found: {}", input.key_id))?;
+    let (public_key, pop_point, pop_signature) = bls::sign_pop(&k.private_key)?;
+    Ok(proto::BlsPopSignOutput {
+        public_key: public_key.to_vec(),
+        pop_point: pop_point.to_vec(),
+        pop_signature: pop_signature.to_vec(),
+    })
+}
+
 /// 返回密封 BLS 密钥的 48B 压缩公钥。
 fn bls_pubkey(input: &proto::BlsPubKeyInput) -> Result<proto::BlsPubKeyOutput> {
     let db = open_storage()?;
@@ -2743,6 +2759,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::GetAttestation => process(serialized_input, attestation::get_attestation),
         Command::BlsGenKey => process(serialized_input, bls_gen_key),
         Command::BlsSign => process(serialized_input, bls_sign),
+        Command::BlsPopSign => process(serialized_input, bls_pop_sign),
         Command::BlsPubKey => process(serialized_input, bls_pubkey),
         Command::BlsRemove => process(serialized_input, bls_remove),
         Command::KeeperGenKey => process(serialized_input, keeper_gen_key),
