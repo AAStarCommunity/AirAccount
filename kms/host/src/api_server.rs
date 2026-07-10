@@ -6346,6 +6346,70 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::get())
         .map(|| warp::reply::html(include_str!("../../portal/index.html")));
 
+    // Public node-identity page (CC-34) — read-only, NO auth. Displays this co-located
+    // node's PUBLIC identities: the DVT BLS G1 pubkey and the keeper EOA. Every value is
+    // public (on-chain-derivable) — no secrets, no signing keys — so it is intentionally
+    // ungated. Fallback surface for a KMS+DVT ("committee node") until dvt.aastar.io
+    // exposes them; values come straight from env so it needs no TA/DB round-trip.
+    let identities = warp::path("identities")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            // Middle-ellipsis mask for at-a-glance display; full value in a <details>.
+            // Slice by chars (not bytes) so a non-ASCII env value can never panic on a
+            // UTF-8 boundary — values are operator-set, but this stays fail-safe.
+            fn mask(s: &str) -> String {
+                let t = s.trim();
+                let chars: Vec<char> = t.chars().collect();
+                if chars.len() <= 22 {
+                    return t.to_string();
+                }
+                let head: String = chars[..12].iter().collect();
+                let tail: String = chars[chars.len() - 8..].iter().collect();
+                format!("{head}…{tail}")
+            }
+            fn esc(s: &str) -> String {
+                s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+            }
+            let row = |label: &str, val: &str| -> String {
+                let v = val.trim();
+                if v.is_empty() {
+                    format!(
+                        "<tr><td>{}</td><td class=\"empty\">— not provisioned —</td></tr>",
+                        label
+                    )
+                } else {
+                    format!(
+                        "<tr><td>{0}</td><td><code>{1}</code><details><summary>show full</summary><code>{2}</code></details></td></tr>",
+                        label,
+                        esc(&mask(v)),
+                        esc(v)
+                    )
+                }
+            };
+            let bls = std::env::var("KMS_BLS_PUBKEY").unwrap_or_default();
+            let keeper = std::env::var("KMS_KEEPER_ADDRESS").unwrap_or_default();
+            let html = format!(
+                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Node identities</title>\
+<style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:2.2rem auto;padding:0 1rem;color:#222}}\
+h1{{font-size:1.25rem;margin-bottom:.2rem}}table{{border-collapse:collapse;width:100%;margin-top:1rem}}\
+td{{padding:.55rem .6rem;border-bottom:1px solid #eee;vertical-align:top}}\
+td:first-child{{font-weight:600;white-space:nowrap;color:#555}}\
+code{{font-family:ui-monospace,SFMono-Regular,monospace;word-break:break-all;font-size:.92rem}}\
+.empty{{color:#999}}details{{margin-top:.3rem}}summary{{cursor:pointer;color:#06c;font-size:.82rem}}\
+.note{{color:#888;font-size:.84rem;margin-top:1.4rem;line-height:1.5}}</style></head>\
+<body><h1>Node public identities</h1>\
+<p class=\"note\">Co-located KMS&nbsp;+&nbsp;DVT node. Every value below is <b>public</b> (on-chain-derivable) — no secrets, no login.</p>\
+<table>{bls_row}{keeper_row}</table>\
+<p class=\"note\">The DVT BLS pubkey signs the validator's BLS aggregate; the keeper EOA funds and sends the node's on-chain transactions.</p>\
+</body></html>",
+                bls_row = row("DVT BLS pubkey (G1)", &bls),
+                keeper_row = row("Keeper EOA", &keeper),
+            );
+            warp::reply::html(html)
+        });
+
     // Health check (Issue #73: probes real attestation capability)
     let server_health = server.clone();
     let health = warp::path("health")
@@ -6922,6 +6986,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     let group1 = index
         .or(test_ui)
         .or(portal)
+        .or(identities)
         .or(health)
         .or(measurements_manifest)
         .or(measurements_manifest_proof)
