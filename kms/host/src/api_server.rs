@@ -5954,23 +5954,34 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Gate the keeper signer/provisioning on KMS_KEEPER_SIGNER_TOKEN (X-Signer-Token
-/// header), constant-time compared. Unset = localhost-only default (dev / back-compat).
+/// header), constant-time compared.
+///
+/// Unlike the BLS signer (which allows a tokenless localhost default), the keeper
+/// key is a **funded Ethereum EOA** — a tokenless signer is a money-signing oracle
+/// for any co-located process. So this is **fail-closed**: if the token env is
+/// unset/empty the endpoint is refused entirely. Set KMS_KEEPER_SIGNER_TOKEN to
+/// use keeper signing/provisioning (the node-setup wizard generates it).
 fn check_keeper_token(token: &Option<String>) -> Result<(), warp::Rejection> {
-    match std::env::var("KMS_KEEPER_SIGNER_TOKEN") {
-        Ok(expected) if !expected.is_empty() => {
-            if token
-                .as_deref()
-                .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
-                .unwrap_or(false)
-            {
-                Ok(())
-            } else {
-                Err(warp::reject::custom(ApiError(
-                    "invalid or missing X-Signer-Token".into(),
-                )))
-            }
+    let expected = match std::env::var("KMS_KEEPER_SIGNER_TOKEN") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "keeper signer disabled: KMS_KEEPER_SIGNER_TOKEN not set (fail-closed — \
+                 keeper is a funded EOA and must not sign without a token)"
+                    .into(),
+            )))
         }
-        _ => Ok(()),
+    };
+    if token
+        .as_deref()
+        .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(warp::reject::custom(ApiError(
+            "invalid or missing X-Signer-Token".into(),
+        )))
     }
 }
 
@@ -6980,6 +6991,46 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     println!("🆔 TA UUID: 4319f351-0b24-4097-b659-80ee4f824cdd");
     println!("🌐 Public URL: https://kms.aastar.io");
 
+    // CC-34: if a keeper key is configured, verify KMS_KEEPER_ADDRESS actually
+    // matches the sealed key addressed by KMS_KEEPER_KEY_ID at boot — a mismatch
+    // would make /kms/sign return a wrong EOA (DVT ecrecover fail / wrong funding
+    // target). Fatal on mismatch; a transient TA error only warns (sign path will
+    // surface real errors). No per-sign cost.
+    if let Some(kid) = std::env::var("KMS_KEEPER_KEY_ID")
+        .ok()
+        .and_then(|s| Uuid::parse_str(&s).ok())
+    {
+        match server.tee.keeper_pubkey(kid).await {
+            Ok((_pk, addr)) => {
+                let derived = format!("0x{}", hex::encode(addr));
+                match std::env::var("KMS_KEEPER_ADDRESS") {
+                    Ok(cfg) if !cfg.is_empty() => {
+                        if !cfg.eq_ignore_ascii_case(&derived) {
+                            return Err(anyhow::anyhow!(
+                                "KMS_KEEPER_ADDRESS ({}) does not match the sealed keeper key \
+                                 {} (derived {}) — refusing to start with a mismatched keeper \
+                                 address",
+                                cfg,
+                                kid,
+                                derived
+                            ));
+                        }
+                        println!("🔑 Keeper EOA verified: {} (key {})", derived, kid);
+                    }
+                    _ => println!(
+                        "🔑 Keeper EOA (key {}): {} — set KMS_KEEPER_ADDRESS to this value",
+                        kid, derived
+                    ),
+                }
+            }
+            Err(e) => println!(
+                "⚠️  Keeper key {} configured but pubkey read failed at boot ({}); \
+                 /kms/sign will surface errors if unresolved",
+                kid, e
+            ),
+        }
+    }
+
     // Variant B: internal BLS signer for DVT on 127.0.0.1:3100 ONLY (localhost,
     // NOT exposed via the Cloudflare tunnel which only routes :3000). DVT points
     // RUST_SIGNER_URL here so the BLS private key stays sealed in the TA.
@@ -7004,6 +7055,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::path("kms"))
         .and(warp::path("sign"))
         .and(warp::path::end())
+        .and(warp::body::content_length_limit(1024)) // digest+key_id is tiny; cap body
         .and(warp::body::json())
         .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || keeper_sign_server.clone()))

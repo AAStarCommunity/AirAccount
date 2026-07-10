@@ -181,7 +181,7 @@ mod tests {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
         let valid_ids: &[u32] = &[
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26,
+            26, 27, 28, 29, 30, 31, 32,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -198,7 +198,7 @@ mod tests {
     /// reuse of removed ids (13 = JwtHmacSign, 16 = JwtSignPayload).
     #[test]
     fn command_ids_unique_and_reserved_respected() {
-        let all: Vec<u32> = (0u32..=30)
+        let all: Vec<u32> = (0u32..=32)
             .filter(|&i| !matches!(Command::from(i), Command::Unknown))
             .collect();
         let mut dedup = all.clone();
