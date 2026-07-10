@@ -107,7 +107,12 @@ fi
 # KMS_ALLOW_OPEN_MODE=1). Auto-provision one so a node is never left in the
 # reachable-but-authed-API-locked state — the operator can rotate it later. ──
 if [ -z "$(env_get KMS_API_KEY)" ] && [ "$(env_get KMS_ALLOW_OPEN_MODE)" != 1 ]; then
-  env_set KMS_API_KEY "kms_$(openssl rand -hex 24)"
+  # Capture + validate the entropy BEFORE writing: a bare `env_set "kms_$(openssl…)"`
+  # would, if openssl were missing/failing, silently persist a predictable `kms_` key
+  # (command-substitution failure does not abort under set -e inside an argument).
+  api_hex="$(openssl rand -hex 24)" || die "failed to generate KMS_API_KEY entropy"
+  [[ "$api_hex" =~ ^[0-9a-f]{48}$ ]] || die "invalid KMS_API_KEY entropy from openssl"
+  env_set KMS_API_KEY "kms_$api_hex"
   log "generated KMS_API_KEY (fail-closed API was unprovisioned)"
 fi
 

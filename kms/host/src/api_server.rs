@@ -6356,12 +6356,17 @@ pub async fn start_kms_server() -> Result<()> {
         .and(warp::get())
         .map(|| {
             // Middle-ellipsis mask for at-a-glance display; full value in a <details>.
+            // Slice by chars (not bytes) so a non-ASCII env value can never panic on a
+            // UTF-8 boundary — values are operator-set, but this stays fail-safe.
             fn mask(s: &str) -> String {
                 let t = s.trim();
-                if t.len() <= 22 {
+                let chars: Vec<char> = t.chars().collect();
+                if chars.len() <= 22 {
                     return t.to_string();
                 }
-                format!("{}…{}", &t[..12], &t[t.len() - 8..])
+                let head: String = chars[..12].iter().collect();
+                let tail: String = chars[chars.len() - 8..].iter().collect();
+                format!("{head}…{tail}")
             }
             fn esc(s: &str) -> String {
                 s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
