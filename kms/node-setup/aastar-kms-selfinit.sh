@@ -13,8 +13,7 @@
 #
 # First-boot prerequisite (set by the installer): kms-api must be started with the
 # provisioning gate on, i.e. KMS_BLS_PROVISIONING=1 (+ KMS_KEEPER_PROVISIONING=1 if
-# KMS_KEEPER_ENABLE=1) present in the running kms-api environment. This script turns
-# it back off when done.
+# KMS_KEEPER_ENABLE=1) present in kms.env. This script turns it back off when done.
 set -euo pipefail
 
 CONFIG_DIR=/etc/airaccount
@@ -35,98 +34,116 @@ if [ -f "$MARKER" ]; then
 fi
 mkdir -p "$CONFIG_DIR"
 
-# ── kms.env idempotent upsert helpers (atomic, 0600) ──
-env_get() { [ -f "$KMS_ENV" ] && grep -E "^$1=" "$KMS_ENV" | head -1 | cut -d= -f2- || true; }
+# ── kms.env idempotent upsert helpers (atomic same-dir rename, 0600) ──
+_valid_key() { case "$1" in [A-Z_][A-Z0-9_]*) return 0 ;; *) die "invalid env key: $1" ;; esac; }
+env_get() {
+  _valid_key "$1"
+  [ -f "$KMS_ENV" ] && grep -E "^$1=" "$KMS_ENV" | head -1 | cut -d= -f2- || true
+}
+_env_write() { # replace kms.env atomically from stdin
+  local tmp; tmp="$(mktemp "$CONFIG_DIR/.kmsenv.XXXXXX")"
+  cat > "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$KMS_ENV"
+}
 env_set() {
-  local k="$1" v="$2" tmp
-  tmp="$(mktemp)"
-  { [ -f "$KMS_ENV" ] && grep -v -E "^$k=" "$KMS_ENV" || true; } > "$tmp"
-  printf '%s=%s\n' "$k" "$v" >> "$tmp"
-  install -m 600 "$tmp" "$KMS_ENV"; rm -f "$tmp"
+  _valid_key "$1"
+  local k="$1" v="$2"
+  { [ -f "$KMS_ENV" ] && grep -v -E "^$k=" "$KMS_ENV" || true; printf '%s=%s\n' "$k" "$v"; } | _env_write
 }
 env_del() {
+  _valid_key "$1"
   [ -f "$KMS_ENV" ] || return 0
-  local k="$1" tmp; tmp="$(mktemp)"
-  grep -v -E "^$k=" "$KMS_ENV" > "$tmp" || true
-  install -m 600 "$tmp" "$KMS_ENV"; rm -f "$tmp"
+  { grep -v -E "^$1=" "$KMS_ENV" || true; } | _env_write
 }
-# extract a JSON string field without a python dep on the field name being present
 json_str() { python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
 
-# ── 1. shared signer token (generate once, persisted) ──
-TOKEN="$(env_get KMS_BLS_SIGNER_TOKEN)"
-if [ -z "$TOKEN" ]; then
-  TOKEN="$(openssl rand -hex 32)"
-  env_set KMS_BLS_SIGNER_TOKEN "$TOKEN"
+wait_signer() {
+  for _ in $(seq 1 30); do
+    curl -sf -m2 "$SIGNER/health" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  die "signer $SIGNER not up after 30s — is kms-api running?"
+}
+restart_kms() { # $1 = fatal-on-fail (1) or best-effort (0)
+  systemctl restart kms-api.service 2>/dev/null && return 0
+  if [ "${1:-0}" = 1 ]; then die "kms-api restart failed — refusing to finish (gate may still be live)"; fi
+  log "WARN: kms-api restart failed"
+}
+
+# ── 1. shared signer tokens (generate once, persisted) ──
+if [ -z "$(env_get KMS_BLS_SIGNER_TOKEN)" ]; then
+  env_set KMS_BLS_SIGNER_TOKEN "$(openssl rand -hex 32)"
   log "generated BLS signer token"
 fi
+TOKEN="$(env_get KMS_BLS_SIGNER_TOKEN)"
 
-# ── wait for the loopback signer to come up ──
-up=0
-for _ in $(seq 1 30); do
-  if curl -sf -m2 "$SIGNER/health" >/dev/null 2>&1; then up=1; break; fi
-  sleep 1
-done
-[ "$up" = 1 ] || die "signer $SIGNER not up after 30s — is kms-api running?"
+KEEPER_ENABLE="$(env_get KMS_KEEPER_ENABLE)"
+if [ "$KEEPER_ENABLE" = 1 ] && [ -z "$(env_get KMS_KEEPER_SIGNER_TOKEN)" ]; then
+  env_set KMS_KEEPER_SIGNER_TOKEN "$(openssl rand -hex 32)"
+  log "generated keeper signer token"
+fi
 
-# ── 2. BLS provisioning (idempotent) ──
-BLS_KEY_ID="$(env_get KMS_BLS_KEY_ID)"
-if [ -n "$BLS_KEY_ID" ]; then
-  log "BLS key already provisioned ($BLS_KEY_ID); skip"
+# ── 2. restart kms-api so it runs WITH the tokens+gates from kms.env, THEN provision.
+# Required because keeper /kms/gen-keeper-eoa is fail-closed: it rejects unless the
+# RUNNING process has KMS_KEEPER_SIGNER_TOKEN. (BLS /gen-key would tolerate a token
+# mismatch via its localhost default, but we make both correct + explicit.) ──
+restart_kms 1
+wait_signer
+
+# ── 3. BLS provisioning (idempotent; both key_id AND pubkey must be present) ──
+if [ -n "$(env_get KMS_BLS_KEY_ID)" ] && [ -n "$(env_get KMS_BLS_PUBKEY)" ]; then
+  log "BLS key already provisioned ($(env_get KMS_BLS_KEY_ID)); skip"
 else
   log "provisioning TEE BLS key via /gen-key ..."
-  resp="$(curl -s -m20 -X POST "$SIGNER/gen-key" -H "x-signer-token: $TOKEN")"
+  resp="$(curl -s -m20 -X POST "$SIGNER/gen-key" -H "x-signer-token: $TOKEN" || true)"
   if printf '%s' "$resp" | grep -q '"key_id"'; then
-    BLS_KEY_ID="$(printf '%s' "$resp" | json_str key_id)"
+    bls_id="$(printf '%s' "$resp" | json_str key_id)"
     bls_pub="$(printf '%s' "$resp" | json_str public_key)"
-    [ -n "$BLS_KEY_ID" ] && [ -n "$bls_pub" ] || die "gen-key returned malformed json: $resp"
-    env_set KMS_BLS_KEY_ID "$BLS_KEY_ID"
+    [ -n "$bls_id" ] && [ -n "$bls_pub" ] || die "gen-key returned malformed json: $resp"
+    # pubkey first, then key_id — so "key_id present" always implies "pubkey present".
     env_set KMS_BLS_PUBKEY "$bls_pub"
-    log "BLS provisioned: key_id=$BLS_KEY_ID"
+    env_set KMS_BLS_KEY_ID "$bls_id"
+    log "BLS provisioned: key_id=$bls_id"
   elif printf '%s' "$resp" | grep -q "already exists"; then
     # A sealed TEE BLS singleton exists but its key_id is not recorded in kms.env.
-    # We refuse to guess — the operator must recover the key_id or remove the stale
-    # singleton (there is no silent-overwrite path; the TA enforces a singleton).
+    # Refuse to guess — the operator must recover the key_id or remove the stale
+    # singleton (the TA enforces a singleton; no silent-overwrite path). Marker is
+    # NOT written, so a rerun after manual fix still works.
     die "a TEE BLS singleton already exists but KMS_BLS_KEY_ID is unrecorded — \
 manual resolution needed (recover the key_id, or remove the stale singleton). resp: $resp"
   else
     die "gen-key failed: $resp"
   fi
 fi
+BLS_KEY_ID="$(env_get KMS_BLS_KEY_ID)"
 BLS_PUBKEY="$(env_get KMS_BLS_PUBKEY)"
 
-# ── 3. keeper EOA provisioning (opt-in, CC-34; graceful if the binary predates it) ──
+# ── 4. keeper EOA provisioning (opt-in, CC-34; graceful if the binary predates it) ──
 KEEPER_ADDR=""
-if [ "${KMS_KEEPER_ENABLE:-0}" = "1" ]; then
-  KTOKEN="$(env_get KMS_KEEPER_SIGNER_TOKEN)"
-  if [ -z "$KTOKEN" ]; then
-    KTOKEN="$(openssl rand -hex 32)"
-    env_set KMS_KEEPER_SIGNER_TOKEN "$KTOKEN"
-    log "generated keeper signer token"
-  fi
-  KEEPER_ADDR="$(env_get KMS_KEEPER_ADDRESS)"
-  if [ -n "$(env_get KMS_KEEPER_KEY_ID)" ] && [ -n "$KEEPER_ADDR" ]; then
+if [ "$KEEPER_ENABLE" = 1 ]; then
+  if [ -n "$(env_get KMS_KEEPER_KEY_ID)" ] && [ -n "$(env_get KMS_KEEPER_ADDRESS)" ]; then
+    KEEPER_ADDR="$(env_get KMS_KEEPER_ADDRESS)"
     log "keeper already provisioned ($KEEPER_ADDR); skip"
   else
     log "provisioning keeper EOA via /kms/gen-keeper-eoa ..."
-    kresp="$(curl -s -m20 -X POST "$SIGNER/kms/gen-keeper-eoa" -H "x-signer-token: $KTOKEN" || true)"
-    if printf '%s' "$kresp" | grep -q '"address"'; then
-      k_id="$(printf '%s' "$kresp" | json_str key_id)"
-      KEEPER_ADDR="$(printf '%s' "$kresp" | json_str address)"
+    ktok="$(env_get KMS_KEEPER_SIGNER_TOKEN)"
+    kresp="$(curl -s -m20 -X POST "$SIGNER/kms/gen-keeper-eoa" -H "x-signer-token: $ktok" || true)"
+    k_id="$(printf '%s' "$kresp" | json_str key_id)"
+    k_addr="$(printf '%s' "$kresp" | json_str address)"
+    if [ -n "$k_id" ] && [ -n "$k_addr" ]; then
       env_set KMS_KEEPER_KEY_ID "$k_id"
-      env_set KMS_KEEPER_ADDRESS "$KEEPER_ADDR"
+      env_set KMS_KEEPER_ADDRESS "$k_addr"
+      KEEPER_ADDR="$k_addr"
       log "keeper provisioned: $KEEPER_ADDR (fund this EOA)"
     else
-      # Binary may predate CC-34 (no /kms/gen-keeper-eoa route → 404). Keeper is
-      # optional for the BLS unattended run, so warn and continue rather than fail.
+      # Binary may predate CC-34 (no /kms/gen-keeper-eoa route → 404), or token/gate
+      # off. Keeper is optional for the BLS unattended run → warn and continue.
       log "WARN: keeper provisioning skipped (endpoint unavailable/failed): $kresp"
-      KEEPER_ADDR=""
     fi
   fi
 fi
 
-# ── 4. emit DVT handoff (KMS produces; @repo:dvt consumes into its node_state/dvt.env) ──
-umask 077
+# ── 5. emit DVT handoff (KMS produces; @repo:dvt consumes into its node_state/dvt.env) ──
+htmp="$(mktemp "$CONFIG_DIR/.handoff.XXXXXX")"
 {
   echo "# AAStar KMS -> DVT handoff (generated by aastar-kms-selfinit; consume, do not hand-edit)"
   echo "RUST_SIGNER_URL=$SIGNER"
@@ -139,18 +156,21 @@ umask 077
     echo "KEEPER_SIGNER_TOKEN=$(env_get KMS_KEEPER_SIGNER_TOKEN)"
     echo "KEEPER_ADDRESS=$KEEPER_ADDR"
   fi
-} > "$HANDOFF"
-chmod 640 "$HANDOFF"
+} > "$htmp"
+chmod 600 "$htmp"; mv -f "$htmp" "$HANDOFF"
 log "wrote DVT handoff: $HANDOFF (BLS pubkey + shared signer token${KEEPER_ADDR:+ + keeper})"
 
-# ── 5. close the provisioning gate + restart kms-api to load the recorded key ids ──
+# ── 6. close the provisioning gate + restart kms-api to load the recorded key ids.
+# Fatal if the restart fails: we must not leave the running process with the gate
+# open AND write the marker (which would block a retry). ──
 env_del KMS_BLS_PROVISIONING
 env_del KMS_KEEPER_PROVISIONING
 rm -f /etc/systemd/system/kms-api.service.d/prov.conf 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 log "closed provisioning gate; restarting kms-api to load key ids"
-systemctl restart kms-api.service 2>/dev/null || log "WARN: kms-api restart failed (restart it manually)"
+restart_kms 1
+wait_signer
 
-# ── 6. mark done ──
+# ── 7. mark done ──
 : > "$MARKER"; chmod 600 "$MARKER"
 log "self-init complete — KMS provisioned; @repo:dvt consumes $HANDOFF for its node_state/dvt.env"

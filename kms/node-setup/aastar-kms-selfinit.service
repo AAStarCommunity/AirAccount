@@ -19,8 +19,10 @@ RemainAfterExit=yes
 # 路径按预刷板布局调整(见 README)。
 ExecStart=/opt/aastar/node-setup/aastar-kms-selfinit.sh
 # 只写 /etc/airaccount(config + handoff + marker);需 systemctl 关 gate + 重启 kms-api。
+# 两次 kms-api 重启(provision 前载 token/gate、provision 后卸 gate)各 + health 等待
+# + gen-key/keeper 各 20s → 放宽到 240s。
 Restart=no
-TimeoutStartSec=120
+TimeoutStartSec=240
 
 [Install]
 WantedBy=multi-user.target
