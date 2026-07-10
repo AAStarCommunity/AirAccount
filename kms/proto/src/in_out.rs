@@ -711,21 +711,21 @@ pub struct BlsRemoveOutput {
     pub removed: u32,
 }
 
-// CC-24 staked registration: BLS proof-of-possession over the OPERATOR address.
-// The TA signs `operator` under the PoP DST (AASTAR_DVT_POP_…) — an operator-bound
-// message the KMS chooses, NOT an arbitrary caller-provided point, so /pop cannot be
-// used as a signing oracle to forge signatures on chosen messages.
+// CC-37 staked registration: BLS proof-of-possession (RFC-standard self-PoP over the node's
+// OWN public key). The TA derives its pubkey from the sealed key and signs it under BLS_DST —
+// the caller supplies NO message, so /pop is not a signing oracle. Byte-identical to SDK
+// buildDvtPop. Input is just the key_id (board singleton); output is the DvtPop tuple.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BlsPopSignInput {
     pub key_id: Uuid,
-    /// 20-byte operator EOA the node is bound to (msg.sender of registerWithProof).
-    pub operator: [u8; 20],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BlsPopSignOutput {
-    /// EIP-2537 uncompressed G2 PoP signature (256 bytes) = sk · hashToG2(operator, POP_DST).
-    pub signature: Vec<u8>,
-    /// Compressed G2 (96 bytes).
-    pub signature_compact: Vec<u8>,
+    /// G1 public key in 128-byte EIP-2537 layout (registerWithProof's `publicKey`).
+    pub public_key: Vec<u8>,
+    /// hashToCurve(publicKey, BLS_DST) as 256-byte EIP-2537 G2 (registerWithProof's `popPoint`).
+    pub pop_point: Vec<u8>,
+    /// sk · popPoint as 256-byte EIP-2537 G2 (registerWithProof's `popSig`).
+    pub pop_signature: Vec<u8>,
 }

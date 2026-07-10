@@ -5912,24 +5912,24 @@ struct BlsGenResp {
     public_key: String,
 }
 
-// CC-24 staked registration: BLS proof-of-possession. DVT's register-node.mjs POSTs the
-// OPERATOR address (not a caller-chosen point); the TA signs sk·hashToG2(operator, POP_DST),
-// so /pop is operator-bound and can never be used as a signing oracle. Loopback + token.
+// CC-37 staked registration: BLS proof-of-possession. RFC-standard self-PoP — the TA signs the
+// node's OWN pubkey under BLS_DST (the caller supplies no message), byte-identical to SDK core
+// buildDvtPop. Returns the full DvtPop tuple for registerWithProof. Loopback + token.
 #[derive(serde::Deserialize)]
 struct PopSignReq {
+    /// Informational only (board singleton BLS key is addressed by KMS_BLS_KEY_ID from env).
     #[allow(dead_code)]
-    node_id: String,
-    /// 20-byte operator EOA (hex, 0x-optional) — msg.sender of registerWithProof.
-    operator: String,
+    node_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
 struct PopSignResp {
-    /// EIP-2537 uncompressed G2 PoP signature (256B) — feeds registerWithProof's popSig.
-    pop_signature: String,
-    /// Compressed G2 (96B).
-    pop_signature_compact: String,
+    /// G1 pubkey, 128B EIP-2537 (registerWithProof `publicKey`).
     public_key: String,
+    /// hashToCurve(publicKey, BLS_DST), 256B EIP-2537 G2 (registerWithProof `popPoint`).
+    pop_point: String,
+    /// sk·popPoint, 256B EIP-2537 G2 (registerWithProof `popSig`).
+    pop_signature: String,
 }
 
 // ── CC-34: keeper/operator ECDSA(secp256k1) signer — mirrors the BLS signer on
@@ -6166,11 +6166,11 @@ async fn bls_sign_handler(
     }
 }
 
-/// CC-24 staked registration: sign a BLS proof-of-possession over the operator address so
-/// a KMS-TEE key-less DVT node can call the validator's registerWithProof. Same key_id-from-env
-/// + token as /sign. The TA signs the operator under POP_DST (never a caller-supplied point).
+/// CC-37 staked registration: return the BLS proof-of-possession tuple so a KMS-TEE key-less
+/// DVT node can call the validator's registerWithProof. Same key_id-from-env + token as /sign.
+/// The TA signs its OWN pubkey under BLS_DST (RFC self-PoP; caller supplies no message).
 async fn pop_sign_handler(
-    req: PopSignReq,
+    _req: PopSignReq,
     token: Option<String>,
     server: Arc<KmsApiServer>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
@@ -6186,29 +6186,11 @@ async fn pop_sign_handler(
             )))
         }
     };
-    let pk_hex = match std::env::var("KMS_BLS_PUBKEY") {
-        Ok(p) if !p.is_empty() => p,
-        _ => {
-            return Err(warp::reject::custom(ApiError(
-                "KMS_BLS_PUBKEY not configured".into(),
-            )))
-        }
-    };
-    let ob = match hex::decode(req.operator.trim_start_matches("0x")) {
-        Ok(b) if b.len() == 20 => b,
-        _ => {
-            return Err(warp::reject::custom(ApiError(
-                "operator must be a 20-byte address hex".into(),
-            )))
-        }
-    };
-    let mut operator = [0u8; 20];
-    operator.copy_from_slice(&ob);
-    match server.tee.bls_pop_sign(key_id, operator).await {
-        Ok((sig, compact)) => Ok(warp::reply::json(&PopSignResp {
-            pop_signature: format!("0x{}", hex::encode(sig)),
-            pop_signature_compact: hex::encode(compact),
-            public_key: pk_hex,
+    match server.tee.bls_pop_sign(key_id).await {
+        Ok((public_key, pop_point, pop_signature)) => Ok(warp::reply::json(&PopSignResp {
+            public_key: format!("0x{}", hex::encode(public_key)),
+            pop_point: format!("0x{}", hex::encode(pop_point)),
+            pop_signature: format!("0x{}", hex::encode(pop_signature)),
         })),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS PoP sign failed: {}",

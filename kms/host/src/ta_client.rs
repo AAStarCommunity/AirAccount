@@ -649,26 +649,28 @@ impl TeeHandle {
         Ok((output.signature, output.signature_compact))
     }
 
-    /// BLS proof-of-possession over the 20-byte operator address (POP_DST) — CC-24 staked
-    /// registration. Returns (EIP-2537 G2 256B, compact G2 96B). The TA signs the operator,
-    /// never a caller-supplied point, so this is not a general signing oracle.
+    /// BLS proof-of-possession (RFC self-PoP over the node's own pubkey) — CC-37 staked
+    /// registration. Returns the DvtPop tuple (publicKey 128B, popPoint 256B, popSig 256B),
+    /// all EIP-2537. The TA signs its own pubkey (no caller message) → not a signing oracle.
     pub async fn bls_pop_sign(
         &self,
         key_id: uuid::Uuid,
-        operator: [u8; 20],
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
-        let input = bincode::serialize(&proto::BlsPopSignInput { key_id, operator })
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let input = bincode::serialize(&proto::BlsPopSignInput { key_id })
             .context("Failed to serialize BlsPopSignInput")?;
         let out = self.call(proto::Command::BlsPopSign, input).await?;
         let output: proto::BlsPopSignOutput =
             bincode::deserialize(&out).context("Failed to deserialize BlsPopSignOutput")?;
         anyhow::ensure!(
-            output.signature.len() == 256 && output.signature_compact.len() == 96,
-            "BLS PoP signature length invalid (EIP-2537 {} want 256, compact {} want 96)",
-            output.signature.len(),
-            output.signature_compact.len()
+            output.public_key.len() == 128
+                && output.pop_point.len() == 256
+                && output.pop_signature.len() == 256,
+            "BLS PoP tuple length invalid (publicKey {} want 128, popPoint {} want 256, popSig {} want 256)",
+            output.public_key.len(),
+            output.pop_point.len(),
+            output.pop_signature.len()
         );
-        Ok((output.signature, output.signature_compact))
+        Ok((output.public_key, output.pop_point, output.pop_signature))
     }
 
     /// Return the sealed BLS key's 48B compressed G1 public key.

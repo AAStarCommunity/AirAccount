@@ -1492,18 +1492,19 @@ fn bls_sign(input: &proto::BlsSignInput) -> Result<proto::BlsSignOutput> {
     })
 }
 
-/// CC-24 staked registration: BLS proof-of-possession over the operator address (POP_DST).
-/// Signs the caller-supplied 20-byte OPERATOR (an operator-bound message the KMS chooses),
-/// never an arbitrary point — so /pop cannot forge signatures on chosen messages.
+/// CC-37 staked registration: BLS proof-of-possession (RFC-standard self-PoP over the node's
+/// OWN pubkey). Derives the pubkey from the sealed key and signs it under BLS_DST — the caller
+/// supplies no message, so /pop is not a signing oracle. Returns the DvtPop tuple.
 fn bls_pop_sign(input: &proto::BlsPopSignInput) -> Result<proto::BlsPopSignOutput> {
     let db = open_storage()?;
     let k = db
         .get::<BlsKey>(&input.key_id.to_string())
         .map_err(|_| anyhow!("BLS key not found: {}", input.key_id))?;
-    let (eip2537, compact) = bls::sign_pop(&k.private_key, &input.operator)?;
+    let (public_key, pop_point, pop_signature) = bls::sign_pop(&k.private_key)?;
     Ok(proto::BlsPopSignOutput {
-        signature: eip2537.to_vec(),
-        signature_compact: compact.to_vec(),
+        public_key: public_key.to_vec(),
+        pop_point: pop_point.to_vec(),
+        pop_signature: pop_signature.to_vec(),
     })
 }
 
