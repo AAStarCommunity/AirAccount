@@ -5985,6 +5985,34 @@ fn check_keeper_token(token: &Option<String>) -> Result<(), warp::Rejection> {
     }
 }
 
+/// Fail-closed token gate for the DESTRUCTIVE /remove-key (unlike /gen-key which
+/// tolerates a tokenless localhost default). Deleting the sealed BLS key must never
+/// be doable by an unauthenticated co-located process — so the signer token MUST be
+/// set, constant-time compared.
+fn check_signer_token_required(token: &Option<String>) -> Result<(), warp::Rejection> {
+    let expected = match std::env::var("KMS_BLS_SIGNER_TOKEN") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "BLS remove requires KMS_BLS_SIGNER_TOKEN to be set (fail-closed — \
+                 destroying the sealed key must not be tokenless)"
+                    .into(),
+            )))
+        }
+    };
+    if token
+        .as_deref()
+        .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(warp::reject::custom(ApiError(
+            "invalid or missing X-Signer-Token".into(),
+        )))
+    }
+}
+
 // Codex High#2/Med#3: :3100 is localhost-only, but a co-located process could still
 // reach it. If KMS_BLS_SIGNER_TOKEN is set, require it (X-Signer-Token header) on
 // /sign + /gen-key. Unset = localhost-only default (dev / backward-compat). The token
@@ -6049,7 +6077,7 @@ async fn bls_remove_handler(
             "BLS remove disabled (destructive; set KMS_BLS_ALLOW_REMOVE=1 to enable)".into(),
         )));
     }
-    check_signer_token(&token)?;
+    check_signer_token_required(&token)?; // fail-closed (not the tokenless gen-key default)
     match server.tee.bls_remove().await {
         Ok(removed) => Ok(warp::reply::json(&serde_json::json!({ "removed": removed }))),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
