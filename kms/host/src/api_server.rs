@@ -5922,13 +5922,18 @@ struct PopSignReq {
     node_id: Option<String>,
 }
 
+// camelCase JSON keys — DVT register-node.mjs reads `{ popPoint, popSig }` and SDK's DvtPop
+// is `{ publicKey, popPoint, popSig }`. The exact keys are the cross-repo contract (CC-37).
 #[derive(serde::Serialize)]
 struct PopSignResp {
     /// G1 pubkey, 128B EIP-2537 (registerWithProof `publicKey`).
+    #[serde(rename = "publicKey")]
     public_key: String,
     /// hashToCurve(publicKey, BLS_DST), 256B EIP-2537 G2 (registerWithProof `popPoint`).
+    #[serde(rename = "popPoint")]
     pop_point: String,
     /// sk·popPoint, 256B EIP-2537 G2 (registerWithProof `popSig`).
+    #[serde(rename = "popSig")]
     pop_signature: String,
 }
 
