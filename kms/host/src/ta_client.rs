@@ -659,6 +659,50 @@ impl TeeHandle {
         Ok(output.public_key)
     }
 
+    // ── CC-34: keeper/operator ECDSA(secp256k1)—— 密钥在 TA 内,CA 只发命令、取签名 ──
+
+    /// 生成独立 secp256k1 keeper 密钥(TA 内 TEE-TRNG 生成+密封)。
+    /// 返回 (65B 未压缩公钥, 20B 以太坊地址=充值 EOA)。一次性 provision(singleton)。
+    pub async fn keeper_gen_key(&self, key_id: uuid::Uuid) -> Result<(Vec<u8>, [u8; 20])> {
+        let input = bincode::serialize(&proto::KeeperGenKeyInput { key_id })
+            .context("Failed to serialize KeeperGenKeyInput")?;
+        let out = self.call(proto::Command::KeeperGenKey, input).await?;
+        let output: proto::KeeperGenKeyOutput =
+            bincode::deserialize(&out).context("Failed to deserialize KeeperGenKeyOutput")?;
+        anyhow::ensure!(
+            output.public_key.len() == 65 && output.public_key[0] == 0x04,
+            "keeper pubkey invalid (expected 65B uncompressed 0x04.., got {}B)",
+            output.public_key.len()
+        );
+        Ok((output.public_key, output.address))
+    }
+
+    /// secp256k1-sign a raw 32-byte digest with the sealed keeper key. Returns a
+    /// 65-byte Ethereum-recoverable signature r(32)||s(32)||v(1), v=27/28, low-S.
+    pub async fn keeper_sign(&self, key_id: uuid::Uuid, digest: [u8; 32]) -> Result<Vec<u8>> {
+        let input = bincode::serialize(&proto::KeeperSignInput { key_id, digest })
+            .context("Failed to serialize KeeperSignInput")?;
+        let out = self.call(proto::Command::KeeperSign, input).await?;
+        let output: proto::KeeperSignOutput =
+            bincode::deserialize(&out).context("Failed to deserialize KeeperSignOutput")?;
+        anyhow::ensure!(
+            output.signature.len() == 65,
+            "keeper signature length invalid (expected 65, got {})",
+            output.signature.len()
+        );
+        Ok(output.signature)
+    }
+
+    /// Return the sealed keeper key's 65B uncompressed pubkey + 20B address.
+    pub async fn keeper_pubkey(&self, key_id: uuid::Uuid) -> Result<(Vec<u8>, [u8; 20])> {
+        let input = bincode::serialize(&proto::KeeperPubKeyInput { key_id })
+            .context("Failed to serialize KeeperPubKeyInput")?;
+        let out = self.call(proto::Command::KeeperPubKey, input).await?;
+        let output: proto::KeeperPubKeyOutput =
+            bincode::deserialize(&out).context("Failed to deserialize KeeperPubKeyOutput")?;
+        Ok((output.public_key, output.address))
+    }
+
     /// Force-remove a gap key from TEE secure storage.
     /// Only called when `api_server` has confirmed the wallet's passkey_pubkey
     /// is not a valid P-256 curve point. Requires TA v0.20.0+ (ForceRemoveWallet = 23).

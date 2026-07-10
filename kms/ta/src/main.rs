@@ -171,6 +171,22 @@ impl Storable for BlsKey {
     }
 }
 
+// CC-34: keeper/operator secp256k1 (ECDSA) key sealed in the TA (never leaves TEE).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct KeeperKey {
+    key_id: String,
+    private_key: [u8; 32],
+    public_key: Vec<u8>, // 65-byte uncompressed (0x04 || X || Y)
+}
+
+impl Storable for KeeperKey {
+    type Key = String;
+
+    fn unique_id(&self) -> Self::Key {
+        self.key_id.clone()
+    }
+}
+
 impl JwtSecretStore {
     fn new() -> Self {
         Self {
@@ -1487,6 +1503,95 @@ fn bls_pubkey(input: &proto::BlsPubKeyInput) -> Result<proto::BlsPubKeyOutput> {
     })
 }
 
+// ── CC-34: keeper/operator ECDSA(secp256k1)—— 密钥在 TA 内生成+密封，永不出 TEE ──
+
+/// Ethereum address = last 20 bytes of keccak256(uncompressed_pubkey[1..]).
+fn eth_address_from_uncompressed(pk65: &[u8; 65]) -> [u8; 20] {
+    let h = eip712::keccak(&pk65[1..]);
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&h[12..]);
+    addr
+}
+
+/// 生成独立 secp256k1 keeper 密钥(TEE TRNG 熵)→ 密封 secure storage → 返回 65B 未压缩
+/// 公钥 + 20B 以太坊地址(充值 EOA)。一次性 provision;已存在则拒绝(singleton,不覆盖)。
+/// 无 passkey 门（keeper 自主签名，授权在 host provisioning-gate + X-Signer-Token）。
+fn keeper_gen_key(input: &proto::KeeperGenKeyInput) -> Result<proto::KeeperGenKeyOutput> {
+    let db = open_storage()?;
+    let key_id = input.key_id.to_string();
+    // Singleton: one keeper key per board (mirrors bls_gen_key). Stops a looped
+    // /gen-keeper-eoa from filling secure storage.
+    if db.count_entries::<KeeperKey>()? > 0 {
+        return Err(anyhow!(
+            "a keeper key already exists (singleton); remove it before provisioning a new one"
+        ));
+    }
+    if db.get::<KeeperKey>(&key_id).is_ok() {
+        return Err(anyhow!("keeper key already exists: {}", key_id));
+    }
+    let secp = secp256k1::Secp256k1::new();
+    // Rejection-sample TEE randomness until it is a valid secp256k1 scalar.
+    let secret_key = loop {
+        let mut sk_bytes = [0u8; 32];
+        Random::generate(&mut sk_bytes);
+        if let Ok(sk) = secp256k1::SecretKey::from_slice(&sk_bytes) {
+            break sk;
+        }
+    };
+    let pk = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+    let pk_uncompressed = pk.serialize_uncompressed(); // [u8; 65], leading 0x04
+    let address = eth_address_from_uncompressed(&pk_uncompressed);
+    db.put(&KeeperKey {
+        key_id: key_id.clone(),
+        private_key: secret_key.secret_bytes(),
+        public_key: pk_uncompressed.to_vec(),
+    })?;
+    Ok(proto::KeeperGenKeyOutput {
+        key_id: input.key_id,
+        public_key: pk_uncompressed.to_vec(),
+        address,
+    })
+}
+
+/// 用密封的 keeper 私钥签 32B raw digest（不再 hash）→ 65B recoverable r||s||v (v=27/28)。
+/// 私钥不出 TEE，只回签名。rust-secp256k1 的 sign_ecdsa_recoverable 产出 canonical low-S。
+fn keeper_sign(input: &proto::KeeperSignInput) -> Result<proto::KeeperSignOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<KeeperKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("keeper key not found: {}", input.key_id))?;
+    let secret_key = secp256k1::SecretKey::from_slice(&k.private_key)?;
+    let secp = secp256k1::Secp256k1::new();
+    let message = secp256k1::Message::from_slice(&input.digest)?;
+    let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, sig_bytes) = sig.serialize_compact();
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&sig_bytes); // r(32) || s(32)
+    signature.push(recovery_id.to_i32() as u8 + 27); // v = 27/28
+    Ok(proto::KeeperSignOutput { signature })
+}
+
+/// 返回密封 keeper 密钥的 65B 未压缩公钥 + 20B 地址。
+fn keeper_pubkey(input: &proto::KeeperPubKeyInput) -> Result<proto::KeeperPubKeyOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<KeeperKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("keeper key not found: {}", input.key_id))?;
+    let mut pk65 = [0u8; 65];
+    if k.public_key.len() != 65 {
+        return Err(anyhow!(
+            "sealed keeper pubkey length invalid: {}",
+            k.public_key.len()
+        ));
+    }
+    pk65.copy_from_slice(&k.public_key);
+    let address = eth_address_from_uncompressed(&pk65);
+    Ok(proto::KeeperPubKeyOutput {
+        public_key: k.public_key,
+        address,
+    })
+}
+
 // H-1 (DOWNGRADED to Medium — tracked as an accepted limitation / follow-up issue):
 // DeriveAddressAuto carries no passkey assertion and mutates+persists wallet state
 // (next_address_index). It is invoked by the CA immediately after wallet creation,
@@ -2626,6 +2731,9 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::BlsGenKey => process(serialized_input, bls_gen_key),
         Command::BlsSign => process(serialized_input, bls_sign),
         Command::BlsPubKey => process(serialized_input, bls_pubkey),
+        Command::KeeperGenKey => process(serialized_input, keeper_gen_key),
+        Command::KeeperSign => process(serialized_input, keeper_sign),
+        Command::KeeperPubKey => process(serialized_input, keeper_pubkey),
         _ => bail!("Unsupported command"),
     }
 }
