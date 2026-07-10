@@ -34,6 +34,13 @@ if [ -f "$MARKER" ]; then
 fi
 mkdir -p "$CONFIG_DIR"
 
+# ── value validators (anchored — reject anything with an embedded newline, which
+# is the config-injection vector: a signer response field like
+# public_key="0x..\nKMS_BLS_PROVISIONING=1" would otherwise write a second line
+# into kms.env, re-opening the gate + crossing into the DVT handoff) ──
+_is_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
+_is_hex()  { [[ "$1" =~ ^0x[0-9a-fA-F]+$ ]]; } # 0x-prefixed hex; caller checks length
+
 # ── kms.env idempotent upsert helpers (atomic same-dir rename, 0600) ──
 _valid_key() { [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "invalid env key: $1"; }
 env_get() {
@@ -46,6 +53,10 @@ _env_write() { # replace kms.env atomically from stdin
 }
 env_set() {
   _valid_key "$1"
+  # Generic injection guard: a value must be a single line. Blocks any newline/CR
+  # from reaching kms.env regardless of source (belt-and-suspenders vs the typed
+  # validators applied to each provisioned value below).
+  case "$2" in *$'\n'* | *$'\r'*) die "refusing multi-line value for $1 (injection guard)" ;; esac
   local k="$1" v="$2"
   { [ -f "$KMS_ENV" ] && grep -v -E "^$k=" "$KMS_ENV" || true; printf '%s=%s\n' "$k" "$v"; } | _env_write
 }
@@ -108,6 +119,11 @@ else
     bls_id="$(printf '%s' "$resp" | json_str key_id)"
     bls_pub="$(printf '%s' "$resp" | json_str public_key)"
     [ -n "$bls_id" ] && [ -n "$bls_pub" ] || die "gen-key returned malformed json: $resp"
+    # Validate the signer's values before they touch kms.env — a UUID key_id and a
+    # 0x+96-hex (48-byte G1) pubkey. Rejects any injection payload (embedded newline
+    # fails the anchored regex) and truncation.
+    _is_uuid "$bls_id" || die "gen-key returned a non-uuid key_id (rejected): $bls_id"
+    { _is_hex "$bls_pub" && [ "${#bls_pub}" -eq 98 ]; } || die "gen-key returned an invalid BLS pubkey (want 0x+96 hex): $bls_pub"
     # pubkey first, then key_id — so "key_id present" always implies "pubkey present".
     env_set KMS_BLS_PUBKEY "$bls_pub"
     env_set KMS_BLS_KEY_ID "$bls_id"
@@ -139,6 +155,11 @@ if [ "$KEEPER_ENABLE" = 1 ]; then
     k_id="$(printf '%s' "$kresp" | json_str key_id)"
     k_addr="$(printf '%s' "$kresp" | json_str address)"
     if [ -n "$k_id" ] && [ -n "$k_addr" ]; then
+      # A non-empty keeper response must be well-formed (UUID key_id + 0x+40-hex
+      # 20-byte address). A malformed non-empty response is anomalous → fail-closed
+      # (die), not the graceful warn/continue reserved for an absent endpoint.
+      _is_uuid "$k_id" || die "keeper gen returned a non-uuid key_id (rejected): $k_id"
+      { _is_hex "$k_addr" && [ "${#k_addr}" -eq 42 ]; } || die "keeper gen returned an invalid address (want 0x+40 hex): $k_addr"
       env_set KMS_KEEPER_KEY_ID "$k_id"
       env_set KMS_KEEPER_ADDRESS "$k_addr"
       KEEPER_ADDR="$k_addr"
