@@ -1,0 +1,28 @@
+# AAStar KMS hands-off self-init (power-on first-boot provisioning)
+# 装:cp 到 /etc/systemd/system/ ; systemctl enable aastar-kms-selfinit
+#
+# 首启编排(installer 负责):kms-api 带 KMS_BLS_PROVISIONING=1 起来 → 本 oneshot 在其后
+# 跑 provisioning → 记 key_id 进 kms.env → 关 gate + 重启 kms-api → 写 marker。之后每次
+# 加电,marker 在 → 本服务不再跑(幂等),kms-api 直接以已 provision 的 key 自启。
+[Unit]
+Description=AAStar KMS hands-off self-init (first-boot TEE key provisioning)
+# After (not Requires) kms-api: the script polls :3100/health itself and must not
+# be torn down when it restarts kms-api at the end of provisioning.
+After=network-online.target kms-api.service
+Wants=network-online.target
+# 幂等:已初始化(marker 存在)则不启。
+ConditionPathExists=!/etc/airaccount/.kms-selfinit-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 路径按预刷板布局调整(见 README)。
+ExecStart=/opt/aastar/node-setup/aastar-kms-selfinit.sh
+# 只写 /etc/airaccount(config + handoff + marker);需 systemctl 关 gate + 重启 kms-api。
+# 两次 kms-api 重启(provision 前载 token/gate、provision 后卸 gate)各 + health 等待
+# + gen-key/keeper 各 20s → 放宽到 240s。
+Restart=no
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target
