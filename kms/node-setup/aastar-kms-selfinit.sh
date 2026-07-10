@@ -154,10 +154,12 @@ if [ "$KEEPER_ENABLE" = 1 ]; then
     kresp="$(curl -s -m20 -X POST "$SIGNER/kms/gen-keeper-eoa" -H "x-signer-token: $ktok" || true)"
     k_id="$(printf '%s' "$kresp" | json_str key_id)"
     k_addr="$(printf '%s' "$kresp" | json_str address)"
-    if [ -n "$k_id" ] && [ -n "$k_addr" ]; then
-      # A non-empty keeper response must be well-formed (UUID key_id + 0x+40-hex
-      # 20-byte address). A malformed non-empty response is anomalous → fail-closed
-      # (die), not the graceful warn/continue reserved for an absent endpoint.
+    if [ -z "$k_id" ] && [ -z "$k_addr" ]; then
+      # BOTH absent = endpoint truly unavailable (binary predates CC-34 → 404, or
+      # token/gate off). Keeper is optional for the BLS unattended run → warn/continue.
+      log "WARN: keeper provisioning skipped (endpoint unavailable/failed): $kresp"
+    elif [ -n "$k_id" ] && [ -n "$k_addr" ]; then
+      # BOTH present → must be well-formed (UUID key_id + 0x+40-hex 20-byte address).
       _is_uuid "$k_id" || die "keeper gen returned a non-uuid key_id (rejected): $k_id"
       { _is_hex "$k_addr" && [ "${#k_addr}" -eq 42 ]; } || die "keeper gen returned an invalid address (want 0x+40 hex): $k_addr"
       env_set KMS_KEEPER_KEY_ID "$k_id"
@@ -165,9 +167,9 @@ if [ "$KEEPER_ENABLE" = 1 ]; then
       KEEPER_ADDR="$k_addr"
       log "keeper provisioned: $KEEPER_ADDR (fund this EOA)"
     else
-      # Binary may predate CC-34 (no /kms/gen-keeper-eoa route → 404), or token/gate
-      # off. Keeper is optional for the BLS unattended run → warn and continue.
-      log "WARN: keeper provisioning skipped (endpoint unavailable/failed): $kresp"
+      # PARTIAL (exactly one of key_id/address present) = anomalous/corrupt/attack →
+      # fail closed. Not the graceful skip (that is reserved for BOTH absent).
+      die "keeper gen returned a partial response (one of key_id/address missing): $kresp"
     fi
   fi
 fi
