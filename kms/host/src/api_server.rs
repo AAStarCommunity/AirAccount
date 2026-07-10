@@ -5985,6 +5985,34 @@ fn check_keeper_token(token: &Option<String>) -> Result<(), warp::Rejection> {
     }
 }
 
+/// Fail-closed token gate for the DESTRUCTIVE /remove-key (unlike /gen-key which
+/// tolerates a tokenless localhost default). Deleting the sealed BLS key must never
+/// be doable by an unauthenticated co-located process — so the signer token MUST be
+/// set, constant-time compared.
+fn check_signer_token_required(token: &Option<String>) -> Result<(), warp::Rejection> {
+    let expected = match std::env::var("KMS_BLS_SIGNER_TOKEN") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            return Err(warp::reject::custom(ApiError(
+                "BLS remove requires KMS_BLS_SIGNER_TOKEN to be set (fail-closed — \
+                 destroying the sealed key must not be tokenless)"
+                    .into(),
+            )))
+        }
+    };
+    if token
+        .as_deref()
+        .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(warp::reject::custom(ApiError(
+            "invalid or missing X-Signer-Token".into(),
+        )))
+    }
+}
+
 // Codex High#2/Med#3: :3100 is localhost-only, but a co-located process could still
 // reach it. If KMS_BLS_SIGNER_TOKEN is set, require it (X-Signer-Token header) on
 // /sign + /gen-key. Unset = localhost-only default (dev / backward-compat). The token
@@ -6026,6 +6054,34 @@ async fn bls_gen_handler(
         })),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS gen failed: {}",
+            e
+        )))),
+    }
+}
+
+/// Remove the sealed BLS singleton — recovery for an orphaned key whose key_id was
+/// lost (can't be addressed by id), or rotation. DESTRUCTIVE, so double-gated:
+/// KMS_BLS_PROVISIONING=1 (provisioning session) AND KMS_BLS_ALLOW_REMOVE=1 (both
+/// off by default) + the signer token. Returns the count removed.
+async fn bls_remove_handler(
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if std::env::var("KMS_BLS_PROVISIONING").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS provisioning disabled (set KMS_BLS_PROVISIONING=1 to enable)".into(),
+        )));
+    }
+    if std::env::var("KMS_BLS_ALLOW_REMOVE").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS remove disabled (destructive; set KMS_BLS_ALLOW_REMOVE=1 to enable)".into(),
+        )));
+    }
+    check_signer_token_required(&token)?; // fail-closed (not the tokenless gen-key default)
+    match server.tee.bls_remove().await {
+        Ok(removed) => Ok(warp::reply::json(&serde_json::json!({ "removed": removed }))),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "BLS remove failed: {}",
             e
         )))),
     }
@@ -7080,6 +7136,14 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || gen_server.clone()))
         .and_then(bls_gen_handler);
+    // Remove the BLS singleton (orphan recovery / rotation) — double-gated, destructive.
+    let remove_server = server.clone();
+    let bls_remove_route = warp::post()
+        .and(warp::path("remove-key"))
+        .and(warp::path::end())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || remove_server.clone()))
+        .and_then(bls_remove_handler);
     // CC-34: keeper/operator ECDSA on the same loopback signer (distinct /kms/* paths).
     let keeper_sign_server = server.clone();
     let keeper_sign_route = warp::post()
@@ -7104,6 +7168,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     });
     let signer_routes = bls_sign_route
         .or(bls_gen_route)
+        .or(bls_remove_route)
         .or(keeper_sign_route)
         .or(keeper_gen_route)
         .or(bls_health)

@@ -1503,6 +1503,19 @@ fn bls_pubkey(input: &proto::BlsPubKeyInput) -> Result<proto::BlsPubKeyOutput> {
     })
 }
 
+/// 删除密封的 BLS 单例(枚举所有 BlsKey 逐个 delete)。用于恢复"key_id 丢失的孤儿
+/// key"或轮换——不需要知道 key_id(枚举得到)。返回删除数量。host 侧双门控。
+fn bls_remove(_input: &proto::BlsRemoveInput) -> Result<proto::BlsRemoveOutput> {
+    let db = open_storage()?;
+    let entries = db.list_entries::<BlsKey>()?;
+    let mut removed = 0u32;
+    for key_id in entries.keys() {
+        db.delete_entry::<BlsKey>(key_id)?;
+        removed += 1;
+    }
+    Ok(proto::BlsRemoveOutput { removed })
+}
+
 // ── CC-34: keeper/operator ECDSA(secp256k1)—— 密钥在 TA 内生成+密封，永不出 TEE ──
 
 /// Ethereum address = last 20 bytes of keccak256(uncompressed_pubkey[1..]).
@@ -2731,6 +2744,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::BlsGenKey => process(serialized_input, bls_gen_key),
         Command::BlsSign => process(serialized_input, bls_sign),
         Command::BlsPubKey => process(serialized_input, bls_pubkey),
+        Command::BlsRemove => process(serialized_input, bls_remove),
         Command::KeeperGenKey => process(serialized_input, keeper_gen_key),
         Command::KeeperSign => process(serialized_input, keeper_sign),
         Command::KeeperPubKey => process(serialized_input, keeper_pubkey),

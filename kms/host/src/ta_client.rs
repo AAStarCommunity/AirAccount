@@ -659,6 +659,17 @@ impl TeeHandle {
         Ok(output.public_key)
     }
 
+    /// Remove the sealed BLS singleton (delete every stored BLS key). Recovers from
+    /// an orphaned key whose key_id was lost, or rotates. Returns the count removed.
+    pub async fn bls_remove(&self) -> Result<u32> {
+        let input = bincode::serialize(&proto::BlsRemoveInput {})
+            .context("Failed to serialize BlsRemoveInput")?;
+        let out = self.call(proto::Command::BlsRemove, input).await?;
+        let output: proto::BlsRemoveOutput =
+            bincode::deserialize(&out).context("Failed to deserialize BlsRemoveOutput")?;
+        Ok(output.removed)
+    }
+
     // ── CC-34: keeper/operator ECDSA(secp256k1)—— 密钥在 TA 内,CA 只发命令、取签名 ──
 
     /// 生成独立 secp256k1 keeper 密钥(TA 内 TEE-TRNG 生成+密封)。
