@@ -83,6 +83,11 @@ pub enum Command {
     KeeperSign = 31,
     /// Return the sealed keeper key's 65-byte uncompressed pubkey + 20B address.
     KeeperPubKey = 32,
+    /// Remove the board's sealed BLS singleton (deletes every stored BLS key) —
+    /// recovers from an orphaned key whose key_id was lost, or rotates. Enumerates
+    /// the BLS entries and deletes them; returns the count removed. Gated host-side
+    /// behind KMS_BLS_PROVISIONING=1 + KMS_BLS_ALLOW_REMOVE=1 + token (destructive).
+    BlsRemove = 33,
     #[default]
     Unknown,
 }
@@ -140,6 +145,7 @@ mod tests {
         assert_eq!(u32::from(Command::KeeperGenKey), 30);
         assert_eq!(u32::from(Command::KeeperSign), 31);
         assert_eq!(u32::from(Command::KeeperPubKey), 32);
+        assert_eq!(u32::from(Command::BlsRemove), 33);
     }
 
     #[test]
@@ -181,7 +187,7 @@ mod tests {
         // 13 (JwtHmacSign) and 16 (JwtSignPayload) removed — JWT signing oracle closed (Issue #16)
         let valid_ids: &[u32] = &[
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26, 27, 28, 29, 30, 31, 32,
+            26, 27, 28, 29, 30, 31, 32, 33,
         ];
         for &i in valid_ids {
             let cmd = Command::from(i);
@@ -198,7 +204,7 @@ mod tests {
     /// reuse of removed ids (13 = JwtHmacSign, 16 = JwtSignPayload).
     #[test]
     fn command_ids_unique_and_reserved_respected() {
-        let all: Vec<u32> = (0u32..=32)
+        let all: Vec<u32> = (0u32..=33)
             .filter(|&i| !matches!(Command::from(i), Command::Unknown))
             .collect();
         let mut dedup = all.clone();

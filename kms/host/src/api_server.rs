@@ -6031,6 +6031,34 @@ async fn bls_gen_handler(
     }
 }
 
+/// Remove the sealed BLS singleton — recovery for an orphaned key whose key_id was
+/// lost (can't be addressed by id), or rotation. DESTRUCTIVE, so double-gated:
+/// KMS_BLS_PROVISIONING=1 (provisioning session) AND KMS_BLS_ALLOW_REMOVE=1 (both
+/// off by default) + the signer token. Returns the count removed.
+async fn bls_remove_handler(
+    token: Option<String>,
+    server: Arc<KmsApiServer>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if std::env::var("KMS_BLS_PROVISIONING").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS provisioning disabled (set KMS_BLS_PROVISIONING=1 to enable)".into(),
+        )));
+    }
+    if std::env::var("KMS_BLS_ALLOW_REMOVE").ok().as_deref() != Some("1") {
+        return Err(warp::reject::custom(ApiError(
+            "BLS remove disabled (destructive; set KMS_BLS_ALLOW_REMOVE=1 to enable)".into(),
+        )));
+    }
+    check_signer_token(&token)?;
+    match server.tee.bls_remove().await {
+        Ok(removed) => Ok(warp::reply::json(&serde_json::json!({ "removed": removed }))),
+        Err(e) => Err(warp::reject::custom(ApiError(format!(
+            "BLS remove failed: {}",
+            e
+        )))),
+    }
+}
+
 async fn bls_sign_handler(
     req: BlsSignReq,
     token: Option<String>,
@@ -7080,6 +7108,14 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .and(warp::header::optional::<String>("x-signer-token"))
         .and(warp::any().map(move || gen_server.clone()))
         .and_then(bls_gen_handler);
+    // Remove the BLS singleton (orphan recovery / rotation) — double-gated, destructive.
+    let remove_server = server.clone();
+    let bls_remove_route = warp::post()
+        .and(warp::path("remove-key"))
+        .and(warp::path::end())
+        .and(warp::header::optional::<String>("x-signer-token"))
+        .and(warp::any().map(move || remove_server.clone()))
+        .and_then(bls_remove_handler);
     // CC-34: keeper/operator ECDSA on the same loopback signer (distinct /kms/* paths).
     let keeper_sign_server = server.clone();
     let keeper_sign_route = warp::post()
@@ -7104,6 +7140,7 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     });
     let signer_routes = bls_sign_route
         .or(bls_gen_route)
+        .or(bls_remove_route)
         .or(keeper_sign_route)
         .or(keeper_gen_route)
         .or(bls_health)

@@ -700,3 +700,13 @@ pub struct KeeperPubKeyOutput {
     /// 20-byte Ethereum address.
     pub address: [u8; 20],
 }
+
+// Remove the sealed BLS singleton (recover from a lost-key_id orphan / rotate).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsRemoveInput {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsRemoveOutput {
+    /// Number of BLS keys deleted (0 or 1 given the singleton invariant).
+    pub removed: u32,
+}
