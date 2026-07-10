@@ -102,6 +102,26 @@ if [ "$KEEPER_ENABLE" = 1 ] && [ -z "$(env_get KMS_KEEPER_SIGNER_TOKEN)" ]; then
   log "generated keeper signer token"
 fi
 
+# ── 1c. API key (#145 fail-closed): the AWS-KMS-style API rejects every authed
+# request with 401 "Missing API key" unless KMS_API_KEY is set (or the node is in
+# KMS_ALLOW_OPEN_MODE=1). Auto-provision one so a node is never left in the
+# reachable-but-authed-API-locked state — the operator can rotate it later. ──
+if [ -z "$(env_get KMS_API_KEY)" ] && [ "$(env_get KMS_ALLOW_OPEN_MODE)" != 1 ]; then
+  env_set KMS_API_KEY "kms_$(openssl rand -hex 24)"
+  log "generated KMS_API_KEY (fail-closed API was unprovisioned)"
+fi
+
+# ── 1d. Drop any legacy systemd drop-in that hard-codes the BLS identity. Early
+# boards pinned KMS_BLS_KEY_ID/PUBKEY in /etc/systemd/system/kms-api.service.d/bls.conf;
+# that duplicates kms.env (the authoritative source) and, if it ever wins the env
+# load order, would activate a stale/rotated key. kms.env is authoritative. ──
+_bls_dropin="/etc/systemd/system/kms-api.service.d/bls.conf"
+if [ -f "$_bls_dropin" ] && grep -qE "^Environment=KMS_BLS_(KEY_ID|PUBKEY)=" "$_bls_dropin"; then
+  rm -f "$_bls_dropin"
+  systemctl daemon-reload 2>/dev/null || true
+  log "removed legacy kms-api bls.conf drop-in (kms.env is authoritative for KMS_BLS_*)"
+fi
+
 # ── 2. restart kms-api so it runs WITH the tokens+gates from kms.env, THEN provision.
 # Required because keeper /kms/gen-keeper-eoa is fail-closed: it rejects unless the
 # RUNNING process has KMS_KEEPER_SIGNER_TOKEN. (BLS /gen-key would tolerate a token
