@@ -1492,6 +1492,21 @@ fn bls_sign(input: &proto::BlsSignInput) -> Result<proto::BlsSignOutput> {
     })
 }
 
+/// CC-24 staked registration: BLS proof-of-possession over the operator address (POP_DST).
+/// Signs the caller-supplied 20-byte OPERATOR (an operator-bound message the KMS chooses),
+/// never an arbitrary point — so /pop cannot forge signatures on chosen messages.
+fn bls_pop_sign(input: &proto::BlsPopSignInput) -> Result<proto::BlsPopSignOutput> {
+    let db = open_storage()?;
+    let k = db
+        .get::<BlsKey>(&input.key_id.to_string())
+        .map_err(|_| anyhow!("BLS key not found: {}", input.key_id))?;
+    let (eip2537, compact) = bls::sign_pop(&k.private_key, &input.operator)?;
+    Ok(proto::BlsPopSignOutput {
+        signature: eip2537.to_vec(),
+        signature_compact: compact.to_vec(),
+    })
+}
+
 /// 返回密封 BLS 密钥的 48B 压缩公钥。
 fn bls_pubkey(input: &proto::BlsPubKeyInput) -> Result<proto::BlsPubKeyOutput> {
     let db = open_storage()?;
@@ -2743,6 +2758,7 @@ fn handle_invoke(command: Command, serialized_input: &[u8]) -> Result<Vec<u8>> {
         Command::GetAttestation => process(serialized_input, attestation::get_attestation),
         Command::BlsGenKey => process(serialized_input, bls_gen_key),
         Command::BlsSign => process(serialized_input, bls_sign),
+        Command::BlsPopSign => process(serialized_input, bls_pop_sign),
         Command::BlsPubKey => process(serialized_input, bls_pubkey),
         Command::BlsRemove => process(serialized_input, bls_remove),
         Command::KeeperGenKey => process(serialized_input, keeper_gen_key),

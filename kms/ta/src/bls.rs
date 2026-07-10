@@ -24,6 +24,23 @@ pub fn sign(sk_bytes: &[u8; 32], message: &[u8; 32]) -> Result<([u8; 256], [u8; 
     Ok((eip2537, compact))
 }
 
+/// PoP domain — MUST equal DVT register-node.mjs POP_DST (AASTAR_DVT_POP_…). Distinct from
+/// BLS_DST above: the on-chain _verifyPoP checks the signature under THIS domain, and using a
+/// separate domain stops a PoP from ever being mistaken for (or reused as) a co-sign signature.
+pub const POP_DST: &[u8] = b"AASTAR_DVT_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_";
+
+/// CC-24 staked registration: proof-of-possession. Sign the 20-byte OPERATOR address under
+/// POP_DST (= sk · hashToG2(operator, POP_DST)). The message is the operator (not a
+/// caller-supplied point), so this can never be used as a general signing oracle. Returns
+/// (EIP-2537 uncompressed G2 256B, compressed G2 96B) — byte-identical to DVT/@noble.
+pub fn sign_pop(sk_bytes: &[u8; 32], operator: &[u8; 20]) -> Result<([u8; 256], [u8; 96])> {
+    let sk = SecretKey::from_bytes(sk_bytes).map_err(|e| anyhow!("BLS sk from_bytes: {:?}", e))?;
+    let sig: Signature = sk.sign(operator, POP_DST, &[]);
+    let compact = sig.compress();
+    let eip2537 = encode_g2_eip2537(&sig.serialize());
+    Ok((eip2537, compact))
+}
+
 /// 从密封私钥字节恢复 48B 压缩 G1 公钥(校验/恢复用,handler 走存储的公钥)。
 #[allow(dead_code)]
 pub fn pubkey(sk_bytes: &[u8; 32]) -> Result<[u8; 48]> {

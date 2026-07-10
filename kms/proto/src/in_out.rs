@@ -710,3 +710,22 @@ pub struct BlsRemoveOutput {
     /// Number of BLS keys deleted (0 or 1 given the singleton invariant).
     pub removed: u32,
 }
+
+// CC-24 staked registration: BLS proof-of-possession over the OPERATOR address.
+// The TA signs `operator` under the PoP DST (AASTAR_DVT_POP_…) — an operator-bound
+// message the KMS chooses, NOT an arbitrary caller-provided point, so /pop cannot be
+// used as a signing oracle to forge signatures on chosen messages.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPopSignInput {
+    pub key_id: Uuid,
+    /// 20-byte operator EOA the node is bound to (msg.sender of registerWithProof).
+    pub operator: [u8; 20],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BlsPopSignOutput {
+    /// EIP-2537 uncompressed G2 PoP signature (256 bytes) = sk · hashToG2(operator, POP_DST).
+    pub signature: Vec<u8>,
+    /// Compressed G2 (96 bytes).
+    pub signature_compact: Vec<u8>,
+}
