@@ -35,7 +35,7 @@ fi
 mkdir -p "$CONFIG_DIR"
 
 # ── kms.env idempotent upsert helpers (atomic same-dir rename, 0600) ──
-_valid_key() { case "$1" in [A-Z_][A-Z0-9_]*) return 0 ;; *) die "invalid env key: $1" ;; esac; }
+_valid_key() { [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "invalid env key: $1"; }
 env_get() {
   _valid_key "$1"
   [ -f "$KMS_ENV" ] && grep -E "^$1=" "$KMS_ENV" | head -1 | cut -d= -f2- || true
@@ -54,7 +54,16 @@ env_del() {
   [ -f "$KMS_ENV" ] || return 0
   { grep -v -E "^$1=" "$KMS_ENV" || true; } | _env_write
 }
-json_str() { python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
+# Extract a JSON string field; degrade to empty (exit 0) on ANY parse error so
+# callers under `set -euo pipefail` don't abort on a 404/non-JSON response — the
+# empty-field checks then drive the warn/continue path. Field passed via argv.
+json_str() {
+  python3 -c 'import sys,json
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except Exception:
+    print("")' "$1" 2>/dev/null || true
+}
 
 wait_signer() {
   for _ in $(seq 1 30); do
