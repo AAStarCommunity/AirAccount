@@ -6994,40 +6994,71 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
     // CC-34: if a keeper key is configured, verify KMS_KEEPER_ADDRESS actually
     // matches the sealed key addressed by KMS_KEEPER_KEY_ID at boot — a mismatch
     // would make /kms/sign return a wrong EOA (DVT ecrecover fail / wrong funding
-    // target). Fatal on mismatch; a transient TA error only warns (sign path will
-    // surface real errors). No per-sign cost.
+    // target). Fail-closed when an address is ASSERTED: if the operator set
+    // KMS_KEEPER_ADDRESS, it must be successfully read from the TA AND match, or
+    // startup aborts (a transient TA error is NOT an excuse to run unverified —
+    // it's a funded EOA). If no address is asserted, we only log the derived one.
     if let Some(kid) = std::env::var("KMS_KEEPER_KEY_ID")
         .ok()
         .and_then(|s| Uuid::parse_str(&s).ok())
     {
+        // Normalize an operator-supplied hex address to 20 raw bytes: trim, strip
+        // optional 0x, decode, require exactly 20 bytes. None = not asserted.
+        let asserted: Option<[u8; 20]> = std::env::var("KMS_KEEPER_ADDRESS").ok().and_then(|s| {
+            let h = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+            if h.is_empty() {
+                return None;
+            }
+            hex::decode(h).ok().filter(|b| b.len() == 20).map(|b| {
+                let mut a = [0u8; 20];
+                a.copy_from_slice(&b);
+                a
+            })
+        });
+        let asserted_raw = std::env::var("KMS_KEEPER_ADDRESS").ok().filter(|s| !s.trim().is_empty());
         match server.tee.keeper_pubkey(kid).await {
             Ok((_pk, addr)) => {
                 let derived = format!("0x{}", hex::encode(addr));
-                match std::env::var("KMS_KEEPER_ADDRESS") {
-                    Ok(cfg) if !cfg.is_empty() => {
-                        if !cfg.eq_ignore_ascii_case(&derived) {
+                match &asserted_raw {
+                    // Not asserted → just surface the derived address for the operator.
+                    None => println!(
+                        "🔑 Keeper EOA (key {}): {} — set KMS_KEEPER_ADDRESS to this value",
+                        kid, derived
+                    ),
+                    // Asserted → must parse to 20 bytes AND match byte-for-byte, else fatal.
+                    Some(raw) => {
+                        if asserted == Some(addr) {
+                            println!("🔑 Keeper EOA verified: {} (key {})", derived, kid);
+                        } else {
                             return Err(anyhow::anyhow!(
-                                "KMS_KEEPER_ADDRESS ({}) does not match the sealed keeper key \
-                                 {} (derived {}) — refusing to start with a mismatched keeper \
-                                 address",
-                                cfg,
+                                "KMS_KEEPER_ADDRESS ({}) does not match the sealed keeper key {} \
+                                 (derived {}) — refusing to start with a mismatched keeper address",
+                                raw,
                                 kid,
                                 derived
                             ));
                         }
-                        println!("🔑 Keeper EOA verified: {} (key {})", derived, kid);
                     }
-                    _ => println!(
-                        "🔑 Keeper EOA (key {}): {} — set KMS_KEEPER_ADDRESS to this value",
-                        kid, derived
-                    ),
                 }
             }
-            Err(e) => println!(
-                "⚠️  Keeper key {} configured but pubkey read failed at boot ({}); \
-                 /kms/sign will surface errors if unresolved",
-                kid, e
-            ),
+            // Fail-closed: if an address was asserted we MUST verify it — a boot TA
+            // read failure cannot be silently ignored for a funded EOA.
+            Err(e) => {
+                if let Some(raw) = asserted_raw {
+                    return Err(anyhow::anyhow!(
+                        "keeper key {} configured with KMS_KEEPER_ADDRESS={} but the TA pubkey \
+                         read failed at boot ({}) — refusing to start unverified",
+                        kid,
+                        raw,
+                        e
+                    ));
+                }
+                println!(
+                    "⚠️  Keeper key {} configured (no KMS_KEEPER_ADDRESS asserted) but pubkey \
+                     read failed at boot ({}); /kms/sign will surface errors if unresolved",
+                    kid, e
+                );
+            }
         }
     }
 
