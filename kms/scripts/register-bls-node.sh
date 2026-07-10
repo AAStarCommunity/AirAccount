@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# register-bls-node.sh — register the co-located DVT node's BLS G1 pubkey on the
-# validator contract (CC-24/CC-34). This is the one on-chain step "power-on self-run"
-# can't do itself: it needs the OPERATOR key (validator owner / authorized registrant),
-# which by design never lives on the node. Run it once per node from an operator host.
+# register-bls-node.sh — BOOTSTRAP-ONLY on-chain registration of the co-located DVT node's
+# BLS G1 pubkey (CC-24). It calls validator.registerPublicKey(nodeId, pubkey), which the
+# contract ONLY accepts while requireStake == false (owner-registers bootstrap mode).
+#
+# ⚠️ If the validator has requireStake == true (staked mode, the default for a live
+# validator), this path reverts "Staking on: use registerWithProof" — you must instead use
+# the STAKED path: DVT's `scripts/register-node.mjs`, which builds a BLS proof-of-possession
+# and, for a key-less KMS-TEE node, gets the PoP signed by the KMS via POST :3100/pop
+# {node_id, operator} → {pop_signature} (this KMS exposes /pop; the operator must also be
+# staked for ROLE_DVT). This script remains handy for a bootstrap/dev validator.
+#
+# Needs the OPERATOR key (validator owner / authorized registrant), which by design never
+# lives on the node. Run it once per node from an operator host.
 #
 # What it sends (matches DVT blockchain.service.ts registerNodeOnChain, byte-for-byte):
 #   validator.registerPublicKey(bytes32 nodeId, bytes publicKey)

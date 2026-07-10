@@ -91,6 +91,16 @@ wait_signer_soft() {
   done
   return 1
 }
+# TA-backed probe: /health is static JSON (liveness only) — it passes even if the process
+# can't open /dev/tee0 (bad DevicePolicy / missing group). A REAL BLS sign proves the TEE is
+# reachable as whatever user kms-api now runs as. Used to gate the de-root (rollback if dead).
+tee_reachable() {
+  [ -n "$BLS_KEY_ID" ] || return 0   # nothing provisioned yet → skip (nothing to prove)
+  local r; r="$(curl -s -m8 -X POST "$SIGNER/sign" -H 'content-type: application/json' \
+    -H "x-signer-token: $TOKEN" \
+    -d '{"node_id":"selfinit-probe","user_op_hash":"0x0000000000000000000000000000000000000000000000000000000000000000"}' 2>/dev/null || true)"
+  printf '%s' "$r" | grep -q '"signature"'
+}
 restart_kms() { # $1 = fatal-on-fail (1) or best-effort (0)
   systemctl restart kms-api.service 2>/dev/null && return 0
   if [ "${1:-0}" = 1 ]; then die "kms-api restart failed — refusing to finish (gate may still be live)"; fi
@@ -108,12 +118,14 @@ harden_device_auth() {
   id kms >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kms 2>/dev/null || useradd --system --no-create-home --shell /bin/false kms
   id dvt >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin dvt 2>/dev/null || useradd --system --no-create-home --shell /bin/false dvt
   for g in tee teepriv; do getent group "$g" >/dev/null 2>&1 && ! _in_group kms "$g" && usermod -aG "$g" kms; done
-  { _in_group dvt tee || _in_group dvt teepriv; } && log "WARN: dvt user is in a tee group — defeats the hardening; review manually"
+  # dvt must have NO path to /dev/tee* — actively remove it from tee/teepriv if present
+  # (belt-and-suspenders; the dvt drop-in below ALSO sets DevicePolicy=closed).
+  for g in tee teepriv; do _in_group dvt "$g" && { gpasswd -d dvt "$g" 2>/dev/null || true; log "removed dvt from group $g (TEE must be unreachable from the network-facing node)"; }; done
 
   # 2. kms deploy must live off /root (a non-root user can't traverse 0700 /root). If the
   # unit's ExecStart is under /root, COPY it out to /opt/airaccount (copy, not move, so a
   # rollback that reverts to the /root unit still has its files). kms.db is the live state.
-  local kexec kdir; kexec="$(systemctl show -p ExecStart --value kms-api.service 2>/dev/null | grep -oE '/[^ ;]*kms-api-server' | head -1)"
+  local kexec kdir; kexec="$(systemctl show -p ExecStart --value kms-api.service 2>/dev/null | grep -oE '/[^ ;]*kms-api-server' | head -1 || true)"
   kdir="$(dirname "${kexec:-/opt/airaccount/kms-api-server}")"
   case "$kexec" in
     /root/*)
@@ -154,7 +166,10 @@ EOF
   local ddir; ddir="$(systemctl show -p WorkingDirectory --value dvt.service 2>/dev/null)"
   { [ -z "$ddir" ] || [ "$ddir" = "[not set]" ]; } && ddir=/opt/dvt-build
   mkdir -p /etc/systemd/system/dvt.service.d
-  printf '[Service]\nUser=dvt\nGroup=dvt\n' > /etc/systemd/system/dvt.service.d/deroot.conf
+  # DevicePolicy=closed with NO DeviceAllow → dvt's cgroup reaches only systemd's default
+  # devices (/dev/null,zero,random,urandom,…) and NEVER /dev/tee* — even if a group leak
+  # ever put dvt back in tee. Node is pure JS; it needs no special device.
+  printf '[Service]\nUser=dvt\nGroup=dvt\nDevicePolicy=closed\n' > /etc/systemd/system/dvt.service.d/deroot.conf
   [ -d "$ddir" ] && chown -R dvt:dvt "$ddir" 2>/dev/null || true
 
   systemctl daemon-reload 2>/dev/null || true
@@ -309,10 +324,10 @@ systemctl daemon-reload 2>/dev/null || true
 harden_device_auth
 log "closed provisioning gate; restarting kms-api (hardened) to load key ids"
 systemctl restart kms-api.service 2>/dev/null || true
-if wait_signer_soft; then
-  log "kms-api up as non-root kms (device-auth hardened)"
+if wait_signer_soft && tee_reachable; then
+  log "kms-api up as non-root kms (device-auth hardened; TEE reachable via a live BLS sign)"
 else
-  log "WARN: kms-api did not come up hardened — rolling back de-root, staying on prior config"
+  log "WARN: kms-api not healthy+TEE-reachable hardened — rolling back de-root, staying on prior config"
   unharden_kms
   restart_kms 1
   wait_signer

@@ -6040,7 +6040,13 @@ fn check_signer_token_required(token: &Option<String>) -> Result<(), warp::Rejec
 fn check_signer_token(token: &Option<String>) -> Result<(), warp::Rejection> {
     match std::env::var("KMS_BLS_SIGNER_TOKEN") {
         Ok(expected) if !expected.is_empty() => {
-            if token.as_deref() == Some(expected.as_str()) {
+            // constant-time compare (mirrors check_keeper_token / _required) — no timing
+            // leak on the bearer token.
+            if token
+                .as_deref()
+                .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false)
+            {
                 Ok(())
             } else {
                 Err(warp::reject::custom(ApiError(
