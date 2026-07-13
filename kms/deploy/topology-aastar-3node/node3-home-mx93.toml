@@ -4,16 +4,16 @@
 
 [community]
 name      = "aastar"
-domain    = "kms-test.aastar.io"            # 测试域名（与生产 kms.aastar.io 分开）
+domain    = "kms1.aastar.io"            # 测试域名（与生产 kms.aastar.io 分开）
 board_ssh = "root@TODO_HOME_IP"             # ⚠️ 到货后填（家里网络，IP 可能变→建议 Tailscale）
 ssh_key   = "~/.ssh/id_ed25519"
 
 # KMS 测试实例 —— 独立 DB，独立 rpId（测试域名）
 [kms]
-version = "0.28.1"
+version = "0.29.0"
 port    = 3000
-rp_id   = "kms-test.aastar.io"
-origin  = "https://kms-test.aastar.io"
+rp_id   = "kms1.aastar.io"
+origin  = "https://kms1.aastar.io"
 profile = "prod"                            # 测试机也用 prod profile（贴近生产；dev 仅本地开发）
 # ⚠️ 测试实例：部署时 KMS_DB_PATH 指独立路径（如 /var/lib/kms-test/kms.db），不碰生产库。
 

@@ -1,6 +1,12 @@
 # KMS Changelog
 
-> Updated: 2026-07-09
+> Updated: 2026-07-13
+
+## 0.29.0 (2026-07-13) — Beta6 — CC-37 BLS PoP /pop（KMS-TEE key-less DVT 注册）+ self-init de-root
+
+- **CC-37 `/pop` 端点**：TEE 内为 key-less DVT 节点生成 BLS Proof-of-Possession（self-PoP：签自己 128B EIP-2537 pubkey，DST=`BLS_SIG_..._POP_`，golden 逐字节对齐 SDK buildDvtPop）。KMS-TEE key-less 节点链上 registerWithProof 闭环（register tx `0x7559c8d7…`，双 TEE 托管：BLS + operator EOA 私钥都不出 TEE）。
+- **self-init device-auth de-root（可复现）** + `/pop` for staked registration（#172）；**BlsRemove**（清 sealed BLS singleton，#170）；**`/identities` 页** + co-located-node 加固（#171）。
+- 版本一致性：`CARGO_PKG_VERSION` + `KMS_VERSION` 常量 0.28.1 → 0.29.0，`/version` 自报对齐 tag `airaccount-kms-v0.29.0`（#173）。
 
 ## 0.28.1 (2026-07-09) — Beta6 — 社区自助上手(Phase 1/2/3)+ 下载门户 + E2E 41/41
 
