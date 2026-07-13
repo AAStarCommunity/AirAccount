@@ -106,7 +106,7 @@ const s=bls.longSignatures; let sk; do{sk=randomBytes(32);try{s.getPublicKey(sk)
 writeFileSync(\"/run/dvt/gen/node_state.json\", JSON.stringify({nodeId:\"0x\"+randomBytes(32).toString(\"hex\"),nodeName:process.env.NODE_NAME,privateKey:\"0x\"+Buffer.from(sk).toString(\"hex\"),publicKey:s.getPublicKey(sk).toHex(),createdAt:new Date().toISOString(),description:\"production DVT node\"},null,2));
 console.log(\"  new BLS pubkey\", s.getPublicKey(sk).toHex().slice(0,24)+\"...\");'
     # ② tmpfs 里加密(encrypt-node-key.mjs 从 scripts 找 dist;file 参数可任意路径)
-    set -a; . /run/dvt/pass; set +a
+    export NODE_KEY_PASSPHRASE=\"\$(sed -n 's/^NODE_KEY_PASSPHRASE=//p' /run/dvt/pass)\"
     KDF=$KDF node scripts/encrypt-node-key.mjs /run/dvt/gen/node_state.json >/dev/null
     # ③ 只把密文搬到 flash;明文(含 .bak)shred + 随 tmpfs/重启清
     cp /run/dvt/gen/node_state.json node_state.json && chmod 600 node_state.json
