@@ -2,7 +2,7 @@
 
 > 关联协同任务：Cooperation-Center **CC-30**（YAAA 正式版发布 · 5 依赖仓盘点）
 > repo 标签：`repo:kms`（= `repo:airaccount`；不含 `repo:airaccount-contract`）
-> 最后更新：2026-07-09 · 当前版本：`airaccount-kms-v0.28.1` / `airaccount-node-v0.28.1`（Beta6）
+> 最后更新：2026-07-13 · 当前版本：`airaccount-kms-v0.29.0` / `airaccount-node-v0.29.0`（Beta6）
 
 ## 0. 两条发布线（KMS 的"两个版本"）
 
@@ -11,7 +11,7 @@
 | KMS 独立 | `airaccount-kms-v*` | 只跑密钥/签名服务（独立 KMS 部署） |
 | KMS+DVT 节点包 | `airaccount-node-v*` | 二合一 node bundle（co-located KMS+DVT） |
 
-两条线当前同为 **0.28.1**。测试网 vs 主网**代码零差异**，唯一区别 = 配置（RPC / 合约地址 / env）。
+两条线当前同为 **0.29.0**。测试网 vs 主网**代码零差异**，唯一区别 = 配置（RPC / 合约地址 / env）。
 
 ## 1. Production-Readiness 表
 
@@ -24,7 +24,7 @@
 | 3 | 认证 fail-closed（`KMS_ALLOW_OPEN_MODE`） | #145；⚠️部署前必须先 provision api key | ✅ | 测试网就能发 |
 | 4 | Stats 页 XSS + UTF-8 panic | #144 已修 | ✅ | 测试网就能发 |
 | 5 | E2E 全签名 op 一致性 | run-full-e2e 41/41；#68 payload-commitment 全覆盖 | ✅ | 测试网就能发 |
-| 6 | 社区上手 Phase1/2/3 + 门户 | 0.28.1 上线 kms.aastar.io/portal | ✅ | 测试网就能发 |
+| 6 | 社区上手 Phase1/2/3 + 门户 | 0.29.0 上线 kms.aastar.io/portal | ✅ | 测试网就能发 |
 | 7 | KMS+DVT 二合一基线（CC-22） | KMS 侧实测，2GB 单板 20 并发绰绰有余 | ✅ KMS侧 | 待 @repo:dvt 确认 build 路径 |
 | 8 | Variant B：DVT BLS TEE 托管（CC-24） | PR#153 真机全绿，`:3100` 契约对齐 | ✅ KMS侧 | 待 @repo:dvt 轻接入 |
 | 9 | #99 硬件安全根基（RPMB+secure boot+strict flip） | 代码就绪，差烧 key + 一次性重刷 | 🔴 | 主网前必须补 |
@@ -64,7 +64,7 @@
 
 ## 4. 发布路线
 
-1. **测试网正式版（现在）**：0.28.1 配置指向 Sepolia → 部署 → CC-30 测试网就绪
+1. **测试网正式版（现在）**：0.29.0 配置指向 Sepolia → 部署 → CC-30 测试网就绪
 2. **观察期 ~1 个月**：小修，跑真实流量
 3. **主网前必须补**：#99 + #50 + #127 + #128 一趟 TA 重刷 + 对抗审查 + 密钥保管预案
 4. **主网**：配置切主网 RPC/合约地址，代码零改动
