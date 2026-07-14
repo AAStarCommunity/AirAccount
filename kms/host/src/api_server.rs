@@ -4288,6 +4288,43 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+/// Optional co-located DVT node card for the stats homepage.
+///
+/// Generic on purpose: the same KMS binary runs on board A (dvt1), board B
+/// (dvt3), and KMS-only boards, so we never hardcode a nodeId. Driven by env —
+/// set `KMS_DVT_STATE_FILE` to the co-located dvt's `node_state.json` and the
+/// homepage renders its identity (name + nodeId + BLS pubkey, all public, no
+/// secrets). Unset / unreadable / KMS-only board → empty string → today's
+/// behaviour. Optional `KMS_DVT_URL` adds an admin-panel link.
+fn render_dvt_section() -> String {
+    let state_file = match std::env::var("KMS_DVT_STATE_FILE") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return String::new(),
+    };
+    let v: serde_json::Value = match std::fs::read_to_string(&state_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return String::new(),
+    };
+    let field = |k: &str| html_escape(v.get(k).and_then(|x| x.as_str()).unwrap_or("-"));
+    let name = field("nodeName");
+    let node_id = field("nodeId");
+    let pubkey = field("publicKey");
+    let admin_link = match std::env::var("KMS_DVT_URL") {
+        Ok(u) if !u.is_empty() => format!(" &middot; <a href=\"{}\">admin panel</a>", html_escape(&u)),
+        _ => String::new(),
+    };
+    format!(
+        "<h2>DVT Node</h2>\n<div class=\"card\">\n\
+         <div><b>{name}</b>{admin_link}</div>\n\
+         <div class=\"dim\" style=\"font-size:0.78em;margin-top:6px;word-break:break-all\">nodeId {node_id}</div>\n\
+         <div class=\"dim\" style=\"font-size:0.78em;word-break:break-all\">BLS pubkey {pubkey}</div>\n\
+         </div>\n"
+    )
+}
+
 fn render_stats_page(server: &KmsApiServer) -> String {
     let wallets = server.db.list_wallets().unwrap_or_default();
     let qs = server.queue_status();
@@ -4383,6 +4420,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 <h1>AirAccount KMS</h1>
 <div class="sub">v{version} &middot; TA mode: real &middot; <a href="/docs">📖 API Docs</a> &middot; <a href="/test">Test UI</a> &middot; <a href="/health">Health</a></div>
 
+{dvt_section}
 <h2>Keys</h2>
 <div class="card grid">
   <div class="stat"><div class="val">{total}</div><div class="lbl">Total Keys</div></div>
@@ -4422,6 +4460,7 @@ fn render_stats_page(server: &KmsApiServer) -> String {
 </body>
 </html>"#,
         version = KMS_VERSION,
+        dvt_section = render_dvt_section(),
         total = total,
         enabled = enabled,
         with_addr = with_addr,
