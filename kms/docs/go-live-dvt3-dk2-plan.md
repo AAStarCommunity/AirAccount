@@ -8,7 +8,7 @@
 | 节点 | 硬件 | 角色 | 状态(2026-07-13) |
 |---|---|---|---|
 | **node1** | MX93-A | KMS 生产(kms.aastar.io)+ DVT1(TEE 托管) | ✅ **已上线并送机房**;CC-37 链上注册闭环(register tx `0x7559c8d7…`);CA 0.29.0;加电自启 |
-| **node3** | MX93-B | **kms1(KMS 测试,kms1.aastar.io)** + **dvt3(独立)** | 🔄 **kms1 已完成**(真 TEE + CA 0.29.0 + tunnel LIVE + 加电自启);**dvt3 待部署**(见 §2) |
+| **node3** | MX93-B | **kms1(KMS 测试,kms1.aastar.io)** + **dvt3(独立)** | ✅ **kms1 + dvt3 全上线**;dvt3 链上注册闭环(register tx `0xcee33d58…`,stake 30 GToken,operator `0x18420702`,independent 本地加密 keystore) |
 | **node2** | **DK2** | **dvt2(独立,armv7)** | ⏳ **待部署**(见 §3,mac mini + 串口) |
 
 DVT 门限 **2-of-3**(dvt1@node1 TEE + dvt2@DK2 本地 + dvt3@node3 本地),容忍 1 挂。
