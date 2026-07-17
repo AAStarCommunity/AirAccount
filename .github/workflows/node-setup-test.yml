@@ -1,0 +1,25 @@
+name: node-setup wizard test
+
+# 社区节点 web 向导(setup-server.py)的 fresh-board E2E(#20)。纯 stdlib,秒级,
+# 只在 kms/node-setup/ 改动时跑。
+on:
+  pull_request:
+    paths:
+      - 'kms/node-setup/**'
+      - '.github/workflows/node-setup-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kms/node-setup/**'
+      - '.github/workflows/node-setup-test.yml'
+
+jobs:
+  wizard-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: wizard fresh-board E2E
+        run: python3 kms/node-setup/test_setup_server.py
