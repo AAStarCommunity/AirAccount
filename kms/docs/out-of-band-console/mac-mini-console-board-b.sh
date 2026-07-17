@@ -48,7 +48,17 @@ esac
 
 # ---------------- up ----------------
 [ -n "$TMUX_BIN" ] || { echo "缺 tmux,请先: brew install tmux"; exit 1; }
-mkdir -p "$LOG_DIR"
+# ⚠️ 串口自动 root 登录,pipe-pane 把串口全部输出明文落盘。收权限 + 轮转:
+#  - 日志目录 700(仅本人),日志文件 600。
+#  - up 时若当前日志 >5MB 则轮转(留 .1/.2),避免无限增长。
+#  - 别在被记录的串口里敲密钥(会明文进日志)——见 README。
+LOG="$LOG_DIR/$BOARD.log"
+mkdir -p "$LOG_DIR"; chmod 700 "$LOG_DIR"
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+  [ -f "$LOG.1" ] && mv -f "$LOG.1" "$LOG.2"
+  mv -f "$LOG" "$LOG.1"
+fi
+touch "$LOG"; chmod 600 "$LOG" "$LOG.1" "$LOG.2" 2>/dev/null || true
 
 if "$TMUX_BIN" has-session -t "$BOARD" 2>/dev/null; then
   echo "✅ $BOARD 控制台已在运行。"
@@ -74,8 +84,8 @@ done
 EOF
 
 "$TMUX_BIN" new-session -d -s "$BOARD" "$LOOP"
-# 把控制台输出同时落盘,便于事后翻(哪怕没人 attach)
-"$TMUX_BIN" pipe-pane -t "$BOARD" -o "cat >> \"$LOG_DIR/$BOARD.log\"" 2>/dev/null || true
+# 把控制台输出同时落盘(600),便于事后翻(哪怕没人 attach)
+"$TMUX_BIN" pipe-pane -t "$BOARD" -o "cat >> \"$LOG\"" 2>/dev/null || true
 
 echo "✅ 已启动 $BOARD 常驻控制台 (tmux 会话: $BOARD)"
 echo "   本机 attach:  $TMUX_BIN attach -t $BOARD"

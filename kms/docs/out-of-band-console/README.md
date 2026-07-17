@@ -103,6 +103,12 @@ ssh mac-mini -t '/usr/local/bin/tmux  attach -t board-a'     # Intel mac-mini
 （绕过 SSH key/密码）。TEE（TrustZone）里的私钥仍安全，但**节点 OS 完全暴露**。
 仅限**可信物理环境**（家/机房）使用；mac-mini 本身的账号与磁盘加密要看好。
 
+**日志是明文，会记录你敲的一切**：`pipe-pane` 把串口全部输出落盘到 `~/airaccount-console-logs/`。
+脚本已做：日志目录 `700`、日志文件 `600`、`up` 时超 5MB 轮转（留 `.1/.2`）。但仍需注意：
+- **别在被记录的串口里敲密钥/密码/助记词**——会明文进日志。要输 keystore 密码请走 tmpfs/stdin 那套（`mx93b-dvt3-unlock.sh` 的方式），不要在 console 里手打。
+- 日志只在 `up`（新建会话）时轮转；长期会话想严格限量，可用 macOS 自带 `newsyslog` 加一条规则。
+- 不需要留存时 `down` 后可删 `~/airaccount-console-logs/`。
+
 ---
 
 ## 局限
