@@ -163,6 +163,11 @@ def attempt_onchain_register(network):
     if not ready:
         return {"ok": False, "error": "KMS 重启后未在 30s 内就绪,跳过自动注册(回落手动登记)"}
     try:
+        # operator key 文件权限自检:带资金,必须 600(不 group/world 可读),否则拒绝(#179 review Low)。
+        st = os.stat(key_file)
+        if st.st_mode & 0o077:
+            print(f"[register-node] 拒绝:{key_file} 权限过松 {oct(st.st_mode & 0o777)}(应 600)")
+            return {"ok": False, "error": "operator key 文件权限过松(应 600),已拒绝自动注册"}
         with open(key_file) as f:
             op_key = f.read().strip()
         # operator 私钥经子进程 env 传入(不进 argv/不回显);register-node.mjs 输出 JSON。
@@ -181,10 +186,14 @@ def attempt_onchain_register(network):
             ["node", reg_script], env=child_env, timeout=240, capture_output=True
         )
         if p.returncode != 0:
-            return {"ok": False, "error": p.stderr.decode(errors="replace").strip()[:300]}
+            raw = p.stderr.decode(errors="replace").strip()
+            print(f"[register-node] 失败(rc={p.returncode}): {raw}")  # 全量进服务日志(root 可读)
+            # 回前端脱敏:抹掉可能含 API key 的 RPC URL 再截断(#179 review Low)。
+            safe = re.sub(r"https?://\S+", "[url]", raw)[:200]
+            return {"ok": False, "error": safe or "自动注册失败,详见板子 setup 服务日志"}
         return {"ok": True, "result": json.loads(p.stdout or b"{}")}
     except Exception as e:
-        return {"ok": False, "error": str(e)[:300]}
+        return {"ok": False, "error": re.sub(r"https?://\S+", "[url]", str(e))[:200]}
 
 
 class Handler(BaseHTTPRequestHandler):
