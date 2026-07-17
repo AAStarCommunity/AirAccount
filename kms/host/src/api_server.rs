@@ -4313,7 +4313,9 @@ fn render_dvt_section() -> String {
     let node_id = field("nodeId");
     let pubkey = field("publicKey");
     let admin_link = match std::env::var("KMS_DVT_URL") {
-        Ok(u) if !u.is_empty() => format!(" &middot; <a href=\"{}\">admin panel</a>", html_escape(&u)),
+        Ok(u) if !u.is_empty() => {
+            format!(" &middot; <a href=\"{}\">admin panel</a>", html_escape(&u))
+        }
         _ => String::new(),
     };
     format!(
@@ -6149,7 +6151,9 @@ async fn bls_remove_handler(
     }
     check_signer_token_required(&token)?; // fail-closed (not the tokenless gen-key default)
     match server.tee.bls_remove().await {
-        Ok(removed) => Ok(warp::reply::json(&serde_json::json!({ "removed": removed }))),
+        Ok(removed) => Ok(warp::reply::json(
+            &serde_json::json!({ "removed": removed }),
+        )),
         Err(e) => Err(warp::reject::custom(ApiError(format!(
             "BLS remove failed: {}",
             e
@@ -7239,7 +7243,9 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
                 a
             })
         });
-        let asserted_raw = std::env::var("KMS_KEEPER_ADDRESS").ok().filter(|s| !s.trim().is_empty());
+        let asserted_raw = std::env::var("KMS_KEEPER_ADDRESS")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         match server.tee.keeper_pubkey(kid).await {
             Ok((_pk, addr)) => {
                 let derived = format!("0x{}", hex::encode(addr));
@@ -7352,7 +7358,9 @@ function tgl(){var d=document.documentElement.classList.toggle('dark');document.
         .or(keeper_gen_route)
         .or(bls_health)
         .recover(handle_rejection);
-    println!("🔏 Internal BLS signer (DVT) on http://127.0.0.1:3100 (localhost only, not via tunnel)");
+    println!(
+        "🔏 Internal BLS signer (DVT) on http://127.0.0.1:3100 (localhost only, not via tunnel)"
+    );
 
     let main_srv = warp::serve(routes).run(([0, 0, 0, 0], 3000));
     let signer_srv = warp::serve(signer_routes).run(([127, 0, 0, 1], 3100));
