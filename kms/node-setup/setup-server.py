@@ -11,7 +11,7 @@ aastar-node-setup — Phase 1 极简 web 向导(社区自助上手,见 docs/comm
 ⚠️ 骨架:steps 1-3 已接线,step 4 先给指引。生产前需加认证(setup token)+ 幂等 + 校验。
 用法:  KMS_BLS_PROVISIONING=1 python3 setup-server.py   # 需先让 KMS 允许 provisioning
 """
-import json, os, re, secrets, subprocess, urllib.request
+import json, os, re, secrets, subprocess, time, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -131,6 +131,62 @@ def write_config(cfg):
     return kms_env, dvt_env
 
 
+# Sepolia/mainnet 实链地址(⚠️显式传给 register-node.mjs,别用 SDK canonical 的漂移值)。
+REGISTER_ADDRS = {
+    "testnet": {  # Sepolia
+        "validator": "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC",
+        "gToken": "0x4c09aE57503Aa1E2A43b05621A38DbdD43b0Aa08",
+        "staking": "0x472297B557c1d0F030f281a5Bb8A535f6c5AB65e",
+    },
+    # mainnet 待部署后补
+}
+
+
+def attempt_onchain_register(network):
+    """模型 A 一键注册(尽力而为):板已备预充值 operator key(/etc/airaccount/dvt-operator.key)
+    + ETH_RPC_URL + 已知实链地址 → 调 register-node.mjs(SDK onboardDvtNode,popSigner→KMS /pop)。
+    任何前置缺失/失败 → 返回 None,调用方回落到手动登记指引(不阻断向导成功)。"""
+    key_file = os.path.join(CONFIG_DIR, "dvt-operator.key")
+    reg_script = os.path.join(HERE, "register-node.mjs")
+    rpc = os.environ.get("ETH_RPC_URL")
+    addrs = REGISTER_ADDRS.get(network)
+    if not (os.path.exists(key_file) and os.path.exists(reg_script) and rpc and addrs):
+        return None  # 未按模型 A 预置 → 回落指引
+    # finalize() 刚重启 kms-api(异步);/pop 需 KMS 就绪 + 读入新 kms.env 的 KMS_BLS_KEY_ID。
+    # 先轮询 /health(最多 ~30s),没就绪就回落指引(不硬等/不阻断)。
+    ready = False
+    for _ in range(15):
+        if kms_reachable():
+            ready = True
+            break
+        time.sleep(2)
+    if not ready:
+        return {"ok": False, "error": "KMS 重启后未在 30s 内就绪,跳过自动注册(回落手动登记)"}
+    try:
+        with open(key_file) as f:
+            op_key = f.read().strip()
+        # operator 私钥经子进程 env 传入(不进 argv/不回显);register-node.mjs 输出 JSON。
+        child_env = {
+            **os.environ,
+            "NETWORK": network,
+            "ETH_RPC_URL": rpc,
+            "OPERATOR_KEY": op_key,
+            "KMS_SIGNER_URL": SIGNER_URL,
+            "VALIDATOR_ADDRESS": addrs["validator"],
+            "GTOKEN_ADDRESS": addrs["gToken"],
+            "STAKING_ADDRESS": addrs["staking"],
+        }
+        # stake+approve+registerRole+registerWithProof 多笔 tx,给足超时。
+        p = subprocess.run(
+            ["node", reg_script], env=child_env, timeout=240, capture_output=True
+        )
+        if p.returncode != 0:
+            return {"ok": False, "error": p.stderr.decode(errors="replace").strip()[:300]}
+        return {"ok": True, "result": json.loads(p.stdout or b"{}")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json"):
         b = body.encode() if isinstance(body, str) else body
@@ -186,18 +242,35 @@ class Handler(BaseHTTPRequestHandler):
             write_config({"rp_id": rp_id, "key_id": key_id, "bls_pubkey": bls_pubkey, "token": token})
             # 4. finalize:关 provisioning + 重启服务 + disable 向导(自动收尾)
             warns = finalize()
-            # 5. 链上注册指引(节点不能自注册 → validator owner=AAStar 注册,或社区自建 validator)
-            next_steps = (
-                "✅ 本地配置完成,KMS+DVT 已带新配置重启。\n\n"
-                "链上注册(节点无法自注册,需 validator owner 注册你的 pubkey):\n"
-                f"  network:   {network}\n"
-                f"  operator:  {operator}\n"
-                f"  blsPubkey: {bls_pubkey}\n"
-                "→ 把上面三项发给 AAStar(开 issue / 协同中枢)登记到 validator;\n"
-                "  AAStar 可用 SuperPaymaster gasless 代付。注册通过后你的节点即加入 ≥3 门限池。\n"
-                "  (Phase 3 会把这步做成向导内一键 gasless 提交。)"
-            )
-            resp = {"bls_pubkey": bls_pubkey, "rp_id": rp_id, "next_steps": next_steps}
+            # 5. 链上注册:模型 A(板已预置预充值 operator key)→ 一键 registerWithProof(经 KMS /pop);
+            #    否则回落到"发给 AAStar 登记"的手动指引(配置本身仍算成功)。
+            reg = attempt_onchain_register(network)
+            resp = {"bls_pubkey": bls_pubkey, "rp_id": rp_id}
+            if reg and reg.get("ok"):
+                r = reg.get("result", {})
+                tx = (r.get("hashes") or {}).get("register")
+                resp["registered"] = True
+                resp["register_result"] = r
+                resp["next_steps"] = (
+                    "🎉 本地配置完成 + 已链上注册!你的节点已加入门限池。\n"
+                    f"  network:  {network}\n"
+                    f"  operator: {r.get('operator')}\n"
+                    f"  nodeId:   {r.get('nodeId')}\n"
+                    + (f"  register tx: {tx}\n" if tx else "  (幂等:此前已注册)\n")
+                )
+            else:
+                resp["registered"] = False
+                resp["next_steps"] = (
+                    "✅ 本地配置完成,KMS+DVT 已带新配置重启。\n\n"
+                    "链上注册(本板未按模型 A 预置 operator,或自动注册未成):\n"
+                    f"  network:   {network}\n"
+                    f"  operator:  {operator}\n"
+                    f"  blsPubkey: {bls_pubkey}\n"
+                    "→ 把上面三项发给 AAStar(开 issue / 协同中枢)登记到 validator。\n"
+                    "  (预刷板模型 A 会自动完成此步;代付模型 B/C 见 docs。)"
+                )
+                if reg and reg.get("error"):
+                    resp["register_error"] = reg["error"]
             if warns:
                 resp["finalize_warnings"] = warns  # 收尾有非致命告警时告知(如某服务名不同)
             self._send(200, json.dumps(resp))
