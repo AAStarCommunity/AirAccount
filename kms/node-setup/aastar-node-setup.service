@@ -13,11 +13,25 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/aastar/node-setup/setup-server.py
 Restart=on-failure
 RestartSec=3
-# 向导只需写 /etc/airaccount(config)+ /run(token)。
+#
+# ── 降权选项(#23,opt-in,需板上验证)────────────────────────────────
+# 默认以 root 跑(finalize 直接 systemctl)。要收窄 root 面,改为非 root + sudo helper:
+#   1) useradd -r -s /usr/sbin/nologin aastar-setup
+#   2) 安装 finalize-helper.sh 到 /opt/aastar/node-setup/ + sudoers 白名单(见 aastar-node-setup.sudoers)
+#   3) /etc/airaccount 归 root:aastar-setup 0770;operator key 0640 root:aastar-setup(向导需读)
+#   4) 下面两行取消注释:
+# User=aastar-setup
+# Group=aastar-setup
+#   ⚠️ 降权后 finalize 走 `sudo helper`,而 sudo 需要提权 → 必须把下面 NoNewPrivileges 设为 no,
+#      否则 sudo 被 NoNewPrivileges 挡死。root 默认路径则保持 true。
+# ────────────────────────────────────────────────────────────────
+# 向导只需写 /etc/airaccount(config)+ /run(token)。降权走 sudo helper 时改 NoNewPrivileges=no。
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/airaccount /run
+# finalize 要删 /etc/systemd/.../kms-api.service.d/prov.conf 关 provisioning gate;ProtectSystem=strict
+# 下 /etc 只读,不把该 drop-in 目录列进 RW,rm 会被沙箱拦→gate 关不掉。`-` 前缀=目录不存在也不报错。
+ReadWritePaths=/etc/airaccount /run -/etc/systemd/system/kms-api.service.d
 # 注:setup 期间 kms-api.service 需带 KMS_BLS_PROVISIONING=1(向导调 /gen-key);
 # 配置完成后运维脚本关掉 provisioning + 重启 kms-api/dvt(见 README「首启编排」)。
 

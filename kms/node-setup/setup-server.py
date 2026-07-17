@@ -6,9 +6,10 @@ aastar-node-setup — Phase 1 极简 web 向导(社区自助上手,见 docs/comm
   1. provision BLS 密钥(调 KMS internal signer /gen-key,密钥在 TEE 内生成密封)
   2. 生成 signer token(KMS_BLS_SIGNER_TOKEN == DVT RUST_SIGNER_TOKEN 共享密钥)
   3. 写 config(KMS + DVT env,rpId、RUST_SIGNER_URL 等)
-  4. [Phase 1 stub] 链上注册指引(gasless via SuperPaymaster);Phase 3 做成一键闭环
+  4. 链上注册:模型 A(预充值 operator)一键 registerWithProof(经 KMS /pop);未预置则回落手动登记指引
 
-⚠️ 骨架:steps 1-3 已接线,step 4 先给指引。生产前需加认证(setup token)+ 幂等 + 校验。
+认证/幂等/校验均已接线:/setup 首步 check_setup_token(一次性 token,#156 加)→403;
+已配置(kms.env 存在)则 409;operator 地址 / rpId(非 aastar.io)/ network 校验。
 用法:  KMS_BLS_PROVISIONING=1 python3 setup-server.py   # 需先让 KMS 允许 provisioning
 """
 import json, os, re, secrets, subprocess, time, urllib.request
@@ -61,13 +62,30 @@ def kms_reachable():
 
 
 def finalize():
-    """配置成功后收尾(向导以 root 跑,可调 systemctl):
-    ① 关 KMS provisioning(删 drop-in,防再被 /gen-key 灌)② 重启 kms-api/dvt 让它们
-    读新 /etc/airaccount/*.env ③ disable 本向导(下次不再首启)。
-    尽力而为:某步失败不阻断,收集 warnings 回给前端。SKIP_FINALIZE=1 可跳过(测试)。"""
-    warnings = []
+    """配置成功后收尾:① 关 KMS provisioning(删 drop-in)② 重启 kms-api/dvt 读新
+    /etc/airaccount/*.env ③ disable 本向导。
+
+    优先走特权 helper `finalize-helper.sh`(经 sudo NOPASSWD 白名单)——支持向导降权(#23):
+    向导本体可 `User=` 非 root 跑,只这条 helper 拿 root。helper 不存在/失败则**回落**直接
+    systemctl(向导以 root 跑时,向后兼容旧部署)。尽力而为,收集 warnings。SKIP_FINALIZE=1 跳过。"""
     if os.environ.get("SKIP_FINALIZE") == "1":
         return ["finalize 跳过(SKIP_FINALIZE=1)"]
+
+    # 优先:特权 helper(向导可非 root,只这条经 sudo 拿 root)。
+    helper = os.path.join(HERE, "finalize-helper.sh")
+    if os.path.exists(helper):
+        try:
+            p = subprocess.run(["sudo", "-n", helper], timeout=90, capture_output=True)
+            if p.returncode == 0:
+                # helper 干完全部收尾;它某步失败会打到 stderr(退出码仍 0)→ 回给前端。
+                err = p.stderr.decode(errors="replace").strip()
+                return [f"finalize-helper: {err}"] if err else []
+            # 非 0(无 sudoers 白名单/权限) → 回落直接方式
+        except Exception:
+            pass  # sudo 不存在等 → 回落
+
+    # 回落:直接 systemctl + rm(向导以 root 跑时)。
+    warnings = []
 
     def run(cmd):
         try:

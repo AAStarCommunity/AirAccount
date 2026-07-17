@@ -1,0 +1,8 @@
+# aastar-node-setup 降权用 sudoers 片段(#23)。
+# 装:install -m 440 aastar-node-setup.sudoers /etc/sudoers.d/aastar-node-setup
+#     visudo -cf /etc/sudoers.d/aastar-node-setup   # 校验语法后再生效
+#
+# 只允许向导用户【免密】跑 finalize-helper 这一个绝对路径,别的一律不给 ——
+# 这样即便向导被攻破(它挂在网络端口上),攻击者拿到的也只是"跑这条固定收尾脚本"的能力,
+# 而不是整机 root。路径按预刷板布局调整(与 ExecStart / README 一致)。
+aastar-setup ALL=(root) NOPASSWD: /opt/aastar/node-setup/finalize-helper.sh
