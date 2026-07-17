@@ -91,6 +91,10 @@ const addrs = {};
 if (env.VALIDATOR_ADDRESS) addrs.validator = env.VALIDATOR_ADDRESS.trim();
 if (env.GTOKEN_ADDRESS) addrs.gToken = env.GTOKEN_ADDRESS.trim();
 if (env.STAKING_ADDRESS) addrs.staking = env.STAKING_ADDRESS.trim();
+// Sepolia 的 SDK canonical aaStarBLSAlgorithm=0x0(漂移),不显式传会失配 → 早失败给人话。
+if (!addrs.validator && NETWORK === 'sepolia') {
+  fail('Sepolia 需显式 VALIDATOR_ADDRESS(SDK canonical aaStarBLSAlgorithm=0x0 会失配)');
+}
 
 const jsonBig = (o) => JSON.stringify(o, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
 
