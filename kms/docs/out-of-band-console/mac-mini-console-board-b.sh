@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# mac-mini-console-board-b.sh
+# 在【与板B同处一地的 mac-mini】上运行。
+# 把板B(MX93B / FRDM-IMX93 / kms1)的 USB-C 调试串口挂成常驻、可远程 attach 的控制台。
+# 板子断网(WiFi/Tailscale 挂了)时,仍能从 mac-mini(它在 Tailscale 上)screen 进串口救板。
+#
+# 用法:
+#   ./mac-mini-console-board-b.sh up       # 启动/确保常驻控制台在跑(幂等)
+#   ./mac-mini-console-board-b.sh attach   # 本机附着(退出用 Ctrl-b 再 d,不杀会话)
+#   ./mac-mini-console-board-b.sh down     # 停掉常驻会话
+#   ./mac-mini-console-board-b.sh list     # 列出当前 usbmodem 串口,用来核对 DEV_GLOB
+#
+# 远程(从我的 Mac 经 Tailscale):
+#   ssh mac-mini -t '/opt/homebrew/bin/tmux attach -t board-b'   # Apple Silicon
+#   ssh mac-mini -t '/usr/local/bin/tmux  attach -t board-b'     # Intel mac-mini
+#
+set -euo pipefail
+
+# ===================== CONFIG(板B) =====================
+BOARD="board-b"                        # tmux 会话名 + 日志文件名
+DEV_GLOB="/dev/cu.usbmodem*831*"       # 板B MCU-Link 调试串口(USB-C),记忆里后缀 …831。先 list 核对!
+BAUD=115200
+LOG_DIR="${HOME}/airaccount-console-logs"
+# =======================================================
+
+TMUX_BIN="$(command -v tmux || true)"
+cmd="${1:-up}"
+
+list_devices() {
+  echo "当前 /dev/cu.usbmodem* 串口设备:"
+  /bin/ls /dev/cu.usbmodem* 2>/dev/null || echo "  (无 — 板子没插/没通电/线是充电线)"
+  echo "本脚本 DEV_GLOB = $DEV_GLOB"
+}
+
+case "$cmd" in
+  list)  list_devices; exit 0 ;;
+  down)
+    [ -n "$TMUX_BIN" ] || { echo "无 tmux"; exit 1; }
+    "$TMUX_BIN" kill-session -t "$BOARD" 2>/dev/null && echo "已停止 $BOARD" || echo "$BOARD 没在跑"
+    exit 0 ;;
+  attach)
+    [ -n "$TMUX_BIN" ] || { echo "无 tmux"; exit 1; }
+    exec "$TMUX_BIN" attach -t "$BOARD" ;;
+  up|"") : ;;
+  *) echo "用法: $0 [up|attach|down|list]"; exit 2 ;;
+esac
+
+# ---------------- up ----------------
+[ -n "$TMUX_BIN" ] || { echo "缺 tmux,请先: brew install tmux"; exit 1; }
+mkdir -p "$LOG_DIR"
+
+if "$TMUX_BIN" has-session -t "$BOARD" 2>/dev/null; then
+  echo "✅ $BOARD 控制台已在运行。"
+  echo "   远程 attach: ssh mac-mini -t '$TMUX_BIN attach -t $BOARD'"
+  exit 0
+fi
+
+# 监督循环:串口没出现就等它,出现就 screen 连;断开(板重启/拔插)后自动重连。
+# 注意:内层 $DEV_GLOB/$BAUD/$LOG_DIR/$BOARD 在生成时展开;运行时变量用 \$ 转义。
+read -r -d '' LOOP <<EOF || true
+while true; do
+  DEV=""
+  for d in $DEV_GLOB; do [ -e "\$d" ] && { DEV="\$d"; break; }; done
+  if [ -z "\$DEV" ]; then
+    echo "[\$(date '+%F %T')] 等待板B串口出现 ($DEV_GLOB) ..."
+    sleep 3; continue
+  fi
+  echo "[\$(date '+%F %T')] 连接 \$DEV @ $BAUD (退出附着: Ctrl-b d;不会断板)"
+  screen "\$DEV" $BAUD || true
+  echo "[\$(date '+%F %T')] 串口断开,3秒后重连…"
+  sleep 3
+done
+EOF
+
+"$TMUX_BIN" new-session -d -s "$BOARD" "$LOOP"
+# 把控制台输出同时落盘,便于事后翻(哪怕没人 attach)
+"$TMUX_BIN" pipe-pane -t "$BOARD" -o "cat >> \"$LOG_DIR/$BOARD.log\"" 2>/dev/null || true
+
+echo "✅ 已启动 $BOARD 常驻控制台 (tmux 会话: $BOARD)"
+echo "   本机 attach:  $TMUX_BIN attach -t $BOARD"
+echo "   远程 attach:  ssh mac-mini -t '$TMUX_BIN attach -t $BOARD'"
+echo "   日志:         $LOG_DIR/$BOARD.log"
+echo "   退出附着(不杀会话): 先按 Ctrl-b 再按 d"
+echo "   screen 内如需退屏: Ctrl-a 再按 k (会触发自动重连)"
