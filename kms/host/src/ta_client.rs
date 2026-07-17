@@ -634,7 +634,11 @@ impl TeeHandle {
     }
 
     /// BLS-sign a 32-byte message with the sealed key. Returns (EIP-2537 G2 256B, compact G2 96B).
-    pub async fn bls_sign(&self, key_id: uuid::Uuid, message: [u8; 32]) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub async fn bls_sign(
+        &self,
+        key_id: uuid::Uuid,
+        message: [u8; 32],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let input = bincode::serialize(&proto::BlsSignInput { key_id, message })
             .context("Failed to serialize BlsSignInput")?;
         let out = self.call(proto::Command::BlsSign, input).await?;
@@ -652,10 +656,7 @@ impl TeeHandle {
     /// BLS proof-of-possession (RFC self-PoP over the node's own pubkey) — CC-37 staked
     /// registration. Returns the DvtPop tuple (publicKey 128B, popPoint 256B, popSig 256B),
     /// all EIP-2537. The TA signs its own pubkey (no caller message) → not a signing oracle.
-    pub async fn bls_pop_sign(
-        &self,
-        key_id: uuid::Uuid,
-    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    pub async fn bls_pop_sign(&self, key_id: uuid::Uuid) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let input = bincode::serialize(&proto::BlsPopSignInput { key_id })
             .context("Failed to serialize BlsPopSignInput")?;
         let out = self.call(proto::Command::BlsPopSign, input).await?;
