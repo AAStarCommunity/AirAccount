@@ -72,15 +72,15 @@ if (env.BLS_SECRET_KEY) {
         body: JSON.stringify({}), // handler 忽略 body;key_id 从 KMS 的 env KMS_BLS_KEY_ID 取
       });
       if (!r.ok) throw new Error(`KMS /pop ${r.status}: ${(await r.text()).slice(0, 200)}`);
-      const d = await r.json(); // { public_key, pop_point, pop_signature }
-      if (!d.public_key || !d.pop_point || !d.pop_signature) {
-        throw new Error('KMS /pop 响应缺字段(public_key/pop_point/pop_signature)');
+      const d = await r.json(); // KMS /pop 返回 camelCase: { publicKey, popPoint, popSig }
+      if (!d.publicKey || !d.popPoint || !d.popSig) {
+        throw new Error('KMS /pop 响应缺字段(publicKey/popPoint/popSig)');
       }
       return {
-        publicKey: d.public_key,
-        popPoint: d.pop_point,
-        popSig: d.pop_signature,
-        nodeId: keccak256(d.public_key), // 合约按此绑定;SDK 也会自算,这里对齐
+        publicKey: d.publicKey,
+        popPoint: d.popPoint,
+        popSig: d.popSig,
+        nodeId: keccak256(d.publicKey), // 合约按此绑定;SDK 也会自算,这里对齐
       };
     },
   };
