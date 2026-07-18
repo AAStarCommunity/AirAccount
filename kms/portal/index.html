@@ -26,73 +26,89 @@
   th,td { border:1px solid var(--border); padding:.5rem .6rem; text-align:left; } th { background:var(--card); }
   .scaffold { background:#fff3cd; color:#664d03; border-radius:8px; padding:.6rem 1rem; font-size:.85rem; margin:1rem 0; }
   @media (prefers-color-scheme: dark){ .scaffold{ background:#3a2e00; color:#ffe08a; } }
+  .picker { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:.6rem; margin:1rem 0; }
+  .picker label { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:.8rem; cursor:pointer; display:block; font-size:.9rem; }
+  .picker label:has(input:checked) { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .picker input { margin-right:.4rem; }
+  .picker .t { font-weight:600; }
 </style>
 </head>
 <body>
 <h1>🍄 AAStar 社区节点</h1>
-<p class="sub">买一块 MX93 主板,自助起你自己的 <b>KMS + DVT 节点</b>,加入 Mycelium 门限网络。不需要懂 CLI / 编译 / Git。</p>
+<p class="sub">买一块 NXP FRDM-IMX93 主板,自助起你自己的 <b>KMS / DVT 节点</b>,加入 Mycelium 门限网络。不需要懂 CLI / 编译 / Git。</p>
 
-<div class="scaffold">⚠️ 脚手架版(Phase 3 起步)—— 下载链接与 gasless 一键注册待接线;当前引导到 GitHub Releases + 自助向导。</div>
+<div class="scaffold">⚠️ 脚手架版 —— 板子出厂即 NXP 定制 Linux(含 OP-TEE),<b>无需重刷系统</b>;只跑一条 installer 装我们的组件。gasless 一键注册待接线。</div>
 
 <h2>三步走</h2>
 <div class="steps">
-  <div class="step"><b>① 拿到板子</b><br>买 NXP FRDM-IMX93,或找 AAStar 要预刷板(邮寄)。</div>
-  <div class="step"><b>② 装上节点</b><br>预刷板直接开机;或刷镜像 / 跑一条 installer 命令。</div>
-  <div class="step"><b>③ 浏览器配置</b><br>开机联网 → 打开板子 IP:8088 → 填几项 → 完成,加入门限网络。</div>
+  <div class="step"><b>① 拿到板子</b><br>买 NXP FRDM-IMX93(出厂自带 OP-TEE Linux),或找 AAStar 要预刷板(邮寄)。</div>
+  <div class="step"><b>② 装上节点</b><br>联网 → 跑一条 installer(下面选一种角色)→ 自动装 KMS/DVT。<b>不刷 Linux。</b></div>
+  <div class="step"><b>③ 浏览器配置</b><br>打开板子 <code>IP:8088</code> → 填几项 → 首启在 TEE 内生成密钥 → 加入门限网络。</div>
 </div>
 
-<h2>选一档傻瓜度</h2>
+<h2>① 选一种节点角色</h2>
+<p class="note">同一套组件,4 种角色只是「装哪些服务 + 签名方式」的差异。选好后下面的命令会自动带上 <code>PROFILE</code>。</p>
+<div class="picker" id="picker">
+  <label><input type="radio" name="profile" value="combined-independent" checked>
+    <span class="t">联合 · 各自独立</span><br><span class="note">KMS + DVT 同板,DVT 用本地 keystore、keeper 走 env。最常见。</span></label>
+  <label><input type="radio" name="profile" value="combined-tee">
+    <span class="t">联合 · KMS 托管</span><br><span class="note">KMS + DVT,DVT 的 BLS + keeper 私钥托管进 KMS-TEE(最强保护)。</span></label>
+  <label><input type="radio" name="profile" value="kms-only">
+    <span class="t">独立 KMS</span><br><span class="note">只跑密钥/签名服务(AWS-KMS 兼容),不参与 DVT 门限。</span></label>
+  <label><input type="radio" name="profile" value="dvt-only">
+    <span class="t">独立 DVT</span><br><span class="note">只当门限验证节点(本地 keystore),不跑 KMS。</span></label>
+</div>
+
+<h2>② 一条命令装上</h2>
+<p class="note">板子联网后,SSH 上去跑(NXP 出厂 Linux 已含 OP-TEE,无需重刷):</p>
+<pre id="installer-cmd">curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/aastar-node-installer.sh | sudo PROFILE=combined-independent bash</pre>
+<p class="note">装完:有 KMS 的角色会在 <code>:8088</code> 起配置向导;DVT 在 <code>:8080</code>、KMS 在 <code>:3000</code>。想先看它会做什么,加 <code>DRY_RUN=1</code> 只打印计划不改动。</p>
 
 <div class="tier">
-  <h3>A · 预刷板(最省心)<span class="badge">★★★ 零刷机</span></h3>
-  AAStar 刷好板子邮寄给你。通电 → 联网 → 浏览器打开 <code>http://&lt;板子IP&gt;:8088</code> 跑配置向导。
-  <p class="note">适合:不想碰刷机的社区。找 AAStar 申请预刷板。</p>
+  <h3>预刷板(最省心)<span class="badge">★★★ 零操作</span></h3>
+  不想碰命令行?找 AAStar 要<b>预刷板</b>(已装好邮寄)。通电 → 联网 → 浏览器打开 <code>http://&lt;板子IP&gt;:8088</code> 跑向导即可。
 </div>
-
 <div class="tier">
-  <h3>B · 下载镜像自刷 <span class="badge">★★ 有 GUI</span></h3>
-  下 <code>.wic</code> 整盘镜像 → <a href="https://etcher.balena.io/">balenaEtcher</a> 拖拽刷 SD/eMMC → 开机 → 同 A 的向导。
-  <p class="note">⏳ 镜像发布待 CI(Yocto)就绪。暂用下面 C 档 installer。</p>
+  <h3>整盘镜像自刷<span class="badge">⏳ 待 CI</span></h3>
+  <code>.wic</code> 整盘镜像(balenaEtcher 拖拽刷)待 Yocto CI 就绪。<b>现阶段用上面的 installer 即可</b> —— 出厂 Linux 人人相同,不需要重刷整盘。
 </div>
 
-<div class="tier">
-  <h3>C · 基础镜像 + 一条命令 <span class="badge">★ 需一条命令</span></h3>
-  刷 NXP 官方 FRDM-IMX93 OP-TEE 基础镜像(含 OP-TEE),然后:
-  <pre id="installer-cmd">curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/aastar-node-installer.sh | sudo bash</pre>
-  自动装 KMS + DVT + 配置向导。详见 <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/phase2-image.md">Phase 2 镜像文档</a>。
-</div>
-
-<h2>下载</h2>
+<h2>下载(我们的组件 bundle,不是 Linux 镜像)</h2>
 <div id="dl-dynamic">
-  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.28.0">airaccount-node（KMS+DVT 合并）</a>
-  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-kms-v0.28.0">airaccount-kms（独立 KMS）</a>
+  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/latest">airaccount-node（KMS+DVT）</a>
+  <a class="dl" href="https://github.com/AAStarCommunity/AirAccount/releases/latest">airaccount-kms（独立 KMS）</a>
   <span class="note" id="dl-status">（默认链接;正在拉取最新版本…）</span>
 </div>
 <script>
-// 动态拉 GitHub Releases,列出最新的 airaccount-kms / airaccount-node(带 tarball)。
+const PROFILES = {
+  'combined-independent':'联合 · 各自独立','combined-tee':'联合 · KMS 托管',
+  'kms-only':'独立 KMS','dvt-only':'独立 DVT'
+};
+let curTag = 'main', curVer = '';
+function renderCmd() {
+  const p = (document.querySelector('input[name=profile]:checked')||{}).value || 'combined-independent';
+  const el = document.getElementById('installer-cmd');
+  const verPart = curVer ? ` VERSION=${curVer}` : '';
+  el.textContent =
+    `curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/${curTag}/kms/deploy/aastar-node-installer.sh | sudo PROFILE=${p}${verPart} bash`;
+}
+document.getElementById('picker').addEventListener('change', renderCmd);
+// 动态拉 GitHub Releases,钉最新正式 node release tag(可复现,不随 main 漂移)。
 (async () => {
   const box = document.getElementById('dl-dynamic'), status = document.getElementById('dl-status');
   try {
     const r = await fetch('https://api.github.com/repos/AAStarCommunity/AirAccount/releases?per_page=30');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const rels = await r.json();
-    // 只取正式版:排除 draft + prerelease(rc/beta 不进社区下载列表)。
     const pick = p => rels.filter(x => x.tag_name.startsWith(p) && !x.draft && !x.prerelease).sort((a,b)=> (a.created_at<b.created_at?1:-1))[0];
     const node = pick('airaccount-node'), kms = pick('airaccount-kms');
+    if (node) { curTag = node.tag_name; curVer = node.tag_name.replace(/^airaccount-node-/, ''); renderCmd(); }
     if (!node && !kms) throw new Error('无正式 release');
-    // installer 命令钉到最新正式 node release tag(可复现,不随 main 漂移)。
-    if (node) {
-      const ver = node.tag_name.replace(/^airaccount-node-/, '');
-      const cmd = document.getElementById('installer-cmd');
-      if (cmd) cmd.textContent =
-        `curl -fsSL https://raw.githubusercontent.com/AAStarCommunity/AirAccount/${node.tag_name}/kms/deploy/aastar-node-installer.sh | sudo VERSION=${ver} bash`;
-    }
     box.innerHTML = '';
-    for (const [rel, label] of [[node,'airaccount-node（KMS+DVT 合并）'],[kms,'airaccount-kms（独立 KMS）']]) {
+    for (const [rel, label] of [[node,'airaccount-node（KMS+DVT）'],[kms,'airaccount-kms（独立 KMS）']]) {
       if (!rel) continue;
       const asset = (rel.assets||[]).find(a => a.name.endsWith('.tar.gz'));
-      const href = asset ? asset.browser_download_url : rel.html_url;
-      const a = document.createElement('a'); a.className='dl'; a.href=href;
+      const a = document.createElement('a'); a.className='dl'; a.href=asset ? asset.browser_download_url : rel.html_url;
       a.textContent = `${label} · ${rel.tag_name.replace(/^airaccount-(kms|node)-/,'')}`;
       box.appendChild(a);
     }
@@ -104,11 +120,12 @@
 })();
 </script>
 <table>
-  <tr><th>发布物</th><th>用途</th><th>含</th></tr>
-  <tr><td><b>airaccount-node</b></td><td>完整社区节点(KMS+DVT 门限共签)</td><td>KMS TA/CA + 签名 manifest + DVT v1.10.0 引用 + 部署配置</td></tr>
-  <tr><td><b>airaccount-kms</b></td><td>只跑密钥/签名服务(不做 DVT)</td><td>KMS TA/CA + 签名 manifest + 部署脚本</td></tr>
+  <tr><th>角色(PROFILE)</th><th>跑什么</th><th>DVT 签名</th></tr>
+  <tr><td><b>combined-independent</b></td><td>KMS + DVT 同板,各自独立</td><td>本地 keystore + keeper env</td></tr>
+  <tr><td><b>combined-tee</b></td><td>KMS + DVT 同板,DVT 托管 KMS-TEE</td><td>KMS-TEE(BLS + keeper 私钥不出 TEE)</td></tr>
+  <tr><td><b>kms-only</b></td><td>只 KMS(密钥/签名服务)</td><td>—</td></tr>
+  <tr><td><b>dvt-only</b></td><td>只 DVT(门限验证节点)</td><td>本地 keystore</td></tr>
 </table>
-<p class="note">DVT 独立部署(只跑 DVT、不跑 KMS)见 <a href="https://github.com/AAStarCommunity/YetAnotherAA-Validator">YetAnotherAA-Validator</a>。</p>
 
 <h2>配置向导会问什么</h2>
 <table>
@@ -118,12 +135,13 @@
   <tr><td>Operator 地址</td><td>链上注册用;没 ETH 也行,AAStar 可 gasless 代付</td></tr>
   <tr><td>网络</td><td>测试网 Sepolia(先试)/ 主网</td></tr>
 </table>
-<p class="note">向导做:TEE 内生成密封 BLS 密钥(永不出板)→ 写配置 → 收尾重启 → 给出注册指引。私钥全程不显示、不离开 TEE。</p>
+<p class="note">向导做:<b>私钥全程首启在板/TEE 内生成,永不出板、不显示、不离开 TEE。</b> 你本地只填 config(无私钥)。见
+  <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/community-node-init-config-design.md">初始化配置设计</a>。</p>
 
 <h2>了解更多</h2>
 <ul>
-  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/community-onboarding-program.md">社区自助上手程序(三阶段设计)</a></li>
-  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/dvt-tee-bls-custody-design.md">KMS-TEE BLS 托管(设计 + 安全分析)</a></li>
+  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/deploy/community-profiles/">4 种角色 profile(config 模板)</a></li>
+  <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/community-onboarding-program.md">社区自助上手程序</a> · <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/dvt-tee-bls-custody-design.md">KMS-TEE BLS 托管设计</a></li>
   <li><a href="https://github.com/AAStarCommunity/AirAccount/blob/main/README.md">AirAccount KMS README</a> · <a href="https://www.mushroom.cv">Mycelium Protocol</a></li>
 </ul>
 <p class="note">© AAStar · 数字公共物品 · 开源免费无许可</p>
