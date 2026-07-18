@@ -135,7 +135,9 @@ document.getElementById('picker').addEventListener('change', renderCmd);
   <tr><td>Operator 地址</td><td>链上注册用;没 ETH 也行,AAStar 可 gasless 代付</td></tr>
   <tr><td>网络</td><td>测试网 Sepolia(先试)/ 主网</td></tr>
 </table>
-<p class="note">向导做:<b>私钥全程首启在板/TEE 内生成,永不出板、不显示、不离开 TEE。</b> 你本地只填 config(无私钥)。见
+<p class="note">向导做:<b>私钥全程首启在板生成,不显示、你本地只填 config(无私钥)。</b>
+  保护级别按角色:<b>KMS 密钥</b> 与 <b>combined-tee 的 DVT</b> = TEE 密封,永不出 TEE;
+  <b>dvt-only / combined-independent 的 DVT</b> = 本地 EIP-2335 加密 keystore(在板生成、密码走 tmpfs,<b>非 TEE 密封</b>)。见
   <a href="https://github.com/AAStarCommunity/AirAccount/blob/main/kms/docs/community-node-init-config-design.md">初始化配置设计</a>。</p>
 
 <h2>了解更多</h2>
