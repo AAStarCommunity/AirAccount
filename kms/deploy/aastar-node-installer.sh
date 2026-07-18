@@ -89,9 +89,17 @@ fi
 log "装 aastar-node-setup 向导 + register 组件"
 mkdir -p "$NODE_SETUP_DIR"
 if [[ -d "$BUNDLE/node-setup" ]]; then cp -r "$BUNDLE/node-setup/." "$NODE_SETUP_DIR/"; else
-  for f in setup-server.py setup.html register-node.mjs; do
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/kms/node-setup/$f" -o "$NODE_SETUP_DIR/$f" 2>/dev/null || true
-  done
+  # #184 review nit:必需件 fail-loud(否则网络抖动静默"完成"却没向导)。
+  # 向导必需件(setup-server.py/setup.html)仅有 KMS 的情况需要 → 拉不到就 die。
+  if [[ $INSTALL_KMS == 1 ]]; then
+    for f in setup-server.py setup.html; do
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/kms/node-setup/$f" -o "$NODE_SETUP_DIR/$f" \
+        || die "拉取向导必需件 $f 失败(网络?)—— 中止,避免装出没向导的半残节点"
+    done
+  fi
+  # register 组件 best-effort(release bundle 的 register-node.bundle.mjs 才是首选)。
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/kms/node-setup/register-node.mjs" \
+    -o "$NODE_SETUP_DIR/register-node.mjs" 2>/dev/null || true
 fi
 
 # ── 4. 装 DVT ── 仅有 DVT 的情况;签名模式按 PROFILE ────────────────────
