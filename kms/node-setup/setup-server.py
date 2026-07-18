@@ -165,7 +165,10 @@ def attempt_onchain_register(network):
     + ETH_RPC_URL + 已知实链地址 → 调 register-node.mjs(SDK onboardDvtNode,popSigner→KMS /pop)。
     任何前置缺失/失败 → 返回 None,调用方回落到手动登记指引(不阻断向导成功)。"""
     key_file = os.path.join(CONFIG_DIR, "dvt-operator.key")
-    reg_script = os.path.join(HERE, "register-node.mjs")
+    # 板侧优先用 esbuild 单文件 bundle(自包含,无 node_modules,#21);无则回落源文件(dev,需 sibling SDK)。
+    reg_script = os.path.join(HERE, "register-node.bundle.mjs")
+    if not os.path.exists(reg_script):
+        reg_script = os.path.join(HERE, "register-node.mjs")
     rpc = os.environ.get("ETH_RPC_URL")
     addrs = REGISTER_ADDRS.get(network)
     if not (os.path.exists(key_file) and os.path.exists(reg_script) and rpc and addrs):

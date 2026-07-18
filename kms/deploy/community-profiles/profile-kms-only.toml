@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════════
+# 刷机方案 · 组合 1：独立 KMS(只做密钥管理)
+# 一块 MX93 只跑 KMS —— 提供 AWS-KMS 兼容 API + WebAuthn,给别的服务/社区当密钥底座。
+# 不参与 DVT 门限。适合:只想提供密钥服务、不做验证节点的社区/机构。
+# ═══════════════════════════════════════════════════════════════════
+
+[community]
+name      = "REPLACE_ME"
+domain    = "kms.REPLACE_ME.org"         # ⚠️ 社区自己的域名 = passkey rpId
+board_ssh = "root@TAILSCALE_OR_LAN_IP"
+ssh_key   = "~/.ssh/id_ed25519"
+
+[kms]
+version = "0.29.0"
+port    = 3000
+rp_id   = "kms.REPLACE_ME.org"
+origin  = "https://kms.REPLACE_ME.org"
+profile = "prod"
+db_path = "/var/lib/kms/kms.db"
+
+[dvt]                                    # 不跑 DVT —— 留空占位,部署忽略
+version = ""
+port    = 0
+profile = "none"
+
+[chain]                                  # KMS-only 仍可选接链(attestation/registry),但不做 DVT 注册
+chain_id    = 11155111
+eth_rpc_url = "REPLACE_ME_RPC"
+
+[services]
+enable = ["tee-supplicant", "kms-api", "aastar-kms-selfinit", "cloudflared"]
+
+[bundle]
+components = ["kms-ta-signed", "kms-ca", "node-setup"]   # 无 dvt-bare-node / register-node-sdk
+
+[secrets]
+# BLS/密钥(TEE 内生成) · KMS API key · rpId —— 首启/向导生成,不进镜像
