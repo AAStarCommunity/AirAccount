@@ -1,0 +1,46 @@
+# ═══════════════════════════════════════════════════════════════════
+# 刷机方案 · 组合 2：独立 DVT(只做门限验证节点)
+# 一块板只跑 DVT —— BLS 私钥走本地 EIP-2335 加密 keystore(不依赖本地 KMS-TEE)。
+# 参与 ≥3 节点门限。适合:只想当验证节点、不提供 KMS 服务的社区。DK2(dvt2)就是这种。
+# ═══════════════════════════════════════════════════════════════════
+
+[community]
+name      = "REPLACE_ME"
+domain    = "dvt.REPLACE_ME.org"         # 可选公网 URL;节点间用 libp2p/直连也行
+board_ssh = "root@TAILSCALE_OR_LAN_IP"
+ssh_key   = "~/.ssh/id_ed25519"
+
+[kms]                                    # 不跑 KMS
+version = ""
+port    = 0
+profile = "none"
+
+[dvt]
+version        = "1.12.0"
+port           = 8080
+node_name      = "REPLACE_ME-dvt"
+policy_enabled = false
+kdf            = "pbkdf2"
+signer_mode    = "local"                 # 本地 keystore(RUST_SIGNER_URL 不设);密码走 tmpfs
+
+[chain]
+chain_id    = 11155111
+eth_rpc_url = "REPLACE_ME_RPC"
+entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+
+[contracts]
+active = "testnet"
+[contracts_testnet]
+validator = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"
+gtoken    = "0x4c09aE57503Aa1E2A43b05621A38DbdD43b0Aa08"
+staking   = "0x472297B557c1d0F030f281a5Bb8A535f6c5AB65e"
+
+[services]
+enable = ["dvt", "cloudflared"]          # 无 kms-api/tee-supplicant(不需 TEE)
+
+[bundle]
+components = ["dvt-bare-node", "node-setup", "register-node-sdk"]   # 无 kms-ta/ca
+
+[secrets]
+# BLS keystore(本地生成 EIP-2335 加密) · keystore 密码(tmpfs) · operator key(预充值,模型A)
+# 注:DVT-only 无本地 TEE → 一键注册的 PoP 走 BLS_SECRET_KEY(本地),不走 KMS /pop

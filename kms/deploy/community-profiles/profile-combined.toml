@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════
+# 刷机方案 · 组合 3：KMS + DVT 联合(co-location,单板全功能)
+# 一块 MX93 同时跑 KMS(密钥管理) + DVT(门限验证节点)。板 A/板 B 就是这种。
+# 傻瓜度最高:社区一块板即入网。资源:MX93 2GB 够跑两者。
+# ═══════════════════════════════════════════════════════════════════
+
+[community]
+name      = "REPLACE_ME"                 # 社区名(小写英数)
+domain    = "kms.REPLACE_ME.org"         # ⚠️ 社区自己的域名 = passkey rpId 锚点(不能用 aastar.io)
+board_ssh = "root@TAILSCALE_OR_LAN_IP"   # 首启后填
+ssh_key   = "~/.ssh/id_ed25519"
+
+[kms]                                    # KMS 实例
+version = "0.29.0"
+port    = 3000
+rp_id   = "kms.REPLACE_ME.org"           # = community.domain
+origin  = "https://kms.REPLACE_ME.org"
+profile = "prod"
+db_path = "/var/lib/kms/kms.db"
+
+[dvt]                                    # DVT 节点(可 TEE 托管或本地 keystore)
+version        = "1.12.0"
+port           = 8080
+node_name      = "REPLACE_ME-dvt"
+policy_enabled = false
+kdf            = "pbkdf2"
+signer_mode    = "tee"                   # tee=BLS 私钥 KMS-TEE 托管(RUST_SIGNER_URL→本地KMS);local=本地keystore
+
+[chain]
+chain_id    = 11155111                   # Sepolia(主网切 1)
+eth_rpc_url = "REPLACE_ME_RPC"
+entry_point = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+
+[contracts]
+active = "testnet"
+[contracts_testnet]
+validator = "0x539B9681aFd5BFbCaa655Fe4c6BdcFe1fa7864bC"
+gtoken    = "0x4c09aE57503Aa1E2A43b05621A38DbdD43b0Aa08"
+staking   = "0x472297B557c1d0F030f281a5Bb8A535f6c5AB65e"
+
+[services]                               # 刷机镜像 enable 的 systemd units
+enable = ["tee-supplicant", "kms-api", "aastar-kms-selfinit", "dvt", "cloudflared"]
+
+[bundle]                                 # 镜像/bundle 必带组件
+components = ["kms-ta-signed", "kms-ca", "dvt-bare-node", "node-setup", "register-node-sdk"]
+
+[secrets]                                # 首启/向导生成,绝不烤进镜像
+# BLS 私钥(TEE 内生成) · keystore 密码(tmpfs) · operator key(预充值,模型A) · KMS API key · rpId

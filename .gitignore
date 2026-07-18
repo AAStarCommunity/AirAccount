@@ -170,3 +170,6 @@ packages/attestation-verifier/*.pem
 # 厂商原厂镜像(数百MB,勿入库) / codegraph 索引 / 本地生成物
 LF_v6.6.36-2.1.0_images_FRDM_4.0_IMX93/
 .codegraph/
+
+# register-node esbuild 构建产物(build-register-bundle.sh 生成,不入库)
+kms/node-setup/register-node.bundle.mjs
