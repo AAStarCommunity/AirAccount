@@ -12,6 +12,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="${AASTAR_SDK_DIR:-$(cd "$HERE/../../.." && pwd)/aastar-sdk}"   # 默认同级 aastar-sdk
 OUT="${1:-$HERE/register-node.bundle.mjs}"
+# esbuild 在 $STAGE 里跑,相对输出路径会写进临时目录被 trap 删(却仍打 ✅) → 转绝对路径。
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
 [ -d "$SDK/packages/operator" ] || { echo "找不到 aastar-sdk: $SDK(设 AASTAR_SDK_DIR)"; exit 1; }
 
