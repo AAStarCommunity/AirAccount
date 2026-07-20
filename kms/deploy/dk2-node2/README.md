@@ -68,6 +68,8 @@ DVT3_KEYSTORE_JSON=<dvt2 node_state> DVT3_SECRET=$DVT2_SECRET DVT3_OPERATOR_PK=<
 #   → registerWithProof + stake 30 GToken → isRegistered=true。operator key 务必持久备份(丢=管不了质押)。
 ```
 
+> **op-sec**（#189 review）：① `gen-node-state.mjs` 产的明文 `node_state.json` + encrypt 后的 `.bak` 有落盘窗口 —— 加密后用 `shred -u`（非 `rm`，rm 可恢复）抹掉明文。② passphrase/私钥别**内联** env 传（`ps -E` / `/proc/PID/environ` 可见）—— 走文件/stdin，或至少确保只在 root-only 环境跑。
+
 **生产硬化**（远程节点要稳）：
 - **时钟**：学校网封 NTP 123 → `timesyncd` 同步不了、无 RTC → 用 host 时间手动 `date -u -s`（重启会再偏，靠 timesyncd 有网时纠）。
 - **swap**：这镜像**无 `swapon/mkswap`、无 zram 模块** → 加不了 swap；DVT 靠 `MemoryMax=320M + --max-old-space-size=224` 在 512MB 内跑（idle ~28MB free,紧但活）。
