@@ -28,7 +28,8 @@ mkdir -p "$B"/{kms,node-setup,deploy}
 [ -n "$KMS_SRC" ] || die "需 KMS_SRC=<airaccount-kms 目录或 .tar.gz>(提供 TA/CA)"
 KDIR="$KMS_SRC"
 if [[ "$KMS_SRC" == *.tar.gz ]]; then
-  tar xzf "$KMS_SRC" -C "$STAGE/kmssrc" 2>/dev/null || { mkdir -p "$STAGE/kmssrc"; tar xzf "$KMS_SRC" -C "$STAGE/kmssrc"; }
+  mkdir -p "$STAGE/kmssrc"
+  tar xzf "$KMS_SRC" -C "$STAGE/kmssrc" || die "KMS_SRC tarball 解包失败: $KMS_SRC"
   KDIR="$(find "$STAGE/kmssrc" -maxdepth 2 -name "$UUID.ta" -exec dirname {} \; | head -1)"
 fi
 [ -f "$KDIR/$UUID.ta" ] || die "KMS_SRC 里找不到 $UUID.ta"
