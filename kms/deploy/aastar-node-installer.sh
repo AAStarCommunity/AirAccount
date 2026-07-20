@@ -63,7 +63,7 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # ── 1. 下 airaccount-node release(我们的 bundle,~50MB,不是 Linux 镜像)──
 if [[ "$VERSION" == "latest" ]]; then
-  URL="https://github.com/$REPO/releases/latest/download/airaccount-node-v0.28.1.tar.gz"
+  URL="https://github.com/$REPO/releases/latest/download/airaccount-node-v0.29.0.tar.gz"
 else
   URL="https://github.com/$REPO/releases/download/airaccount-node-$VERSION/airaccount-node-$VERSION.tar.gz"
 fi
