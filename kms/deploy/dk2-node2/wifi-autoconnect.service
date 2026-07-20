@@ -1,0 +1,11 @@
+[Unit]
+Description=DK2 school WiFi auto-connect (@JumboPlusIoT, own MAC, blackbox)
+After=network.target
+[Service]
+Type=simple
+ExecStart=/home/root/wifi-up.sh
+Restart=on-failure
+RestartSec=15
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

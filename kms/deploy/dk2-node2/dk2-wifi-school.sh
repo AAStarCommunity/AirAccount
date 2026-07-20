@@ -13,7 +13,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DK2="$HERE/dk2.sh"
-WIFI_ASSETS="$HERE/../../docs/dk2-school-wifi"   # 复用现成 wifi-up.sh + service
+WIFI_ASSETS="$HERE"   # 自包含:wifi-up.sh + wifi-autoconnect.service 同目录(#187 review:别人 clone 也能跑)
 ENVF="${ENV_FILE:-$HOME/Dev/.env}"
 
 # 读 env:剥行内注释(# 起)+ 两端空白 + 包围引号(PSK/SSID/MAC 都无内部 # 或空格)。

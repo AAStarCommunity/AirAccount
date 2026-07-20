@@ -12,6 +12,7 @@
 - DK2 串口 = **micro-USB 插 CN11**（板载 ST-LINK/V2-1 VCP）。⚠️**必须数据线**——充电线没 D+/D‑ 不出串口。
 - 板子通电 + ST-LINK 枚举 → macOS 出 `/dev/cu.usbmodemXXXX`；`ioreg` 里可见 `STM32 STLink`（STMicroelectronics）。
 - 串口 **自动 root 登录**（无密码，`root@stm32mp1`）。
+  > ⚠️ **安全**（#187 review）：DK2 是 keystore 节点,串口=物理接触=免密 root=可读密钥。dev 板默认如此、需物理接触,当前可接受;**生产化前**应硬化(串口登录加密码 / 禁 auto-login)。
 
 ```bash
 ./dk2.sh find              # 自动找到 DK2 串口设备路径(排除板B的 5B6D MCU-Link)
@@ -69,3 +70,4 @@ DK2 联网后（学校，或授权后公寓）：
 - `dk2.sh` — 串口访问(find/console/run/put)
 - `dk2-serial.py` — pyserial 底层 helper
 - `dk2-wifi-school.sh` — 配学校 wifi 自启(PSK 从 env)
+- `wifi-up.sh` / `wifi-autoconnect.service` — 装到 DK2 的部署产物(接口自探测+wpa+dhcp+黑匣子 / systemd 自启)
