@@ -336,6 +336,95 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T15 security 策略不被更高的非安全版架空(PR#191 High-1)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+UPDATE_POLICY=security
+TA_AUTO_UPDATE=off
+ENV
+read NR NS < <(new_node t15 0.28.0)
+S1="$(make_bundle 0.28.1 TA-0.28.0)"   # 安全 patch
+S2="$(make_bundle 0.29.0 TA-0.28.0)"   # 非安全 minor,版本更高
+REL="$(jq -n --arg s1 "$S1" --arg u1 "file://$SERVER/airaccount-node-0.28.1.tar.gz" \
+             --arg s2 "$S2" --arg u2 "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.28.1",security:true,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u1,sha256:$s1},
+    {version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u2,sha256:$s2}]')"
+write_manifest 15 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(st "$NS" current)" = "0.28.1" ] && ok "自动打了安全补丁 0.28.1(未被更高的 0.29.0 挡住)" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T16 PIN_VERSION 不绕过 notify-only 总开关(PR#191 High-2)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+PIN_VERSION=0.29.0
+ENV
+read NR NS < <(new_node t16 0.28.0)
+S="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 16 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "notify-only 下 PIN 匹配也不自动应用" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T17 PIN_VERSION + AUTO_UPDATE=on:匹配即应用(越过 security 策略)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+UPDATE_POLICY=security
+PIN_VERSION=0.29.0
+ENV
+read NR NS < <(new_node t17 0.28.0)
+S1="$(make_bundle 0.28.1 TA-0.28.0)"
+S2="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s1 "$S1" --arg u1 "file://$SERVER/airaccount-node-0.28.1.tar.gz" \
+             --arg s2 "$S2" --arg u2 "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.28.1",security:true,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u1,sha256:$s1},
+    {version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u2,sha256:$s2}]')"
+write_manifest 17 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(st "$NS" current)" = "0.29.0" ] && ok "PIN=0.29.0 被应用(非安全也放行,因显式锁定)" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T18 requires_ta_version > 当前且不换 TA → 兼容性门只通知(PR#191 Medium)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+ENV
+read NR NS < <(new_node t18 0.28.0)
+S="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"0.29.0",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 18 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "兼容性门拦下(current 未变)" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T19 健康门核对部署版本:restart 后仍旧版 → 回滚(PR#191 Medium)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+UPDATE_POLICY=all
+ENV
+read NR NS < <(new_node t19 0.28.0)
+S="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 19 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# 模拟「restart 后仍在跑旧版 0.28.0」:健康门只在期望版本==0.28.0 时才通过 → 部署 0.29.0 必失败
+cat > "$ROOT/health-ver.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${AU_EXPECT_VERSION:-}" = "0.28.0" ]
+SH
+chmod +x "$ROOT/health-ver.sh"
+env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+    AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
+    AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/health-ver.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+    bash "$UPDATER" check >/dev/null 2>&1
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "版本核对失败→回滚(current 未变)" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

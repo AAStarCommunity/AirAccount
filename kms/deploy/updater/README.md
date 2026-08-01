@@ -19,6 +19,10 @@
 | 不轻易变砖 | 健康门失败 → 自动回滚到上一版 | T5 |
 | 掉电可恢复 | `pending` 状态标记 + boot recovery | T6 |
 | 保守默认 | `notify-only` 默认,安全补丁才自动、canary 先行 | T1/T7/T8 |
+| security 策略不被架空 | 遍历所有候选选「可自动应用的最高版」,更高的非安全版不挡安全 patch | T15 |
+| 总开关优先于 PIN | `PIN_VERSION` 受 `AUTO_UPDATE` 约束,notify-only 下不自动应用 | T16/T17 |
+| CA/TA 兼容性门 | `requires_ta_version` > 当前且本次不换 TA → 只通知 | T18 |
+| 健康门核对版本 | 内置健康门比对 `/version` == 刚部署版本(防跑旧二进制误判) | 内置 `AU_EXPECT_VERSION` |
 
 ## 文件
 
