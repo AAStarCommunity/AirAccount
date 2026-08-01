@@ -163,6 +163,17 @@ fetch() { # fetch <url> <out>
   curl -fSL --connect-timeout 15 --max-time 300 "$1" -o "$2"
 }
 
+# 拉取关键文件并按失败类型分流:
+#   curl 22 = HTTP 4xx/5xx(端点响应了但报错)= 配置错/撤除/篡改 → 告警拒绝(不静默)。
+#   其它(DNS/连接/超时等网络类)→ 静默重试(设计文档 §8,免告警疲劳)。
+fetch_required() { # fetch_required <url> <out> <what>
+  local rc=0
+  fetch "$1" "$2" || rc=$?
+  [ "$rc" = 0 ] && return 0
+  [ "$rc" = 22 ] && die "$3:端点返回 HTTP 错误(curl 22)—— 端点配置/撤除/篡改?拒绝"
+  give_up_quiet "$3:下载失败(网络?rc=$rc)"
+}
+
 # ── 验签(minisign 离线,pubkey 编入节点)──────────────────────────
 verify_sig() { # verify_sig <file> <sigfile>
   need minisign
@@ -328,7 +339,7 @@ cmd_check() {
   local murl="$AU_MANIFEST_BASE/$CHANNEL.json"
   log "拉 manifest: $murl"
   # manifest 本体拉不到 = 网络/GitHub 不可达 → 静默重试(设计文档 §8)
-  fetch "$murl" "$WORK/channel.json" || give_up_quiet "manifest 下载失败(网络?)"
+  fetch_required "$murl" "$WORK/channel.json" "manifest"
   # 但 manifest 拉到了、签名却拉不到 = 异常(发布出错/篡改)→ fail-closed 告警,不能静默
   fetch "$murl.minisig" "$WORK/channel.json.minisig" || die "manifest 有正文却无签名 —— 拒绝(fail-closed)"
 
@@ -352,7 +363,7 @@ cmd_check() {
           and ((.auto_apply_allowed//false)|type=="boolean")
           and ((.ta_changed//false)|type=="boolean")
           and ((.min_version//"0.0.0")|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-          and (.requires_ta_version==null or (.requires_ta_version|type=="string"))
+          and (.requires_ta_version==null or (.requires_ta_version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
           and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))))
   ' "$WORK/channel.json" >/dev/null 2>&1 || die "manifest schema 非法 —— 拒绝(fail-closed)"
 
@@ -425,7 +436,7 @@ EOF
   # 8) 下载 apply 目标 tarball + 校验 sha256(+ 可选独立 tarball 签名)
   [ -n "$ac_tarball" ] || die "apply 候选缺 tarball URL"
   log "下载 $ac_tarball"
-  fetch "$ac_tarball" "$WORK/node.tgz" || give_up_quiet "tarball 下载失败(网络?)"
+  fetch_required "$ac_tarball" "$WORK/node.tgz" "tarball"
   local got; got="$(sha256_of "$WORK/node.tgz")"
   [ "$got" = "$ac_sha" ] || die "tarball sha256 不匹配(期望 $ac_sha 得 $got)—— 拒绝"
   # tarball 独立 minisig(可选,存在则必须过)
