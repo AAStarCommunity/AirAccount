@@ -1,0 +1,16 @@
+# /etc/systemd/system/airaccount-updater.service
+[Unit]
+Description=AAStar community node auto-updater (check + apply)
+After=network-online.target kms-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/airaccount/updater/aastar-node-updater.sh check
+# 加固:updater 需要写 /opt/airaccount 与 /var/lib/airaccount,且 restart 服务需 systemctl。
+# 保持 root 但收窄可写路径。
+ProtectSystem=strict
+ReadWritePaths=/opt/airaccount /var/lib/airaccount /lib/optee_armtz
+ProtectHome=yes
+NoNewPrivileges=no
+PrivateTmp=yes

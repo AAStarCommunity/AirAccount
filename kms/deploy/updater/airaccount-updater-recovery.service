@@ -1,0 +1,15 @@
+# /etc/systemd/system/airaccount-updater-recovery.service
+# boot 时先于 kms-api 跑:上次更新掉电中断(pending 未提交)→ 自动回滚。
+[Unit]
+Description=AAStar auto-updater boot recovery (rollback uncommitted update)
+DefaultDependencies=no
+After=local-fs.target
+Before=kms-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/airaccount/updater/aastar-node-updater.sh recovery
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
