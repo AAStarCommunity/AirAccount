@@ -1,0 +1,13 @@
+# /etc/systemd/system/airaccount-updater.timer
+[Unit]
+Description=AAStar community node auto-updater periodic check
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+# 错峰(修 I1):打散全网触发时刻,避免坏版本全网同一分钟一起动。
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
