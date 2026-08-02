@@ -981,8 +981,8 @@ rm -f "$NS/lock"
 echo "== T52 锁软链指向非法 pid(0 / 负 / 垃圾)→ 当 stale 抢占,不误判存活(pr-daemon 五轮 #3)=="
 read NR NS < <(new_node t52 0.28.0)
 write_manifest 52 "2035-01-01T00:00:00Z" "0.0.0" "[]"
-for badpid in 0 garbage; do
-  ln -sfn "$badpid" "$NS/lock"     # kill -0 0 会成功(误判存活);garbage 非数字
+for badpid in 0 00 000 garbage; do   # 0 及零填充 00/000(kill -0 00/000 命中进程组 0 会误判存活,#8);garbage 非数字
+  ln -sfn "$badpid" "$NS/lock"
   run_updater "$NR" "$NS" check >/dev/null 2>&1; RC=$?
   { [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "非法 pid '$badpid' 当 stale 被抢占(check 跑完)" || bad "非法 pid '$badpid' 误判存活 exit=$RC"
 done
@@ -997,6 +997,35 @@ rm -f "$NS/lock"
 ln -sfn 999999 "$NS/lock"
 run_updater "$NR" "$NS" recovery >/dev/null 2>&1
 [ ! -e "$NS/lock" ] && ok "recovery 清掉了 stale 死 pid 锁" || bad "stale 锁未清"
+
+echo "== T54 recovery 也持锁:活实例在跑时 recovery 不 lock-free 改 state/软链(pr-daemon 六轮 #1)=="
+NR="$ROOT/node-t54"; NS="$ROOT/state-t54"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:6,current:"0.28.0",previous:"0.28.0",pending:"0.29.0"}' > "$NS/state.json"
+ln -s "$$" "$NS/lock"    # 活锁(测试进程 pid),模拟有 check/apply 正在跑
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+rm -f "$NS/lock"
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "活实例持锁时 recovery 未改 current(先持锁,竞争则让位)" || bad "current=$(cur_link "$NR")(被 lock-free 改了)"
+[ "$(st "$NS" pending)" = "0.29.0" ] && ok "pending 未被 recovery 改动(让位)" || bad "pending 被改=$(st "$NS" pending)"
+
+echo "== T55 老格式锁目录 pid 还活着(升级切换中)→ 不盲删,当竞争(pr-daemon 六轮 #5)=="
+read NR NS < <(new_node t55 0.28.0)
+mkdir -p "$NS/lock"; echo "$$" > "$NS/lock/pid"    # 老格式目录 + 活 pid(测试进程)
+run_updater_args "$NR" "$NS" -- apply 0.99.0 >/dev/null 2>&1; RC=$?
+D=no; [ -d "$NS/lock" ] && D=yes
+rm -rf "$NS/lock"
+{ [ "$RC" != 0 ] && [ "$D" = yes ]; } && ok "老格式锁活 pid → apply 硬失败且目录未被盲删" || bad "RC=$RC dir还在=$D"
+
+echo "== T56 不可恢复不清 pending → 每次 boot 都重报失败(pr-daemon 六轮 #4)=="
+NR="$ROOT/node-t56"; NS="$ROOT/state-t56"; mkdir -p "$NR/releases/0.29.0" "$NS"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.1.0" "$NR/last-good"   # 悬空
+jq -n '{seen_metadata_version:6,current:"0.5.0",previous:"0.5.0",pending:"0.29.0"}' > "$NS/state.json"
+printf '#!/usr/bin/env bash\nexit 3\n' > "$ROOT/notify-fail.sh"; chmod +x "$ROOT/notify-fail.sh"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1; RC1=$?
+[ "$(st "$NS" pending)" = "0.29.0" ] && ok "第一次 boot 不可恢复:pending 未清(留作后续重报)" || bad "pending 被清=$(st "$NS" pending)"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1; RC2=$?
+{ [ "$RC1" != 0 ] && [ "$RC2" != 0 ]; } && ok "第二次 boot 仍 exit 非0 重报(不掩盖持久失败)" || bad "RC1=$RC1 RC2=$RC2"
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""

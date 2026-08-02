@@ -175,11 +175,15 @@ EOF
 # ── 互斥锁:原子 symlink,target=持有者 pid(全平台,不依赖 flock)────────
 # `ln -s "$$" LOCK` 是单个原子 syscall、name 已存在即失败 → 无「创建后再写 pid」的两步窗口。
 # macOS 无 flock(1),故不用 flock;所有竞争走原子 rename 抢占,绝不 blind rm 活锁。
-LOCK_STALE_SECS="${LOCK_STALE_SECS:-3600}"   # 锁比这久 = 视为 stale(兜 pid 复用,updater 从不跑这么久)
+# 锁比这久=视为 stale(兜 pid 复用)。默认 24h:updater 单次运行远短于此,合法长跑不会被抢;
+# 校验为正整数(坏 override 会崩 $(()) 算术,pr-daemon 六轮 #10)。granularity 受 find -mmin 限,
+# < 60s 会被地板到约 60s(#11,这里默认远大于 60 故无影响)。
+case "${LOCK_STALE_SECS:-}" in ''|*[!0-9]*) LOCK_STALE_SECS=86400 ;; esac
 WORK=""
 cleanup() {
-  # 只删自己持有的锁(symlink target==$$);trap 在成功持锁后才设,故到这里必是我们持有。
+  # 只删自己持有的锁(symlink target==$$);并清掉本进程可能遗留的 .stale.$$(moved-aside 窗口,#6)。
   [ "$(readlink "$LOCK_LINK" 2>/dev/null || true)" = "$$" ] && rm -f "$LOCK_LINK" 2>/dev/null || true
+  rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   return 0
 }
@@ -188,38 +192,50 @@ lock_contended() { # apply(LOCK_FATAL=1)硬失败;check 静默退 0 等下轮
   warn "$1,退出"; exit 0
 }
 lock_is_old() { [ -n "$(find "$LOCK_LINK" -prune -mmin "+$(( LOCK_STALE_SECS/60 ))" 2>/dev/null)" ]; }
-# 持有者是否「活着且不算 stale」。pid 必须是正十进制(排除空/非数字/0/-1 —— kill -0 0/-1 会误判存活)。
+# 持有者是否「活着且不算 stale」。pid 必须是**无前导零的正十进制**:排除空/非数字,以及
+# 0 及零填充串 `00/000/0123`(kill -0 0/00/000 命中进程组 0 会误判存活,pr-daemon 六轮 #3/#8)。
 lock_holder_alive() { # <pid>
-  case "$1" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac
   kill -0 "$1" 2>/dev/null || return 1
   lock_is_old && return 1   # pid 活着但锁太旧 = pid 复用,当 stale
   return 0
 }
+# 原子 rename 抢占一个「已判定为死/stale」的锁:只有一个 racer 的 mv 能成功;抢到后重确认移走的
+# 确是刚判过的那个 pid 才清掉(否则 read→mv 间被人重取活锁 → 用 ln 恢复原样而**绝不 mv 覆盖**
+# 第三方新活锁,pr-daemon 六轮 #2,再让位)。返回 0=已清出空位可重试 ln;非0=让位(不返回)。
+reclaim_stale_lock() { # <expected_oldpid>
+  local expected="$1" moved
+  mv "$LOCK_LINK" "$LOCK_LINK.stale.$$" 2>/dev/null || return 0   # 别人已移走 → 直接下轮 ln 再判
+  moved="$(readlink "$LOCK_LINK.stale.$$" 2>/dev/null || true)"
+  if [ "$moved" = "$expected" ]; then
+    rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true; return 0     # 确是死锁 → 清出空位
+  fi
+  # 移走后发现不是原 pid(窗口内被重取)→ 用 ln 尝试原样恢复(存在即失败=有新活锁 → 放弃),让位
+  ln -s "$moved" "$LOCK_LINK" 2>/dev/null || true
+  rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true
+  lock_contended "锁在抢占窗口内被并发重取"
+}
 acquire_lock() {
   mkdir -p "$AU_STATE_DIR"
-  # 一次性迁移(pr-daemon 五轮 #1):同路径若是老 mkdir 锁留下的目录/普通文件(非软链),
-  # `ln -s "$$" 目录/` 会落进目录内、返回 0 → 永久假持锁且 rm -f 删不掉。先清掉。
-  if [ -e "$LOCK_LINK" ] && [ ! -L "$LOCK_LINK" ]; then rm -rf "$LOCK_LINK" 2>/dev/null || true; fi
+  # 早装 trap + 清扫历史 orphan .stale.*(某进程在 moved-aside 与 rm 之间被杀会遗留,pr-daemon 六轮 #6)。
+  trap cleanup EXIT
+  rm -f "$LOCK_LINK".stale.* 2>/dev/null || true
+  # 老 mkdir 锁遗留(pr-daemon 五轮 #1 + 六轮 #5):同路径若是目录/普通文件(非软链),
+  # `ln -s "$$" 目录/` 会落进目录内假持锁。清掉前先看老格式 pid 是否还活着(升级中旧二进制在持锁)。
+  if [ -e "$LOCK_LINK" ] && [ ! -L "$LOCK_LINK" ]; then
+    local legacypid=""; [ -f "$LOCK_LINK/pid" ] && legacypid="$(cat "$LOCK_LINK/pid" 2>/dev/null || true)"
+    lock_holder_alive "$legacypid" && lock_contended "老格式锁仍活(pid=$legacypid,升级切换中?)"
+    rm -rf "$LOCK_LINK" 2>/dev/null || true
+  fi
 
-  local tries=0 oldpid moved
+  local tries=0 oldpid
   while ! ln -s "$$" "$LOCK_LINK" 2>/dev/null; do   # 原子:已存在即失败
     oldpid="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
     if lock_holder_alive "$oldpid"; then lock_contended "另一个 updater 实例在跑(pid=$oldpid)"; fi
-    # 死/损坏/太旧 → 原子 rename 抢占(pr-daemon 五轮 #2:绝不 blind rm,否则会删掉别人在
-    # read→act 窗口内刚重取的活锁 → 双持)。只有一个 racer 的 mv 能成功。
-    if mv "$LOCK_LINK" "$LOCK_LINK.stale.$$" 2>/dev/null; then
-      moved="$(readlink "$LOCK_LINK.stale.$$" 2>/dev/null || true)"
-      if [ "$moved" = "$oldpid" ]; then
-        rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true          # 确是刚判过的死锁 → 清掉,下轮 ln 重取
-      else
-        # read 与 mv 之间被人重取(moved≠oldpid,可能是活锁)→ 放回,让位
-        mv "$LOCK_LINK.stale.$$" "$LOCK_LINK" 2>/dev/null || rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true
-        lock_contended "锁在抢占窗口内被并发重取"
-      fi
-    fi
+    reclaim_stale_lock "$oldpid"   # 死/损坏/太旧 → 原子抢占(内部会 lock_contended 让位)
     tries=$((tries+1)); [ "$tries" -ge 8 ] && lock_contended "抢锁反复失败(竞争?)"
   done
-  trap cleanup EXIT
+  return 0   # 关键:`while ! ln` 靠 ln 成功退出时 while 状态=1,若作函数末句会让 set -e 杀调用方
 }
 
 # ── 状态(原子写:tmp + mv)──────────────────────────────────────────
@@ -376,9 +392,10 @@ rollback() { # rollback <target_ver>
       swap_symlink "$AU_ROOT/current" "$(readlink "$AU_ROOT/last-good")"
       target="$(basename "$(readlink "$AU_ROOT/last-good")")"
     else
-      state_set pending ""
-      # 板子实质不可恢复 —— 这是全系统最该送达的告警。立即试,失败则入队(recovery 无网窗口),
-      # 下次 check flush(pr-daemon 四轮 #3:原来 notify||true fire-and-forget,此告警永久丢失)。
+      # 板子实质不可恢复。**不清 pending**(pr-daemon 六轮 #4):否则第二次 boot 起 recovery 见
+      # pending 空即「无需恢复」return 0,持久的「零有效 release」失败被掩盖。留着 pending →
+      # 每次 boot 都重新 assert 失败(exit 1)+ 重新告警,直到人工修好。
+      # 这是全系统最该送达的告警。立即试,失败则入队(recovery 无网窗口),下次 check flush。
       local emsg="回滚失败:无可用 last-good(node=$AU_NODE_ID)—— 板子不可恢复,转 OOB 人工救板"
       notify_send error "$emsg" || queue_notify error "$emsg"
       return 1
@@ -394,12 +411,10 @@ rollback() { # rollback <target_ver>
 # ── boot recovery:pending 未提交 → 回滚 ────────────────────────────
 cmd_recovery() {
   # env 已由 main 最先 source(含 Telegram 凭据)。
-  # 清残留锁:**只清 stale**(死 pid 软链 / 老格式目录),绝不删活锁 —— boot unit 排序只保证
-  # 启动次序、不保证别的 check/apply 已退出,盲删活锁会制造双持(pr-daemon 五轮 #4)。
-  if [ -L "$LOCK_LINK" ]; then
-    local lp; lp="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
-    lock_holder_alive "$lp" || rm -f "$LOCK_LINK" 2>/dev/null || true
-  elif [ -e "$LOCK_LINK" ]; then rm -rf "$LOCK_LINK" 2>/dev/null || true; fi
+  # **recovery 也必须持锁再改 state/软链**(pr-daemon 六轮 #1):boot unit 排序只保证启动次序、
+  # 不保证别的 check/apply 已退出,lock-free 改 current/state.json 会与在跑的实例竞争同一批文件。
+  # acquire_lock 内部会自动清理 stale/老格式锁(死 pid 软链 / 老 mkdir 目录),故不再单独手清。
+  acquire_lock
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。
   # 只切回 symlink + state,kms-api 由正常 boot 顺序启动(读到已回滚的 current)。
   AU_RESTART_CMD="true"
