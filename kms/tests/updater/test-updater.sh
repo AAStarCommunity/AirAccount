@@ -767,6 +767,72 @@ else
   [ "$(st "$NS" current)" = "0.28.0" ] && ok "超长 notes 被 schema 拒" || bad "current=$(st "$NS" current)"
 fi
 
+echo "== T40 锁在 EXIT 时释放(cleanup rm -rf,不是 rmdir)→ 无泄漏(pr-daemon High)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t40 0.28.0)
+SHA="$(make_bundle 0.41.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.41.0.tar.gz" \
+  '[{version:"0.41.0",security:true,severity:"high",notes:"x",auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 41 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ ! -e "$NS/lock" ] && ok "check 结束后锁目录已删(rm -rf 生效,无泄漏)" || bad "锁目录残留 $NS/lock(泄漏)"
+
+echo "== T41 cmd_recovery 也 source updater.env → 掉电回滚告警带 Telegram 凭据(pr-daemon #2)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+TELEGRAM_BOT_TOKEN=RECOV_TOK
+TELEGRAM_CHAT_ID=1
+ENV
+NR="$ROOT/node-t41"; NS="$ROOT/state-t41"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:6,current:"0.28.0",previous:"0.28.0",pending:"0.29.0"}' > "$NS/state.json"
+cat > "$ROOT/notify-envcheck.sh" <<SH
+#!/usr/bin/env bash
+echo "TOKEN=\${TELEGRAM_BOT_TOKEN:-<unset>}" >> "$ROOT/recov-token.log"
+SH
+chmod +x "$ROOT/notify-envcheck.sh"
+: > "$ROOT/recov-token.log"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-envcheck.sh" -- recovery >/dev/null 2>&1
+grep -q "TOKEN=RECOV_TOK" "$ROOT/recov-token.log" && ok "recovery 告警 hook 看到 TELEGRAM_BOT_TOKEN" || bad "recovery hook 未见 token: $(cat "$ROOT/recov-token.log")"
+
+echo "== T42 兼容门用真实 TA 版本(非 CA 近似);TA 版本未知 → fail-closed(pr-daemon #3)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t42 0.30.0)
+SHA="$(make_bundle 0.31.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.31.0.tar.gz" \
+  '[{version:"0.31.0",security:false,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"0.31.0",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 42 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# TA 版本未知(无 AU_TA_VERSION / TA_VERSION 文件)→ apply fail-closed 拒绝(不 fail-open)
+if run_updater_args "$NR" "$NS" -- apply 0.31.0 >/dev/null 2>&1; then
+  bad "TA 版本未知却放行(应 fail-closed 拒绝)"
+else
+  [ "$(cur_link "$NR")" = "0.30.0" ] && ok "TA 版本未知 → fail-closed 拒绝(不用 CA 版本近似)" || bad "link=$(cur_link "$NR")"
+fi
+# 设 AU_TA_VERSION=0.31.0(满足)→ 通过兼容门并应用
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" AU_TA_VERSION=0.31.0 -- apply 0.31.0 >/dev/null 2>&1; then
+  [ "$(cur_link "$NR")" = "0.31.0" ] && ok "AU_TA_VERSION 满足 → 兼容门放行应用" || bad "link=$(cur_link "$NR")"
+else bad "AU_TA_VERSION 满足却被拒(误报)"; fi
+
+echo "== T43 sha256 大写 manifest → 大小写不敏感比较,应放行(pr-daemon #4)=="
+read NR NS < <(new_node t43 0.28.0)
+SHA="$(make_bundle 0.32.0 TA-0.28.0)"
+SHA_UP="$(printf '%s' "$SHA" | tr 'a-f' 'A-F')"
+REL="$(jq -n --arg s "$SHA_UP" --arg u "file://$SERVER/airaccount-node-0.32.0.tar.gz" \
+  '[{version:"0.32.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 43 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" -- apply 0.32.0 >/dev/null 2>&1; then
+  [ "$(cur_link "$NR")" = "0.32.0" ] && ok "大写 sha256 被接受(归一小写比较)" || bad "link=$(cur_link "$NR")"
+else bad "大写 sha256 被误拒(fail-closed bug)"; fi
+
 # ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL"

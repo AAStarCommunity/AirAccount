@@ -69,12 +69,33 @@ notify_send() { # notify_send <level> <msg>
   fi
 }
 
+# 载入策略默认 + source updater.env(set -a 导出 TELEGRAM_* 给通知 hook 子进程)。
+# 必须**尽早**调用(每个子命令入口),这样此后任何 die 的告警都能带上 Telegram 凭据送达
+# —— 否则早期失败(缺依赖/锁/损坏)恰恰最该告警,却因 env 还没 source 而静默(pr-daemon #2)。
+# cmd_recovery 也调它,否则「掉电回滚」这种最关键告警结构性发不出去。
+load_policy_env() {
+  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
+  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
+  # shellcheck disable=SC1090
+  [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || die "缺依赖 $1"; }
 
 # ── sha256(跨 mac/linux)────────────────────────────────────────────
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
   else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# 真实 TA 版本(pr-daemon #3:兼容门不能用 CA 版本近似 = fail-open)。来源优先级:
+#   env AU_TA_VERSION(运维在 updater.env 声明) > $AU_ROOT/current/TA_VERSION 文件(installer/OOB 写)。
+# 拿不到 → 回空;调用方对「有 requires_ta_version 但 TA 版本未知」一律 fail-closed。
+ta_version() {
+  if [ -n "${AU_TA_VERSION:-}" ]; then echo "${AU_TA_VERSION#v}"; return; fi
+  local f="$AU_ROOT/current/TA_VERSION"
+  [ -r "$f" ] && { head -1 "$f" 2>/dev/null | tr -d '[:space:]v'; return; }
+  echo ""
 }
 
 # ── semver 比较(纯 bash 3.2,x.y.z)─────────────────────────────────
@@ -124,7 +145,13 @@ EOF
 # ── 原子锁(mkdir,全平台)+ 统一 EXIT 清理 ─────────────────────────
 WORK=""
 cleanup() {
-  rmdir "$LOCK_DIR" 2>/dev/null || true
+  # 释放锁:LOCK_DIR 里有 pid 文件(非空),`rmdir` 会失败 → 之前被 `|| true` 掩盖 →
+  # 锁永不释放 → 下次 mkdir 失败,若旧 pid 被复用则误判「有实例在跑」→ check 永久
+  # 静默 no-op / apply 空闲板误报 contention(pr-daemon High,已复现)。改 `rm -rf`。
+  # 只删自己持有的锁(pid==$$;trap 在 acquire_lock 成功后才设,故运行到这里必是我们持有)。
+  if [ -f "$LOCK_DIR/pid" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   return 0
 }
@@ -315,6 +342,7 @@ rollback() { # rollback <target_ver>
 
 # ── boot recovery:pending 未提交 → 回滚 ────────────────────────────
 cmd_recovery() {
+  load_policy_env    # 关键:掉电回滚是最该告警的场景,不 source env 则 Telegram 凭据缺失、告警发不出(pr-daemon #2)
   # boot 早期单线程:清 stale lock,别因它阻塞恢复(最需要恢复的正是掉电场景)。
   rm -rf "$LOCK_DIR" 2>/dev/null || true
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。
@@ -393,8 +421,12 @@ download_verify_apply() { # <ver> <tarball> <sha>
   [ -n "$ac_tarball" ] || die "候选缺 tarball URL"
   log "下载 $ac_tarball"
   fetch_required "$ac_tarball" "$WORK/node.tgz" "tarball"
-  local got; got="$(sha256_of "$WORK/node.tgz")"
-  [ "$got" = "$ac_sha" ] || die "tarball sha256 不匹配(期望 $ac_sha 得 $got)—— 拒绝"
+  # sha256 大小写不敏感比较(pr-daemon #4):schema 的 [0-9a-fA-F] 允许大写,而 sha256_of
+  # 输出小写 → 大写 manifest 会永久 fail-closed 拒绝合法更新。两边归一到小写再比。
+  local got exp
+  got="$(sha256_of "$WORK/node.tgz" | tr 'A-F' 'a-f')"
+  exp="$(printf '%s' "$ac_sha" | tr 'A-F' 'a-f')"
+  [ "$got" = "$exp" ] || die "tarball sha256 不匹配(期望 $ac_sha 得 $got)—— 拒绝"
   # tarball 独立 minisig(可选,存在则必须过)
   if fetch "$ac_tarball.minisig" "$WORK/node.tgz.minisig" 2>/dev/null; then
     verify_sig "$WORK/node.tgz" "$WORK/node.tgz.minisig" || die "tarball 验签失败 —— 拒绝"
@@ -487,20 +519,15 @@ TA: $tatag"
 
 # ── check:主流程 ───────────────────────────────────────────────────
 cmd_check() {
+  load_policy_env               # 尽早 source env → 后续任何 die 的告警都能带 Telegram 凭据送达
+  STRICT_FETCH=0                # check=定时器:网络失败静默重试(内部控制位)
   need jq; need curl
   acquire_lock
   state_init
-  # 载入策略 env。set -a:sourced 的 TELEGRAM_* 等自动 export,通知 hook(子进程)才看得到
-  # (pr-daemon #1:否则 Phase-1 通知永远静默 no-op)。
-  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
-  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
-  # shellcheck disable=SC1090
-  [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
 
   # TA 内容门授权位(codex High-2):check 只在 TA_AUTO_UPDATE=on 时才允许实际 TA 变更;
   # 否则 download_verify_apply 若发现 bundle 夹带变化的 TA(manifest 误标)会拒绝。
   TA_OK=$([ "${TA_AUTO_UPDATE:-off}" = on ] && echo 1 || echo 0)
-  STRICT_FETCH=0                      # check=定时器:网络失败静默重试(内部控制位,codex Low)
   WORK="$(mktemp -d)"
   load_manifest        # 拉取 + 验签 + schema + 新鲜度 + 防回滚 → MANIFEST/FLOOR/CUR/MVER
 
@@ -558,21 +585,14 @@ cmd_apply() {
   local want="${1:-}"
   [ -n "$want" ] || die "用法: aastar-node-updater apply <version>"
   ver_valid "$want" || die "版本号非法(需 x.y.z): $want"
-  need jq; need curl
-  STRICT_FETCH=1                      # 显式 apply:下载失败/锁竞争必须硬失败(codex/pr-daemon)
+  load_policy_env                    # 尽早 source env(带 Telegram 凭据),再钉安全姿态覆盖它
+  # apply 的安全姿态:放在 source 之后钉死,updater.env 不得覆盖(pr-daemon #3):
+  STRICT_FETCH=1                      # 下载失败必须硬失败(不静默误判成功)
   LOCK_FATAL=1                        # 锁竞争 → die,不静默 no-op(pr-daemon #2)
-  TA_OK=0                             # apply 永不放行 TA 变更(决策 D:TA 在线一键=能力级砍掉,
-                                      # pr-daemon #3/#4)。TA 内容门恒强制;含 TA 变更一律拒。
+  TA_OK=0                             # apply 永不放行 TA 变更(决策 D,pr-daemon #3/#4)
+  need jq; need curl
   acquire_lock
   state_init
-  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
-  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
-  # set -a:sourced 的 TELEGRAM_* 等自动 export,通知 hook(子进程)才看得到(pr-daemon #1)。
-  # 放在 TA_OK/LOCK_FATAL 之后,防 updater.env 悄悄改写这些安全控制位(pr-daemon #3)。
-  # shellcheck disable=SC1090
-  [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
-  TA_OK=0; STRICT_FETCH=1; LOCK_FATAL=1   # 再钉一次:updater.env 不得覆盖 apply 的安全姿态
-
   WORK="$(mktemp -d)"
   load_manifest
 
@@ -595,10 +615,14 @@ EOF
   if [ "$r_ta" = "true" ]; then
     die "$want 含 TA 变更(ta_changed=true)。TA 更新不走在线一键(RSA-4096 签名 + secure storage 迁移;apply_version 也不装 TA 到 OP-TEE 路径,会 CA/TA 不一致)——请走 OOB / 专门流程(决策 D)。"
   fi
-  # 兼容门:要求的 TA 比当前新且本次不换 TA → 无法满足
-  # (C4 待修:目前用 CA 版本 CUR 近似 TA 版本;TA 版本化落地后改读真实 TA 版本)
-  if [ -n "$r_reqta" ] && [ "$r_ta" != "true" ] && ver_gt "$r_reqta" "$CUR"; then
-    die "$want 要求 TA ≥ $r_reqta 但本次不换 TA、当前 $CUR 不满足 —— 拒绝(需先升级 TA)"
+  # 兼容门:要求的 TA 比「当前真实 TA 版本」新且本次不换 TA → 拒绝(pr-daemon #3:
+  # 用真实 TA 版本,不是 CA 版本近似;TA 版本未知也 fail-closed 拒绝,不 fail-open)。
+  if [ -n "$r_reqta" ] && [ "$r_ta" != "true" ]; then
+    local cur_ta_ver; cur_ta_ver="$(ta_version)"
+    if [ -z "$cur_ta_ver" ] || ! ver_valid "$cur_ta_ver"; then
+      die "$want 要求 TA ≥ $r_reqta,但当前 TA 版本未知(设 AU_TA_VERSION 或 current/TA_VERSION)—— fail-closed 拒绝"
+    fi
+    ver_ge "$cur_ta_ver" "$r_reqta" || die "$want 要求 TA ≥ $r_reqta,当前 TA $cur_ta_ver 不满足 —— 拒绝(需先升级 TA)"
   fi
   log "显式应用 $want(severity=$r_sev, ta_changed=$r_ta, current=$CUR)"
   notify info "开始应用 $CUR → $want(手动 apply,node=$AU_NODE_ID)"
@@ -615,9 +639,13 @@ decide_action() { # decide_action cur cand security auto_apply ta_changed canary
   if [ -n "$PIN_VERSION" ] && [ "$PIN_VERSION" != "$cand" ]; then echo skip; return; fi
   # TA 变更且未开 TA 自动 → 只通知(设计文档 §3.2)
   if [ "$ta" = "true" ] && [ "$TA_AUTO_UPDATE" != "on" ]; then echo notify; return; fi
-  # 兼容性门(PR#191 Medium):CA 要求的 TA 比当前新,但本次不换 TA(ta_changed=false)→
-  # 无法满足 → 只通知,不自动升到与旧 TA 不兼容的 CA。
-  if [ -n "$reqta" ] && [ "$ta" != "true" ] && ver_gt "$reqta" "$cur"; then echo notify; return; fi
+  # 兼容性门(PR#191 Medium + pr-daemon #3):CA 要求的 TA 比「当前真实 TA 版本」新,且本次
+  # 不换 TA → 只通知,不自动升到与旧 TA 不兼容的 CA。用真实 TA 版本(非 CA 版本近似);
+  # TA 版本未知也 fail-closed → notify(不 fail-open 自动应用)。
+  if [ -n "$reqta" ] && [ "$ta" != "true" ]; then
+    local tav; tav="$(ta_version)"
+    if [ -z "$tav" ] || ! ver_valid "$tav" || ver_gt "$reqta" "$tav"; then echo notify; return; fi
+  fi
   # canary:release 指定了 ring 时,仅 ring 内节点自动
   if [ -n "$canary" ]; then
     case ",$canary," in *,"$AU_NODE_ID",*) : ;; *) echo notify; return;; esac
