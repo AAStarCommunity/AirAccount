@@ -955,9 +955,48 @@ ln -sfn "releases/0.1.0"  "$NR/last-good"    # 悬空:releases/0.1.0 不存在
 jq -n '{seen_metadata_version:6,current:"0.5.0",previous:"0.5.0",pending:"0.29.0"}' > "$NS/state.json"  # current 0.5.0 也无对应目录
 printf '#!/usr/bin/env bash\nexit 3\n' > "$ROOT/notify-fail.sh"; chmod +x "$ROOT/notify-fail.sh"
 run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1
+RC=$?
+[ "$RC" != 0 ] && ok "recovery 不可恢复 → 传播失败退出码(exit=${RC} 非0,不向 systemd 谎报成功,pr-daemon 五轮 #5)" || bad "recovery 不可恢复却 exit0(假成功)"
 [ "$(cur_link "$NR")" = "0.29.0" ] && ok "current 未被指向悬空 0.1.0(不谎报成功)" || bad "current=$(cur_link "$NR")(误指悬空)"
 [ "$(st "$NS" current)" != "0.1.0" ] && ok "state.current 未记成悬空 0.1.0" || bad "state.current=0.1.0(假成功)"
 { [ -f "$NS/pending-notify" ] && grep -q "不可恢复\|OOB" "$NS/pending-notify"; } && ok "不可恢复告警已入队(未走 fire-and-forget 丢失)" || bad "不可恢复告警丢失/未入队"
+
+echo "== T51 锁路径残留老格式目录(升级前 mkdir 锁)→ 一次性迁移,锁不变永久 no-op(pr-daemon 五轮 #1)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t51 0.28.0)
+write_manifest 51 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+mkdir -p "$NS/lock"; echo old > "$NS/lock/pid"    # 老 mkdir 锁遗留的**目录**(非软链)
+run_updater "$NR" "$NS" check >/dev/null 2>&1; RC=$?
+# 若未迁移:ln -s 落进目录 → check 假持锁跑完但目录还在(mutual exclusion 永久失效)
+{ [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "老格式目录被迁移清除,锁恢复正常(非永久 no-op)" || bad "exit=$RC lock残留=$([ -e "$NS/lock" ] && echo yes)"
+# 迁移后能真互斥:再放一个活锁软链 → apply 应硬失败
+ln -s "$$" "$NS/lock"
+run_updater_args "$NR" "$NS" -- apply 0.99.0 >/dev/null 2>&1; RC2=$?
+rm -f "$NS/lock"
+[ "$RC2" != 0 ] && ok "迁移后活锁软链能挡住 apply(真互斥恢复)" || bad "迁移后仍不互斥"
+
+echo "== T52 锁软链指向非法 pid(0 / 负 / 垃圾)→ 当 stale 抢占,不误判存活(pr-daemon 五轮 #3)=="
+read NR NS < <(new_node t52 0.28.0)
+write_manifest 52 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+for badpid in 0 garbage; do
+  ln -sfn "$badpid" "$NS/lock"     # kill -0 0 会成功(误判存活);garbage 非数字
+  run_updater "$NR" "$NS" check >/dev/null 2>&1; RC=$?
+  { [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "非法 pid '$badpid' 当 stale 被抢占(check 跑完)" || bad "非法 pid '$badpid' 误判存活 exit=$RC"
+done
+
+echo "== T53 recovery 只清 stale 锁,不删活锁(pr-daemon 五轮 #4)=="
+read NR NS < <(new_node t53 0.28.0)   # 无 pending → recovery 只做锁清理判断
+ln -s "$$" "$NS/lock"                  # 活锁(测试进程 pid)
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+[ -L "$NS/lock" ] && [ "$(readlink "$NS/lock")" = "$$" ] && ok "recovery 保留活锁(未盲删,避免双持)" || bad "recovery 删了活锁"
+rm -f "$NS/lock"
+# 反面:stale(死 pid)锁 → recovery 应清掉
+ln -sfn 999999 "$NS/lock"
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+[ ! -e "$NS/lock" ] && ok "recovery 清掉了 stale 死 pid 锁" || bad "stale 锁未清"
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""

@@ -172,11 +172,10 @@ EOF
   [ "${a1:-0}" = "${b1:-0}" ] && ver_gt "$2" "$1"
 }
 
-# ── 互斥锁:原子 symlink(全平台,无 flock 依赖)+ 统一 EXIT 清理 ────────
-# 锁 = 一个 symlink,target 就是持有者 pid。`ln -s "$$" LOCK` 是**单个原子 syscall**
-# 且 name 已存在即失败 —— 没有「创建后再单独写 pid」的两步,故没有 mkdir/pid 之间的
-# TOCTOU 窗口,并发也绝不会两个进程都以为持锁(pr-daemon 三轮 #4 复现的 race)。
-# macOS 无 flock(1),故不用 flock;symlink 原子性 POSIX 保证,mac/Linux 一致。
+# ── 互斥锁:原子 symlink,target=持有者 pid(全平台,不依赖 flock)────────
+# `ln -s "$$" LOCK` 是单个原子 syscall、name 已存在即失败 → 无「创建后再写 pid」的两步窗口。
+# macOS 无 flock(1),故不用 flock;所有竞争走原子 rename 抢占,绝不 blind rm 活锁。
+LOCK_STALE_SECS="${LOCK_STALE_SECS:-3600}"   # 锁比这久 = 视为 stale(兜 pid 复用,updater 从不跑这么久)
 WORK=""
 cleanup() {
   # 只删自己持有的锁(symlink target==$$);trap 在成功持锁后才设,故到这里必是我们持有。
@@ -184,23 +183,41 @@ cleanup() {
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   return 0
 }
-# 锁竞争统一退出:apply(LOCK_FATAL=1)硬失败;check 静默退 0 等下轮。
-lock_contended() { # <msg>
+lock_contended() { # apply(LOCK_FATAL=1)硬失败;check 静默退 0 等下轮
   if [ "${LOCK_FATAL:-0}" = 1 ]; then die "$1 —— apply 中止(未做任何更改)"; fi
   warn "$1,退出"; exit 0
 }
+lock_is_old() { [ -n "$(find "$LOCK_LINK" -prune -mmin "+$(( LOCK_STALE_SECS/60 ))" 2>/dev/null)" ]; }
+# 持有者是否「活着且不算 stale」。pid 必须是正十进制(排除空/非数字/0/-1 —— kill -0 0/-1 会误判存活)。
+lock_holder_alive() { # <pid>
+  case "$1" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$1" 2>/dev/null || return 1
+  lock_is_old && return 1   # pid 活着但锁太旧 = pid 复用,当 stale
+  return 0
+}
 acquire_lock() {
   mkdir -p "$AU_STATE_DIR"
-  local tries=0 oldpid
-  while ! ln -s "$$" "$LOCK_LINK" 2>/dev/null; do   # 原子:name 已存在即失败
+  # 一次性迁移(pr-daemon 五轮 #1):同路径若是老 mkdir 锁留下的目录/普通文件(非软链),
+  # `ln -s "$$" 目录/` 会落进目录内、返回 0 → 永久假持锁且 rm -f 删不掉。先清掉。
+  if [ -e "$LOCK_LINK" ] && [ ! -L "$LOCK_LINK" ]; then rm -rf "$LOCK_LINK" 2>/dev/null || true; fi
+
+  local tries=0 oldpid moved
+  while ! ln -s "$$" "$LOCK_LINK" 2>/dev/null; do   # 原子:已存在即失败
     oldpid="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
-    if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
-      lock_contended "另一个 updater 实例在跑(pid=$oldpid)"   # 持有者活着 → 竞争(绝不清活锁)
+    if lock_holder_alive "$oldpid"; then lock_contended "另一个 updater 实例在跑(pid=$oldpid)"; fi
+    # 死/损坏/太旧 → 原子 rename 抢占(pr-daemon 五轮 #2:绝不 blind rm,否则会删掉别人在
+    # read→act 窗口内刚重取的活锁 → 双持)。只有一个 racer 的 mv 能成功。
+    if mv "$LOCK_LINK" "$LOCK_LINK.stale.$$" 2>/dev/null; then
+      moved="$(readlink "$LOCK_LINK.stale.$$" 2>/dev/null || true)"
+      if [ "$moved" = "$oldpid" ]; then
+        rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true          # 确是刚判过的死锁 → 清掉,下轮 ln 重取
+      else
+        # read 与 mv 之间被人重取(moved≠oldpid,可能是活锁)→ 放回,让位
+        mv "$LOCK_LINK.stale.$$" "$LOCK_LINK" 2>/dev/null || rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true
+        lock_contended "锁在抢占窗口内被并发重取"
+      fi
     fi
-    # 持有者已死(或链接损坏)→ 清掉重试。ln 原子:并发 reclaim 也只有一个 ln 成功,
-    # 落败者下轮看到活锁 → contended。故不会两个进程都持锁。
-    rm -f "$LOCK_LINK" 2>/dev/null || true
-    tries=$((tries+1)); [ "$tries" -ge 5 ] && lock_contended "抢锁反复失败(竞争?)"
+    tries=$((tries+1)); [ "$tries" -ge 8 ] && lock_contended "抢锁反复失败(竞争?)"
   done
   trap cleanup EXIT
 }
@@ -377,8 +394,12 @@ rollback() { # rollback <target_ver>
 # ── boot recovery:pending 未提交 → 回滚 ────────────────────────────
 cmd_recovery() {
   # env 已由 main 最先 source(含 Telegram 凭据)。
-  # boot 早期单线程:清可能残留的 stale 锁软链(崩溃进程的软链不会自动消失),别阻塞恢复。
-  rm -f "$LOCK_LINK" 2>/dev/null || true
+  # 清残留锁:**只清 stale**(死 pid 软链 / 老格式目录),绝不删活锁 —— boot unit 排序只保证
+  # 启动次序、不保证别的 check/apply 已退出,盲删活锁会制造双持(pr-daemon 五轮 #4)。
+  if [ -L "$LOCK_LINK" ]; then
+    local lp; lp="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
+    lock_holder_alive "$lp" || rm -f "$LOCK_LINK" 2>/dev/null || true
+  elif [ -e "$LOCK_LINK" ]; then rm -rf "$LOCK_LINK" 2>/dev/null || true; fi
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。
   # 只切回 symlink + state,kms-api 由正常 boot 顺序启动(读到已回滚的 current)。
   AU_RESTART_CMD="true"
@@ -394,6 +415,11 @@ cmd_recovery() {
     # 这条(回滚成功)也在 recovery 无网窗口 → 立即试一次,失败入队,下次 check flush。
     local rmsg="boot recovery:掉电中断已回滚到 $target(node=$AU_NODE_ID)"
     notify_send warn "$rmsg" || { queue_notify warn "$rmsg"; warn "告警已入队,待下次 check 投递"; }
+  else
+    # rollback 走了「无 last-good 不可恢复」分支(它已发/入队紧急告警)。这里**必须传播失败**,
+    # 否则 recovery unit 向 systemd 报成功、掩盖「板上零有效 release」(pr-daemon 五轮 #5)。
+    warn "boot recovery 失败:板子不可恢复(无可用 last-good)—— 需 OOB 人工救板"
+    return 1
   fi
 }
 
