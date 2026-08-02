@@ -7,6 +7,15 @@
 
 节点周期性(systemd timer)拉一份**签名的 channel manifest**,校验后按策略**自动应用安全补丁**或**只通知**,应用走 **crash-safe 版本化目录 + 原子软链 + 健康门 + 自动回滚**,掉电中断由 **boot recovery** 兜底。
 
+**Phase 1(通知 + CLI 手动应用,本 PR)**:默认 `notify-only`,发现新版推 **Telegram**(富通知:版本 / 变动 / 安全级别 / 是否含 TA + 去重);运维收到后 `ssh` 进板跑 `aastar-node-updater apply <ver>` 显式应用(越过 policy 门,但**不越过**验签/防回滚/兼容/TA 门)。**TA 变更默认拒绝在线应用**(`--allow-ta` 仅限带外/专门流程)。设计与安全评审见 [`auto-update-web-admin-design.md`](../../docs/auto-update-web-admin-design.md)。
+
+```bash
+aastar-node-updater check                 # 定时器调用:拉 manifest→校验→按策略应用/通知
+aastar-node-updater apply 0.30.0          # 手动应用指定版本(收到通知后 ssh 进板跑)
+aastar-node-updater apply 0.31.0 --allow-ta   # 强制放行 TA 变更(慎用,带外场景)
+aastar-node-updater status                # 打印当前状态
+```
+
 远程、NAT 后、难物理触达的签名节点最怕"坏版本自动铺开变砖" —— 本设计的核心保险就是**验签拒毒 + 健康门回滚 + 掉电恢复 + 错峰**。
 
 ## 安全不变量(测试逐条覆盖)
@@ -28,7 +37,8 @@
 
 | 文件 | 作用 |
 |------|------|
-| `aastar-node-updater.sh` | 更新器主程序(`check` / `recovery` / `status`) |
+| `aastar-node-updater.sh` | 更新器主程序(`check` / `apply <ver>` / `recovery` / `status`) |
+| `notify-telegram.sh` | 通知 hook → Telegram(AAStarMonitorBot);作 `AU_NOTIFY_CMD` 注入,fail-safe |
 | `sign-channel.sh` | CI/测试:给 channel.json 签名(minisign) |
 | `channels/stable.json.example` | manifest 模板(真实文件由 CI 生成+签名) |
 | `updater.env.example` | 社区可改的策略配置(总开关/通道/策略/pin) |

@@ -41,11 +41,28 @@ warn() { echo -e "\033[0;33m[updater] $*\033[0m" >&2; }
 die()  { echo -e "\033[0;31m[updater] $*\033[0m" >&2; notify error "$*"; exit 1; }
 # 瞬态网络问题:静默退出(设计文档 §8「网络不可达→静默重试」),不发 error 告警免告警疲劳。
 give_up_quiet() { warn "$*(将于下次 timer 重试)"; exit 0; }
+# 拉取关键文件并按失败类型分流(合并 #192 的 fetch_required + 本 PR 的 STRICT_FETCH):
+#   curl 22 = HTTP 4xx/5xx(端点响应了但报错)= 配置错/撤除/篡改 → 一律 die(不静默,#192)。
+#   其它(DNS/连接/超时等网络类):`apply`(STRICT_FETCH=1,运维显式指定)硬失败,否则
+#   `check`(定时器)静默重试(设计文档 §8,免告警疲劳)。
+fetch_required() { # fetch_required <url> <out> <what>
+  local rc=0
+  fetch "$1" "$2" || rc=$?
+  [ "$rc" = 0 ] && return 0
+  [ "$rc" = 22 ] && die "$3:端点返回 HTTP 错误(curl 22)—— 端点配置/撤除/篡改?拒绝"
+  if [ "${STRICT_FETCH:-0}" = 1 ]; then die "$3:下载失败(网络?rc=$rc)—— apply 不静默"; fi
+  give_up_quiet "$3:下载失败(网络?rc=$rc)"
+}
 
-notify() { # notify <level> <msg>
+notify() { # notify <level> <msg> —— set -e 安全:永远返回 0(通知失败不阻断主流程)
+  notify_send "$@" || true
+}
+# 真实送达状态版(供去重判定,codex High-3):返回 hook/内置通道的真实退出码。
+# 约定:hook 送达成功=0;送达失败(网络等)=非 0;凭据未配置(无处可送)=0(视为无需重推)。
+notify_send() { # notify_send <level> <msg>
   local level="$1"; shift; local msg="$*"
   if [ -n "$AU_NOTIFY_CMD" ]; then
-    $AU_NOTIFY_CMD "$level" "$msg" || true
+    $AU_NOTIFY_CMD "$level" "$msg"
   else
     logger -t aastar-updater "[$level] $msg" 2>/dev/null || true
     echo "[notify:$level] $msg"
@@ -161,17 +178,6 @@ state_set_num() { # 单独处理数字字段(metadata_version)
 fetch() { # fetch <url> <out>
   if [ -n "$AU_FETCH_CMD" ]; then $AU_FETCH_CMD "$1" "$2"; return; fi
   curl -fSL --connect-timeout 15 --max-time 300 "$1" -o "$2"
-}
-
-# 拉取关键文件并按失败类型分流:
-#   curl 22 = HTTP 4xx/5xx(端点响应了但报错)= 配置错/撤除/篡改 → 告警拒绝(不静默)。
-#   其它(DNS/连接/超时等网络类)→ 静默重试(设计文档 §8,免告警疲劳)。
-fetch_required() { # fetch_required <url> <out> <what>
-  local rc=0
-  fetch "$1" "$2" || rc=$?
-  [ "$rc" = 0 ] && return 0
-  [ "$rc" = 22 ] && die "$3:端点返回 HTTP 错误(curl 22)—— 端点配置/撤除/篡改?拒绝"
-  give_up_quiet "$3:下载失败(网络?rc=$rc)"
 }
 
 # ── 验签(minisign 离线,pubkey 编入节点)──────────────────────────
@@ -322,34 +328,19 @@ cmd_recovery() {
 # ── status ──────────────────────────────────────────────────────────
 cmd_status() { state_init; cat "$STATE_FILE"; }
 
-# ── check:主流程 ───────────────────────────────────────────────────
-cmd_check() {
-  need jq; need curl
-  acquire_lock
-  state_init
-  # 载入策略 env
-  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
-  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
-  # shellcheck disable=SC1090
-  [ -f "$AU_ENV_FILE" ] && . "$AU_ENV_FILE"
-
-  WORK="$(mktemp -d)"
-
-  # 1) 拉 signed manifest + sig
+# ── 拉取 + 验签 + schema + 新鲜度 + 防回滚:成功后 $WORK/channel.json 可信 ──
+# check 与 apply 共用(单一可信实现)。设全局 MANIFEST / FLOOR / CUR / MVER。
+load_manifest() {
   local murl="$AU_MANIFEST_BASE/$CHANNEL.json"
   log "拉 manifest: $murl"
-  # manifest 本体拉不到 = 网络/GitHub 不可达 → 静默重试(设计文档 §8)
+  # manifest 拉取:curl 22(4xx/5xx)→ die;网络类 → check 静默重试 / apply 硬失败
   fetch_required "$murl" "$WORK/channel.json" "manifest"
-  # 但 manifest 拉到了、签名却拉不到 = 异常(发布出错/篡改)→ fail-closed 告警,不能静默
+  # 拉到正文却无签名 = 异常(发布出错/篡改)→ fail-closed 告警
   fetch "$murl.minisig" "$WORK/channel.json.minisig" || die "manifest 有正文却无签名 —— 拒绝(fail-closed)"
-
-  # 2) 验签(不过绝不继续)
+  # 验签(不过绝不继续)
   verify_sig "$WORK/channel.json" "$WORK/channel.json.minisig" || \
     die "manifest 验签失败 —— 疑似投毒/损坏,拒绝"
-
-  # 2.5) schema 校验(fail-closed):类型/必填/semver/sha256 格式。
-  #      放在持久化 seen_metadata_version 之前 —— 否则坏 schema 的高版本会污染 seen,
-  #      之后正确的较低修正版会被防回滚误拒。
+  # schema 校验(fail-closed)—— 放在持久化 seen_metadata_version 之前
   jq -e '
     (.metadata_version|type=="number" and .==floor)
     and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
@@ -362,20 +353,20 @@ cmd_check() {
           and ((.security//false)|type=="boolean")
           and ((.auto_apply_allowed//false)|type=="boolean")
           and ((.ta_changed//false)|type=="boolean")
+          and ((.severity//"none")|type=="string" and test("^(none|low|medium|high|critical)$"))
+          and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not)))
           and ((.min_version//"0.0.0")|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
           and (.requires_ta_version==null or (.requires_ta_version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
           and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))))
   ' "$WORK/channel.json" >/dev/null 2>&1 || die "manifest schema 非法 —— 拒绝(fail-closed)"
-
-  # 3) 新鲜度(expires 必填)—— 防 freeze attack
+  # 新鲜度(expires 必填)—— 防 freeze attack
   local expires now exp_epoch
   expires="$(jq -r '.expires' "$WORK/channel.json")"
   now="$(date -u +%s)"
   exp_epoch="$(date -u -d "$expires" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$expires" +%s 2>/dev/null || echo 0)"
   [ "$exp_epoch" -gt 0 ] || die "manifest expires 无法解析($expires)—— 拒绝(fail-closed)"
   [ "$now" -gt "$exp_epoch" ] && die "manifest 已过期($expires)—— 疑似 freeze 攻击或长期离线,拒绝"
-
-  # 4) 防回滚:metadata_version 必须单调不降(此时已过 schema 校验)
+  # 防回滚:metadata_version 单调不降
   local mver seen
   mver="$(jq -r '.metadata_version' "$WORK/channel.json")"
   seen="$(state_get seen_metadata_version)"; seen="${seen:-0}"
@@ -383,58 +374,18 @@ cmd_check() {
     die "manifest metadata_version($mver) < 已见($seen)—— 回滚攻击,拒绝"
   fi
   [ "$mver" -gt "$seen" ] && state_set_num seen_metadata_version "$mver"
+  # rollback_floor + 当前版本(fail-safe 归一非法 semver 到 0.0.0)
+  FLOOR="$(jq -r '.rollback_floor // "0.0.0"' "$WORK/channel.json")"
+  CUR="$(state_get current)"; [ -z "$CUR" ] && CUR="0.0.0"
+  ver_valid "$CUR" || { warn "state.current '$CUR' 非法 semver → 按 0.0.0 处理"; CUR="0.0.0"; }
+  MANIFEST="$WORK/channel.json"; MVER="$mver"
+}
 
-  # 5) rollback_floor
-  local floor cur
-  floor="$(jq -r '.rollback_floor // "0.0.0"' "$WORK/channel.json")"
-  cur="$(state_get current)"; [ -z "$cur" ] && cur="0.0.0"
-  # state.current 来自 installer 建的 current 软链名,从未校验;非法 semver 会让 ver_cmp
-  # 的算术在 set -e 下崩脚本(PR#191 Low)。fail-safe 归一到 0.0.0。
-  ver_valid "$cur" || { warn "state.current '$cur' 非法 semver → 按 0.0.0 处理"; cur="0.0.0"; }
-
-  # 6) 遍历所有候选(version>cur, >=floor, min_version 满足),逐个按策略判定:
-  #    - apply 目标 = 能被 apply 的「最高」版本(不是版本最高的那个)—— 否则一个更高的
-  #      非安全 minor 会挡住本该自动打的安全 patch,架空 security 策略(PR#191 High-1)。
-  #    - notify 目标 = 所有候选里的最高版本(仅告知)。
-  # 用 US(\037,非空白)作分隔符:tab 是 IFS 空白会折叠空字段,导致列错位。
-  local US=$'\037'
-  local ac_ver="" ac_tarball="" ac_sha=""      # apply 候选(能自动应用的最高版)
-  local nc_ver=""                               # notify 候选(最高版,仅告知)
-  local r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary act
-  while IFS="$US" read -r r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary; do
-    [ -z "$r_ver" ] && continue
-    ver_gt "$r_ver" "$cur" || continue
-    ver_ge "$r_ver" "$floor" || continue
-    ver_ge "$cur" "$r_min" || continue           # 上升路径:当前须 >= 该版本要求的 min
-    if [ -z "$nc_ver" ] || ver_gt "$r_ver" "$nc_ver"; then nc_ver="$r_ver"; fi
-    act="$(decide_action "$cur" "$r_ver" "$r_sec" "$r_auto" "$r_ta" "$r_canary" "$r_reqta")"
-    if [ "$act" = "apply" ] && { [ -z "$ac_ver" ] || ver_gt "$r_ver" "$ac_ver"; }; then
-      ac_ver="$r_ver"; ac_tarball="$r_tarball"; ac_sha="$r_sha"
-    fi
-  done <<EOF
-$(jq -r '.releases[] | [(.version),(.security//false|tostring),(.auto_apply_allowed//false|tostring),(.ta_changed//false|tostring),(.min_version//"0.0.0"),(.requires_ta_version//""),(.tarball//""),(.sha256//""),((.canary_ring//[])|join(","))] | join("\u001f")' "$WORK/channel.json")
-EOF
-
-  # rollback_floor 越界告警(当前版本已低于 floor)
-  if ! ver_ge "$cur" "$floor"; then
-    notify warn "当前版本 $cur 低于 rollback_floor $floor(存在已知漏洞)—— 应尽快升级(node=$AU_NODE_ID)"
-  fi
-
-  if [ -z "$nc_ver" ]; then log "无更高候选版本(current=$cur)"; return 0; fi
-
-  # 7) 无可自动应用的候选 → 只通知最高版
-  if [ -z "$ac_ver" ]; then
-    notify info "有新版本可用:$cur → ${nc_ver}。当前策略未自动应用,请人工确认(node=$AU_NODE_ID)"
-    return 0
-  fi
-  log "apply 目标 $ac_ver(候选最高 $nc_ver,current=$cur)"
-  # 若存在比 apply 目标更高、但不自动应用的版本,也告知一声
-  if ver_gt "$nc_ver" "$ac_ver"; then
-    notify info "另有更高版本 $nc_ver 可用(未自动应用,需人工确认;node=$AU_NODE_ID)"
-  fi
-
-  # 8) 下载 apply 目标 tarball + 校验 sha256(+ 可选独立 tarball 签名)
-  [ -n "$ac_tarball" ] || die "apply 候选缺 tarball URL"
+# ── 下载 tarball + sha256 + 可选独立验签 + tar 加固 + 解压 → apply_version ──
+# check 与 apply 共用。tarball 的 hash/URL 必须由调用方从「已验签 manifest」取。
+download_verify_apply() { # <ver> <tarball> <sha>
+  local ac_ver="$1" ac_tarball="$2" ac_sha="$3"
+  [ -n "$ac_tarball" ] || die "候选缺 tarball URL"
   log "下载 $ac_tarball"
   fetch_required "$ac_tarball" "$WORK/node.tgz" "tarball"
   local got; got="$(sha256_of "$WORK/node.tgz")"
@@ -443,24 +394,204 @@ EOF
   if fetch "$ac_tarball.minisig" "$WORK/node.tgz.minisig" 2>/dev/null; then
     verify_sig "$WORK/node.tgz" "$WORK/node.tgz.minisig" || die "tarball 验签失败 —— 拒绝"
   fi
-
-  # tar 路径加固:拒绝绝对路径 / .. / 非单一 airaccount-node-* 顶层(防越界写)
-  local entries; entries="$(tar -tzf "$WORK/node.tgz")"
-  echo "$entries" | grep -qE '(^/|(^|/)\.\.(/|$))' && die "tarball 含绝对路径或 ..  —— 拒绝"
-  # 拒绝特殊文件条目:symlink/hardlink 挡 link 越界,char/block/fifo/socket 防 root 建设备节点
-  # (-tv 首字符 l=symlink h=hardlink c=字符设备 b=块设备 p=FIFO s=socket)。bundle 全是普通文件。
-  tar -tvzf "$WORK/node.tgz" | awk '{print substr($1,1,1)}' | grep -qE '^[lhbcps]$' \
-    && die "tarball 含 symlink/hardlink/设备/FIFO 条目 —— 拒绝"
+  # tar 路径加固:拒绝绝对路径 / .. / 特殊文件 / 非单一 airaccount-node-* 顶层。
+  # 注(codex High-2 复核):所有匹配都用 `grep`(**不带 -q**)—— grep -q 命中即早退会让
+  # 上游 tar/awk/echo 收 SIGPIPE,在 pipefail 下把整条 pipeline 翻成非零,使 `&& die` 不执行,
+  # 恶意条目反被放过。去掉 -q 让 grep 读完全部输入,消除该早退旁路。
+  local entries; entries="$(tar -tzf "$WORK/node.tgz")" || die "tarball 无法读取(损坏?)—— 拒绝"
+  echo "$entries" | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null && die "tarball 含绝对路径或 ..  —— 拒绝"
+  local ftypes; ftypes="$(tar -tvzf "$WORK/node.tgz" | awk '{print substr($1,1,1)}')" \
+    || die "tarball 无法读取(损坏?)—— 拒绝"
+  echo "$ftypes" | grep -E '^[lhbcps]$' >/dev/null && die "tarball 含 symlink/hardlink/设备/FIFO 条目 —— 拒绝"
   local tops; tops="$(echo "$entries" | sed 's#/.*##' | sort -u)"
   [ "$(echo "$tops" | wc -l | tr -d ' ')" = "1" ] || die "tarball 顶层非单一目录 —— 拒绝"
-  echo "$tops" | grep -qE '^airaccount-node-' || die "tarball 顶层非 airaccount-node-* —— 拒绝"
+  echo "$tops" | grep -E '^airaccount-node-' >/dev/null || die "tarball 顶层非 airaccount-node-* —— 拒绝"
   mkdir -p "$WORK/x"; tar -xzf "$WORK/node.tgz" -C "$WORK/x"
   local bundle; bundle="$(find "$WORK/x" -maxdepth 1 -type d -name 'airaccount-node-*' 2>/dev/null | head -1)"
   [ -z "$bundle" ] && bundle="$WORK/x"
 
-  # 9) 应用(crash-safe + 健康门 + 回滚)
+  # TA 实际内容门(codex High-2):不信 manifest 的 ta_changed 一面之词,校验 bundle
+  # 里实际的 TA 是否真变了。未授权 TA 变更(TA_OK!=1)时,枚举 bundle 与当前 current 下
+  # **所有** *.ta 的「文件名:sha256」有序集合(codex 复核 High-1:不能只看第一个 .ta,
+  # 否则 bundle 混入多个 TA 时变化的那个可能被漏过),任何增/删/改即算 TA 变更 → 拒绝。
+  # 仅当有基线 TA 可比对时强制;flat/首装无基线时告警跳过(TA 版本化未完,设计 §9)。
+  if [ "${TA_OK:-0}" != 1 ]; then
+    local bundle_ta cur_ta="" cur_dir=""
+    bundle_ta="$(ta_set "$bundle")"
+    if [ -n "$bundle_ta" ]; then                     # bundle 带了 TA 才需判定
+      [ -e "$AU_ROOT/current" ] && cur_dir="$AU_ROOT/current"
+      [ -n "$cur_dir" ] && cur_ta="$(ta_set "$cur_dir")"
+      if [ -z "$cur_ta" ]; then
+        warn "无基线 TA 可比对(flat/首装),跳过 TA 内容门 —— TA 版本化落地后强制(设计 §9)"
+      elif [ "$bundle_ta" != "$cur_ta" ]; then
+        die "bundle 实际 TA 集合与当前不一致(增/删/改;但未授权 TA 变更)—— 拒绝。TA 更新走 OOB / --allow-ta。"
+      fi
+    fi
+  fi
+
   mkdir -p "$AU_ROOT/releases"
   apply_version "$ac_ver" "$bundle"
+}
+
+# 枚举一个目录树下所有 *.ta 的「文件名:sha256」有序集合(TA 由 UUID 文件名唯一标识)。
+# 用于 TA 内容门:比较 bundle 与当前 current 的整套 TA(不只第一个)。
+ta_set() { # <dir>
+  local d="$1" p
+  [ -e "$d" ] || return 0
+  find -L "$d" -type f -name '*.ta' 2>/dev/null | sort | while IFS= read -r p; do
+    printf '%s:%s\n' "$(basename "$p")" "$(sha256_of "$p")"
+  done | sort
+}
+
+# ── 富通知 + 去重(设计:通知含版本/变动/安全级别/是否含 TA)──────────
+# 去重 key = version+hash+severity+ta_changed+reqta+notes+metadata_version(任一变化重推,
+# codex Medium-4:notes/reqta 变化=消息含义变化,也应重推)。
+notify_update() { # <cur> <ver> <severity> <notes> <ta_changed> <reqta> <hash>
+  local cur="$1" ver="$2" sev="$3" notes="$4" ta="$5" reqta="$6" hash="$7"
+  local key="${ver}|${hash}|${sev}|${ta}|${reqta}|${notes}|${MVER}"
+  if [ "$key" = "$(state_get notified_key)" ]; then
+    log "该更新已通知过(去重 key 未变),跳过"; return 0
+  fi
+  local sevtag
+  case "$sev" in
+    critical) sevtag="🔴 CRITICAL 安全更新" ;;
+    high)     sevtag="🔴 HIGH 安全补丁" ;;
+    medium)   sevtag="🟠 MEDIUM" ;;
+    low)      sevtag="🟡 LOW" ;;
+    *)        sevtag="常规更新" ;;
+  esac
+  local tatag
+  if [ "$ta" = "true" ]; then tatag="是 ⚠️ 含 TA 变更(走专门流程,不在线一键)"; else tatag="否(纯 CA)"; fi
+  local msg="有新版本可用:$cur → $ver
+安全级别: $sevtag
+变动: ${notes:-（无说明）}
+TA: $tatag"
+  [ -n "$reqta" ] && msg="$msg
+需要 TA ≥ $reqta"
+  msg="$msg
+应用: ssh 进板跑  aastar-node-updater apply $ver
+(node=$AU_NODE_ID)"
+  # 只在确认送达后才写去重 key(codex High-3):Telegram 一次瞬时故障不能让同一
+  # 安全更新以后永远不再推。未送达 → 不写 key,下次 timer 重试。
+  if notify_send info "$msg"; then
+    state_set notified_key "$key"
+  else
+    warn "通知未送达 —— 暂不写去重 key,下次 check 会重推"
+  fi
+}
+
+# ── check:主流程 ───────────────────────────────────────────────────
+cmd_check() {
+  need jq; need curl
+  acquire_lock
+  state_init
+  # 载入策略 env
+  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
+  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
+  # shellcheck disable=SC1090
+  [ -f "$AU_ENV_FILE" ] && . "$AU_ENV_FILE"
+
+  # TA 内容门授权位(codex High-2):check 只在 TA_AUTO_UPDATE=on 时才允许实际 TA 变更;
+  # 否则 download_verify_apply 若发现 bundle 夹带变化的 TA(manifest 误标)会拒绝。
+  TA_OK=$([ "${TA_AUTO_UPDATE:-off}" = on ] && echo 1 || echo 0)
+  STRICT_FETCH=0                      # check=定时器:网络失败静默重试(内部控制位,codex Low)
+  WORK="$(mktemp -d)"
+  load_manifest        # 拉取 + 验签 + schema + 新鲜度 + 防回滚 → MANIFEST/FLOOR/CUR/MVER
+
+  # 遍历所有候选(version>CUR, >=FLOOR, min_version 满足),逐个按策略判定:
+  #   - apply 目标 = 能被 apply 的「最高」版本(不是版本最高的那个)—— 否则一个更高的
+  #     非安全 minor 会挡住本该自动打的安全 patch,架空 security 策略(PR#191 High-1)。
+  #   - notify 目标 = 所有候选里的最高版本,并带上它的 severity/notes/ta(富通知)。
+  # 用 US(\037,非空白)作分隔符:tab 是 IFS 空白会折叠空字段,导致列错位。
+  local US=$'\037'
+  local ac_ver="" ac_tarball="" ac_sha=""      # apply 候选(能自动应用的最高版)
+  local nc_ver="" nc_sev="none" nc_notes="" nc_ta="false" nc_hash="" nc_reqta=""  # notify 候选
+  local r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes act
+  while IFS="$US" read -r r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes; do
+    [ -z "$r_ver" ] && continue
+    ver_gt "$r_ver" "$CUR" || continue
+    ver_ge "$r_ver" "$FLOOR" || continue
+    ver_ge "$CUR" "$r_min" || continue           # 上升路径:当前须 >= 该版本要求的 min
+    if [ -z "$nc_ver" ] || ver_gt "$r_ver" "$nc_ver"; then
+      nc_ver="$r_ver"; nc_sev="$r_sev"; nc_notes="$r_notes"; nc_ta="$r_ta"; nc_hash="$r_sha"; nc_reqta="$r_reqta"
+    fi
+    act="$(decide_action "$CUR" "$r_ver" "$r_sec" "$r_auto" "$r_ta" "$r_canary" "$r_reqta")"
+    if [ "$act" = "apply" ] && { [ -z "$ac_ver" ] || ver_gt "$r_ver" "$ac_ver"; }; then
+      ac_ver="$r_ver"; ac_tarball="$r_tarball"; ac_sha="$r_sha"
+    fi
+  done <<EOF
+$(jq -r '.releases[] | [(.version),(.security//false|tostring),(.auto_apply_allowed//false|tostring),(.ta_changed//false|tostring),(.min_version//"0.0.0"),(.requires_ta_version//""),(.tarball//""),(.sha256//""),((.canary_ring//[])|join(",")),(.severity//"none"),(.notes//"")] | join("")' "$MANIFEST")
+EOF
+
+  # rollback_floor 越界告警(当前版本已低于 floor)
+  if ! ver_ge "$CUR" "$FLOOR"; then
+    notify warn "当前版本 $CUR 低于 rollback_floor $FLOOR(存在已知漏洞)—— 应尽快升级(node=$AU_NODE_ID)"
+  fi
+
+  if [ -z "$nc_ver" ]; then log "无更高候选版本(current=$CUR)"; return 0; fi
+
+  # 无可自动应用的候选 → 只发富通知(版本/变动/安全级别/是否含 TA + 去重)
+  if [ -z "$ac_ver" ]; then
+    notify_update "$CUR" "$nc_ver" "$nc_sev" "$nc_notes" "$nc_ta" "$nc_reqta" "$nc_hash"
+    return 0
+  fi
+  log "apply 目标 $ac_ver(候选最高 $nc_ver,current=$CUR)"
+  # 若存在比 apply 目标更高、但不自动应用的版本,也富通知一声(带 severity)
+  if ver_gt "$nc_ver" "$ac_ver"; then
+    notify_update "$CUR" "$nc_ver" "$nc_sev" "$nc_notes" "$nc_ta" "$nc_reqta" "$nc_hash"
+  fi
+
+  # 应用(下载 + sha256 + 可选验签 + tar 加固 + crash-safe + 健康门 + 回滚)
+  download_verify_apply "$ac_ver" "$ac_tarball" "$ac_sha"
+}
+
+# ── apply <ver>:显式指定版本应用(运维已决定)──────────────────────
+# 越过 policy 门(人已拍板),但绝不越过密码学 + 防回滚 + 兼容 + TA 门。
+# version 只作「在已验签 manifest 里选哪条」的索引;hash/URL 全取自已验签数据。
+cmd_apply() {
+  local want="${1:-}"
+  [ -n "$want" ] || die "用法: aastar-node-updater apply <version> [--allow-ta]"
+  ver_valid "$want" || die "版本号非法(需 x.y.z): $want"
+  need jq; need curl
+  acquire_lock
+  state_init
+  AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
+  TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
+  # shellcheck disable=SC1090
+  [ -f "$AU_ENV_FILE" ] && . "$AU_ENV_FILE"
+
+  STRICT_FETCH=1                      # 显式 apply:下载失败必须硬失败(codex High-1)
+  TA_OK=$([ "${ALLOW_TA:-0}" = 1 ] && echo 1 || echo 0)   # TA 内容门授权位(codex High-2)
+  WORK="$(mktemp -d)"
+  load_manifest
+
+  # 在已验签 manifest 里精确取该版本(version 只作索引)
+  local US=$'\037' line
+  line="$(jq -r --arg v "${want#v}" '
+    first(.releases[] | select((.version|ltrimstr("v"))==$v)
+    | [(.version),(.security//false|tostring),(.auto_apply_allowed//false|tostring),(.ta_changed//false|tostring),(.min_version//"0.0.0"),(.requires_ta_version//""),(.tarball//""),(.sha256//""),(.severity//"none")]
+    | join(""))' "$MANIFEST")"
+  [ -n "$line" ] || die "manifest 里没有版本 $want(可用:$(jq -r '.releases[].version' "$MANIFEST" | tr '\n' ' '))"
+  local r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_sev
+  IFS="$US" read -r r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_sev <<EOF
+$line
+EOF
+
+  # 安全门(显式 apply 越过 policy,但这些都不越过):
+  ver_gt "$r_ver" "$CUR"   || die "$want 不高于当前 $CUR —— 拒绝(降级请走 OOB break-glass)"
+  ver_ge "$r_ver" "$FLOOR" || die "$want 低于 rollback_floor $FLOOR(有已知漏洞)—— 拒绝"
+  ver_ge "$CUR" "$r_min"   || die "当前 $CUR 不满足 $want 要求的 min_version $r_min —— 需先升级中间版本"
+  if [ "$r_ta" = "true" ] && [ "${ALLOW_TA:-0}" != "1" ]; then
+    die "$want 含 TA 变更(ta_changed=true)。TA 更新不走在线一键(RSA-4096 签名 + secure storage 迁移),请走 OOB/专门流程。确需强制:apply $want --allow-ta。"
+  fi
+  # 兼容门:要求的 TA 比当前新且本次不换 TA → 无法满足
+  # (C4 待修:目前用 CA 版本 CUR 近似 TA 版本;TA 版本化落地后改读真实 TA 版本)
+  if [ -n "$r_reqta" ] && [ "$r_ta" != "true" ] && ver_gt "$r_reqta" "$CUR"; then
+    die "$want 要求 TA ≥ $r_reqta 但本次不换 TA、当前 $CUR 不满足 —— 拒绝(需先升级 TA)"
+  fi
+  log "显式应用 $want(severity=$r_sev, ta_changed=$r_ta, current=$CUR)"
+  notify info "开始应用 $CUR → $want(手动 apply,node=$AU_NODE_ID)"
+  download_verify_apply "$r_ver" "$r_tarball" "$r_sha"
 }
 
 decide_action() { # decide_action cur cand security auto_apply ta_changed canary requires_ta_version → apply|notify|skip
@@ -494,11 +625,29 @@ decide_action() { # decide_action cur cand security auto_apply ta_changed canary
 }
 
 main() {
-  case "${1:-check}" in
-    check)    cmd_check ;;
-    recovery) cmd_recovery ;;
-    status)   cmd_status ;;
-    *) die "用法: $0 {check|recovery|status}" ;;
+  local cmd="${1:-check}"; shift 2>/dev/null || true
+  # 解析选项(目前仅 apply 用 --allow-ta),位置参数收集到 POS[]
+  ALLOW_TA="${ALLOW_TA:-0}"
+  local POS=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --allow-ta) ALLOW_TA=1 ;;
+      --*) die "未知选项 $a" ;;
+      *) POS+=("$a") ;;
+    esac
+  done
+  local npos="${#POS[@]}"
+  case "$cmd" in
+    check|recovery|status)
+      # 这些命令不接受位置参数或 --allow-ta(codex Low-2:严格校验,避免误用被静默吞掉)
+      [ "$npos" -eq 0 ] || die "$cmd 不接受额外参数:${POS[*]}"
+      [ "$ALLOW_TA" = 1 ] && die "--allow-ta 仅用于 apply"
+      "cmd_$cmd" ;;
+    apply)
+      [ "$npos" -eq 1 ] || die "用法: $0 apply <ver> [--allow-ta](恰好一个版本参数)"
+      cmd_apply "${POS[0]}" ;;
+    *) die "用法: $0 {check | apply <ver> [--allow-ta] | recovery | status}" ;;
   esac
 }
 main "$@"

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # 本地测试:社区节点自动更新器(无需硬件)。
-# 覆盖设计文档 §11 的 6 条路径:
-#   T1 升级成功(security patch)   T2 验签失败拒绝     T3 过期 manifest 拒绝(freeze)
-#   T4 回滚攻击拒绝(metadata_version 下降)  T5 健康门失败→回滚   T6 掉电→boot recovery
-# 附加:T7 notify-only 不自动应用   T8 TA 变更 + TA_AUTO_UPDATE=off 只通知
+# T1-T19 check 路径:升级成功 / 验签失败 / freeze / 回滚攻击 / 健康门→回滚 /
+#   boot recovery / notify-only / TA-only-notify / 缺公钥 / 缺签名 / sha 不符 /
+#   schema 非法 / tar symlink / canary 类型 / security 不被架空 / PIN / 兼容门 / 版本核对。
+# T20-T28 Phase 1(apply CLI + 富通知 + 去重 + telegram hook):
+#   T20 apply 越过 notify-only  T21 apply TA 无 --allow-ta 拒绝  T22 apply --allow-ta 放行
+#   T23 apply 不存在版本拒绝  T24 apply 降级拒绝  T25 apply 低于 floor 拒绝
+#   T26 富通知(版本/severity/notes/应用提示)  T27 去重  T27b severity 升级重推
+#   T28 notify-telegram.sh fail-safe + 发请求
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -425,42 +429,293 @@ env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="
 [ "$(st "$NS" current)" = "0.28.0" ] && ok "版本核对失败→回滚(current 未变)" || bad "current=$(st "$NS" current)"
 
 # ═══════════════════════════════════════════════════════════════════
-echo "== T20 manifest 端点 HTTP 4xx(curl 22)→ 告警拒绝(不静默)=="
+# Phase 1 新增:apply 子命令 + 富通知 + 去重 + telegram hook
+# ═══════════════════════════════════════════════════════════════════
+
+# 允许给 updater 传多个位置参数(apply <ver> [--allow-ta])
+run_updater_args() { # <AU_ROOT> <AU_STATE_DIR> [env=val...] -- <updater args...>
+  local nr="$1" ns="$2"; shift 2
+  local envs=()
+  while [ "${1:-}" != "--" ]; do envs+=("$1"); shift; done
+  shift
+  env AU_ROOT="$nr" AU_STATE_DIR="$ns" AU_ENV_FILE="$ROOT/updater.env" \
+      AU_PUBKEY="$ROOT/pub.key" AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID="testnode" \
+      AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" \
+      AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+      ${envs[@]+"${envs[@]}"} \
+      bash "$UPDATER" "$@"
+}
+
+echo "== T20 apply <ver>:notify-only 策略下也能显式手动应用 =="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
 read NR NS < <(new_node t20 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:false,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 20 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
+  [ "$(st "$NS" current)" = "0.29.0" ] && ok "apply 0.29.0 成功(越过 notify-only 策略)" || bad "current=$(st "$NS" current)"
+  [ "$(cur_link "$NR")" = "0.29.0" ] && ok "current 软链→0.29.0" || bad "link=$(cur_link "$NR")"
+else bad "apply 退出非零(应成功)"; fi
+
+echo "== T21 apply 含 TA 变更且无 --allow-ta → 拒绝 =="
+read NR NS < <(new_node t21 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-NEW)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:true,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 21 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
+  bad "TA 变更无 --allow-ta 却成功(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "TA 变更被拒,current 未变" || bad "current=$(st "$NS" current)"
+fi
+
+echo "== T22 apply <ver> --allow-ta → 显式放行 TA 变更 =="
+read NR NS < <(new_node t22 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-NEW)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:true,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 22 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" -- apply 0.29.0 --allow-ta >/dev/null 2>&1; then
+  [ "$(st "$NS" current)" = "0.29.0" ] && ok "--allow-ta 下 TA 变更被应用" || bad "current=$(st "$NS" current)"
+else bad "apply --allow-ta 退出非零(应成功)"; fi
+
+echo "== T23 apply 不存在的版本 → 拒绝 =="
+read NR NS < <(new_node t23 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 23 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 9.9.9 >/dev/null 2>&1; then
+  bad "不存在的版本却成功(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "不存在版本被拒" || bad "current=$(st "$NS" current)"
+fi
+
+echo "== T24 apply 降级(<= 当前)→ 拒绝 =="
+read NR NS < <(new_node t24 0.29.0)
+SHA="$(make_bundle 0.28.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.28.0.tar.gz" \
+  '[{version:"0.28.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 24 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.28.0 >/dev/null 2>&1; then
+  bad "降级却成功(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.29.0" ] && ok "降级被拒,current 未变" || bad "current=$(st "$NS" current)"
+fi
+
+echo "== T25 apply 低于 rollback_floor → 拒绝 =="
+read NR NS < <(new_node t25 0.28.0)
+SHA="$(make_bundle 0.28.5 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.28.5.tar.gz" \
+  '[{version:"0.28.5",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 25 "2035-01-01T00:00:00Z" "0.29.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.28.5 >/dev/null 2>&1; then
+  bad "低于 floor 却成功(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "低于 floor 被拒" || bad "current=$(st "$NS" current)"
+fi
+
+echo "== T26 富通知:含版本迁移 + 安全级别 + 变动摘要 =="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t26 0.28.0)
+SHA="$(make_bundle 0.30.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.30.0.tar.gz" \
+  '[{version:"0.30.0",security:true,severity:"high",notes:"修 stats XSS + portal 三语",auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 26 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+: > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+grep -q "有新版本可用:0.28.0 → 0.30.0" "$ROOT/notify.log" && ok "通知含版本迁移" || bad "通知缺版本迁移"
+grep -q "HIGH" "$ROOT/notify.log" && ok "通知含安全级别 HIGH" || bad "通知缺 severity"
+grep -q "修 stats XSS" "$ROOT/notify.log" && ok "通知含变动摘要 notes" || bad "通知缺 notes"
+grep -q "aastar-node-updater apply 0.30.0" "$ROOT/notify.log" && ok "通知含应用命令提示" || bad "通知缺应用提示"
+
+echo "== T27 通知去重:同更新第二次 check 不重复推 =="
+: > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ ! -s "$ROOT/notify.log" ] && ok "同更新二次 check 去重(未重复通知)" || bad "重复通知: $(cat "$ROOT/notify.log")"
+
+echo "== T27b severity 升级(同版本)→ 重推 =="
+S2="$(make_bundle 0.30.0 TA-0.28.0)"   # 同版本同 hash
+REL2="$(jq -n --arg s "$S2" --arg u "file://$SERVER/airaccount-node-0.30.0.tar.gz" \
+  '[{version:"0.30.0",security:true,severity:"critical",notes:"升级为严重",auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 26 "2035-01-01T00:00:00Z" "0.0.0" "$REL2"   # mver 不变,仅 severity 变
+: > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+grep -q "CRITICAL" "$ROOT/notify.log" && ok "severity 升级→重推(CRITICAL)" || bad "severity 升级未重推"
+
+echo "== T28 notify-telegram.sh:未配置 exit0;配置+mock curl 发请求;token 不在 argv =="
+NT="$(cd "$HERE/../../deploy/updater" && pwd)/notify-telegram.sh"
+if env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u AAstarMonitorBot_TOKEN bash "$NT" info "t" >/dev/null 2>&1; then
+  ok "未配置凭据时静默 exit 0(不阻断 updater)"
+else bad "未配置却非零退出"; fi
+# mock curl:记录 argv 与 stdin(URL 走 --config stdin,含 token)
+cat > "$ROOT/mock-curl.sh" <<SH
+#!/usr/bin/env bash
+echo "\$@" > "$ROOT/curl-args.log"
+cat > "$ROOT/curl-stdin.log"
+exit 0
+SH
+chmod +x "$ROOT/mock-curl.sh"
+: > "$ROOT/curl-args.log"; : > "$ROOT/curl-stdin.log"
+if env TELEGRAM_BOT_TOKEN=TESTTOKEN TELEGRAM_CHAT_ID=123 CURL="$ROOT/mock-curl.sh" \
+    bash "$NT" warn "有新版本可用:0.28.0 → 0.30.0" >/dev/null 2>&1; then
+  ok "配置+发送成功 → exit 0"
+else bad "配置+mock成功却非零退出"; fi
+grep -q "sendMessage" "$ROOT/curl-stdin.log" && ok "sendMessage 端点(经 stdin --config)" || bad "未见 sendMessage"
+grep -q "有新版本可用" "$ROOT/curl-args.log" && ok "argv 带消息内容" || bad "argv 缺消息内容"
+grep -q "TESTTOKEN" "$ROOT/curl-args.log" && bad "token 出现在 argv(应只在 stdin)" || ok "token 不在 argv(仅 stdin,防 ps 泄露)"
+# 发送失败(mock curl 非零)→ hook 返回非零(供 updater 去重判定)
+cat > "$ROOT/mock-curl-fail.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null; exit 7
+SH
+chmod +x "$ROOT/mock-curl-fail.sh"
+if env TELEGRAM_BOT_TOKEN=T TELEGRAM_CHAT_ID=1 CURL="$ROOT/mock-curl-fail.sh" bash "$NT" info "x" >/dev/null 2>&1; then
+  bad "发送失败却 exit 0(应非零,以便不写去重 key)"
+else ok "发送失败 → 非零退出"; fi
+
+echo "== T29 apply:bundle 实际含变化 TA 但 manifest 标 ta_changed=false → 拒绝(codex H2)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+# 造一个有「基线 TA」的节点(current 软链下有 .ta 可比对)
+NR="$ROOT/node-t29"; NS="$ROOT/state-t29"; mkdir -p "$NR/releases/0.28.0" "$NS"
+echo "kms 0.28.0" > "$NR/releases/0.28.0/kms-api-server"
+echo "TA-OLD"      > "$NR/releases/0.28.0/$UUID.ta"
+ln -sfn "releases/0.28.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:0,current:"0.28.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+SHA="$(make_bundle 0.29.0 TA-DIFFERENT)"   # bundle TA 与基线不同
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 29 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
+  bad "夹带变化 TA 却成功(应拒绝)"
+else
+  [ "$(cur_link "$NR")" = "0.28.0" ] && ok "夹带变化 TA 被 TA 内容门拒,current 未变" || bad "link=$(cur_link "$NR")"
+fi
+# 同样内容(TA 未真的变)→ 应通过
+SHA2="$(make_bundle 0.29.1 TA-OLD)"       # bundle TA == 基线
+REL2="$(jq -n --arg s "$SHA2" --arg u "file://$SERVER/airaccount-node-0.29.1.tar.gz" \
+  '[{version:"0.29.1",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 30 "2035-01-01T00:00:00Z" "0.0.0" "$REL2"
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" -- apply 0.29.1 >/dev/null 2>&1; then
+  [ "$(cur_link "$NR")" = "0.29.1" ] && ok "TA 未真变(hash 同)→ 放行应用" || bad "link=$(cur_link "$NR")"
+else bad "TA 未变却被拒(误报)"; fi
+
+echo "== T30 apply 网络失败 → 硬失败非零(codex H1,不静默 exit0)=="
+read NR NS < <(new_node t30 0.28.0)
+# manifest 指向不存在的 file:// tarball
+REL="$(jq -n --arg u "file://$SERVER/does-not-exist-0.31.0.tar.gz" \
+  '[{version:"0.31.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:"0000000000000000000000000000000000000000000000000000000000000000"}]')"
+write_manifest 31 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.31.0 >/dev/null 2>&1; then
+  bad "tarball 拉不到却 exit 0(应硬失败)"
+else ok "apply 下载失败 → 非零退出(不误判成功)"; fi
+
+echo "== T31 schema:requires_ta_version 非 semver → 拒绝(codex M1)=="
+read NR NS < <(new_node t31 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"latest",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 32 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater "$NR" "$NS" check >/dev/null 2>&1; then
+  bad "requires_ta_version=latest 却通过(schema 应拒)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "非 semver requires_ta_version 被 schema 拒" || bad "current=$(st "$NS" current)"
+fi
+
+echo "== T32 通知未送达(hook 非零)→ 不写去重 key,下次重推(codex H3)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t32 0.28.0)
+SHA="$(make_bundle 0.30.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.30.0.tar.gz" \
+  '[{version:"0.30.0",security:true,severity:"high",notes:"x",auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 33 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# 失败通知 hook(非零)
+cat > "$ROOT/notify-fail.sh" <<'SH'
+#!/usr/bin/env bash
+exit 5
+SH
+chmod +x "$ROOT/notify-fail.sh"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- check >/dev/null 2>&1
+NK="$(st "$NS" notified_key)"   # st 用 .[$k],缺 key 返回字面 "null"
+{ [ "$NK" = null ] || [ -z "$NK" ]; } && ok "hook 失败 → 未写 notified_key(下次会重推)" || bad "notified_key=$NK(不该写)"
+# 换成会成功的 hook,再 check → 应重推并写 key
+: > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+grep -q "有新版本可用" "$ROOT/notify.log" && ok "hook 恢复后重推(未被误去重)" || bad "未重推"
+[ -n "$(st "$NS" notified_key)" ] && ok "送达成功 → 写 notified_key" || bad "成功却未写 key"
+
+echo "== T33 apply:bundle 夹带额外/变化的第二个 TA(多 .ta)→ 仍拒绝(codex H1 复核)=="
+NR="$ROOT/node-t33"; NS="$ROOT/state-t33"; mkdir -p "$NR/releases/0.28.0" "$NS"
+echo "kms" > "$NR/releases/0.28.0/kms-api-server"
+echo "TA-OLD" > "$NR/releases/0.28.0/$UUID.ta"
+ln -sfn "releases/0.28.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:0,current:"0.28.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+d="$ROOT/bmulti/airaccount-node-0.29.0/kms"; rm -rf "$ROOT/bmulti"; mkdir -p "$d"
+echo "kms 0.29.0" > "$d/kms-api-server"
+echo "TA-OLD"     > "$d/$UUID.ta"          # 与基线同
+echo "EVIL-TA"    > "$d/evil-second.ta"    # 额外一个变化 TA(第一个可能先被拿到)
+tar -czf "$SERVER/airaccount-node-0.29.0.tar.gz" -C "$ROOT/bmulti" airaccount-node-0.29.0
+SHA="$(sha256_of "$SERVER/airaccount-node-0.29.0.tar.gz")"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 34 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
+  bad "多 TA(含变化)却成功(应拒绝)"
+else
+  [ "$(cur_link "$NR")" = "0.28.0" ] && ok "多 .ta 集合不一致被拒(不只看第一个)" || bad "link=$(cur_link "$NR")"
+fi
+
+echo "== T34 fetch:manifest 端点 HTTP 4xx(curl 22)→ 告警拒绝(不静默,#192)=="
+read NR NS < <(new_node t34 0.28.0)
 printf '#!/usr/bin/env bash\nexit 22\n' > "$ROOT/fetch-4xx.sh"; chmod +x "$ROOT/fetch-4xx.sh"
-if env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
-      AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
-      AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
-      AU_FETCH_CMD="$ROOT/fetch-4xx.sh" bash "$UPDATER" check >/dev/null 2>&1; then
+if run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-4xx.sh" -- check >/dev/null 2>&1; then
   bad "HTTP 4xx 却成功了(应拒绝)"
 else
   [ "$(st "$NS" current)" = "0.28.0" ] && ok "4xx 拒绝,current 未变" || bad "current=$(st "$NS" current)"
 fi
 
-# ═══════════════════════════════════════════════════════════════════
-echo "== T20b manifest 网络失败(curl 7)→ 静默退出(exit 0),不告警 =="
-read NR NS < <(new_node t20b 0.28.0)
+echo "== T35 fetch:manifest 网络失败(curl 7)→ check 静默退出 exit0(#192)=="
+read NR NS < <(new_node t35 0.28.0)
 printf '#!/usr/bin/env bash\nexit 7\n' > "$ROOT/fetch-net.sh"; chmod +x "$ROOT/fetch-net.sh"
-env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
-    AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
-    AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
-    AU_FETCH_CMD="$ROOT/fetch-net.sh" bash "$UPDATER" check >/dev/null 2>&1
+run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-net.sh" -- check >/dev/null 2>&1
 RC=$?
-[ "$RC" = 0 ] && ok "网络失败静默退出(exit 0)" || bad "exit=$RC(应 0)"
+[ "$RC" = 0 ] && ok "check 网络失败静默退出(exit 0)" || bad "exit=$RC(应 0)"
 
-# ═══════════════════════════════════════════════════════════════════
-echo "== T21 requires_ta_version 非 semver → schema fail-closed =="
-read NR NS < <(new_node t21 0.28.0)
-S="$(make_bundle 0.29.0 TA-0.28.0)"
-REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
-  '[{version:"0.29.0",security:true,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"latest",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
-write_manifest 21 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
-if run_updater "$NR" "$NS" check >/dev/null 2>&1; then
-  bad "非法 requires_ta_version 却成功(应拒绝)"
-else
-  [ "$(st "$NS" current)" = "0.28.0" ] && ok "非法 requires_ta_version,current 未变" || bad "current=$(st "$NS" current)"
-  [ "$(st "$NS" seen_metadata_version)" = "0" ] && ok "seen 未污染(仍 0)" || bad "seen=$(st "$NS" seen_metadata_version)"
-fi
+echo "== T36 fetch:apply 遇网络失败(curl 7)→ 硬失败非零(STRICT_FETCH,不静默)=="
+read NR NS < <(new_node t36 0.28.0)
+# 先给合法 manifest(apply 需先读到 manifest 选版本),再让 tarball 拉取网络失败
+SHA="$(make_bundle 0.37.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.37.0.tar.gz" \
+  '[{version:"0.37.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 37 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# fetch mock:manifest(.json)正常放行走真实 file://,tarball 返回 7
+cat > "$ROOT/fetch-mixed.sh" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  *.tar.gz) exit 7 ;;                       # tarball 网络失败
+  *) exec cp "\${1#file://}" "\$2" ;;        # 其它(manifest/sig)走真实文件
+esac
+SH
+chmod +x "$ROOT/fetch-mixed.sh"
+run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-mixed.sh" -- apply 0.37.0 >/dev/null 2>&1
+RC=$?
+[ "$RC" != 0 ] && ok "apply 网络失败硬失败(exit=${RC} 非0,不误判成功)" || bad "apply 网络失败却 exit0"
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
