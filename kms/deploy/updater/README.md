@@ -7,12 +7,12 @@
 
 节点周期性(systemd timer)拉一份**签名的 channel manifest**,校验后按策略**自动应用安全补丁**或**只通知**,应用走 **crash-safe 版本化目录 + 原子软链 + 健康门 + 自动回滚**,掉电中断由 **boot recovery** 兜底。
 
-**Phase 1(通知 + CLI 手动应用,本 PR)**:默认 `notify-only`,发现新版推 **Telegram**(富通知:版本 / 变动 / 安全级别 / 是否含 TA + 去重);运维收到后 `ssh` 进板跑 `aastar-node-updater apply <ver>` 显式应用(越过 policy 门,但**不越过**验签/防回滚/兼容/TA 门)。**TA 变更默认拒绝在线应用**(`--allow-ta` 仅限带外/专门流程)。设计与安全评审见 [`auto-update-web-admin-design.md`](../../docs/auto-update-web-admin-design.md)。
+**Phase 1(通知 + CLI 手动应用,本 PR)**:默认 `notify-only`,发现新版推 **Telegram**(富通知:版本 / 变动 / 安全级别 / 是否含 TA + 去重);运维收到后 `ssh` 进板跑 `aastar-node-updater apply <ver>` 显式应用(越过 policy 门,但**不越过**验签/防回滚/兼容/TA 门)。**含 TA 变更的更新一律拒绝在线应用**(决策 D:TA 在线一键=服务端能力级砍掉,无 bypass;`apply_version` 也不装 TA 到 OP-TEE 路径,在线换 TA 会 CA/TA 不一致)——TA 更新只走 OOB / 专门流程。设计与安全评审见 [`auto-update-web-admin-design.md`](../../docs/auto-update-web-admin-design.md)。
 
 ```bash
 aastar-node-updater check                 # 定时器调用:拉 manifest→校验→按策略应用/通知
 aastar-node-updater apply 0.30.0          # 手动应用指定版本(收到通知后 ssh 进板跑)
-aastar-node-updater apply 0.31.0 --allow-ta   # 强制放行 TA 变更(慎用,带外场景)
+# 含 TA 变更的版本无法在线 apply(会被拒);TA 更新走 OOB / 专门流程
 aastar-node-updater status                # 打印当前状态
 ```
 

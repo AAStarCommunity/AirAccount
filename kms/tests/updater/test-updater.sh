@@ -4,7 +4,9 @@
 #   boot recovery / notify-only / TA-only-notify / 缺公钥 / 缺签名 / sha 不符 /
 #   schema 非法 / tar symlink / canary 类型 / security 不被架空 / PIN / 兼容门 / 版本核对。
 # T20-T28 Phase 1(apply CLI + 富通知 + 去重 + telegram hook):
-#   T20 apply 越过 notify-only  T21 apply TA 无 --allow-ta 拒绝  T22 apply --allow-ta 放行
+#   T20 apply 越过 notify-only  T21 apply 含 TA 一律拒绝  T22 --allow-ta 已移除(未知选项)
+#   T34/35 fetch 4xx/网络分流  T36 apply 网络硬失败  T37 creds export 到 hook
+#   T38 apply 锁竞争硬失败  T39 notes 超长 schema 拒
 #   T23 apply 不存在版本拒绝  T24 apply 降级拒绝  T25 apply 低于 floor 拒绝
 #   T26 富通知(版本/severity/notes/应用提示)  T27 去重  T27b severity 升级重推
 #   T28 notify-telegram.sh fail-safe + 发请求
@@ -462,28 +464,29 @@ if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
   [ "$(cur_link "$NR")" = "0.29.0" ] && ok "current 软链→0.29.0" || bad "link=$(cur_link "$NR")"
 else bad "apply 退出非零(应成功)"; fi
 
-echo "== T21 apply 含 TA 变更且无 --allow-ta → 拒绝 =="
+echo "== T21 apply 含 TA 变更 → 一律拒绝(决策 D:TA 在线一键能力级砍掉,无 bypass)=="
 read NR NS < <(new_node t21 0.28.0)
 SHA="$(make_bundle 0.29.0 TA-NEW)"
 REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
   '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:true,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
 write_manifest 21 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
 if run_updater_args "$NR" "$NS" -- apply 0.29.0 >/dev/null 2>&1; then
-  bad "TA 变更无 --allow-ta 却成功(应拒绝)"
+  bad "TA 变更却成功(应拒绝)"
 else
   [ "$(st "$NS" current)" = "0.28.0" ] && ok "TA 变更被拒,current 未变" || bad "current=$(st "$NS" current)"
 fi
 
-echo "== T22 apply <ver> --allow-ta → 显式放行 TA 变更 =="
+echo "== T22 --allow-ta 选项已移除 → apply 传它报未知选项(不再有 TA bypass)=="
 read NR NS < <(new_node t22 0.28.0)
 SHA="$(make_bundle 0.29.0 TA-NEW)"
 REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
   '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:true,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
 write_manifest 22 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
-echo 0 > "$ROOT/health_result"
 if run_updater_args "$NR" "$NS" -- apply 0.29.0 --allow-ta >/dev/null 2>&1; then
-  [ "$(st "$NS" current)" = "0.29.0" ] && ok "--allow-ta 下 TA 变更被应用" || bad "current=$(st "$NS" current)"
-else bad "apply --allow-ta 退出非零(应成功)"; fi
+  bad "--allow-ta 竟被接受并应用了 TA(应报未知选项且不应用)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "--allow-ta 被拒(未知选项),TA 未应用" || bad "current=$(st "$NS" current)"
+fi
 
 echo "== T23 apply 不存在的版本 → 拒绝 =="
 read NR NS < <(new_node t23 0.28.0)
@@ -716,6 +719,53 @@ chmod +x "$ROOT/fetch-mixed.sh"
 run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-mixed.sh" -- apply 0.37.0 >/dev/null 2>&1
 RC=$?
 [ "$RC" != 0 ] && ok "apply 网络失败硬失败(exit=${RC} 非0,不误判成功)" || bad "apply 网络失败却 exit0"
+
+echo "== T37 updater.env 的 TELEGRAM 凭据经 set -a 导出 → 通知 hook(子进程)看得到(pr-daemon #1)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+TELEGRAM_BOT_TOKEN=SEKRIT123
+TELEGRAM_CHAT_ID=999
+ENV
+read NR NS < <(new_node t37 0.28.0)
+SHA="$(make_bundle 0.30.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.30.0.tar.gz" \
+  '[{version:"0.30.0",security:true,severity:"high",notes:"x",auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 37 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# 通知 hook:把它进程环境里看到的 TELEGRAM_BOT_TOKEN 落盘
+cat > "$ROOT/notify-envcheck.sh" <<SH
+#!/usr/bin/env bash
+echo "TOKEN=\${TELEGRAM_BOT_TOKEN:-<unset>}" > "$ROOT/seen-token.log"
+SH
+chmod +x "$ROOT/notify-envcheck.sh"
+: > "$ROOT/seen-token.log"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-envcheck.sh" -- check >/dev/null 2>&1
+grep -q "TOKEN=SEKRIT123" "$ROOT/seen-token.log" && ok "hook 看到 updater.env 的 TELEGRAM_BOT_TOKEN(export 生效)" || bad "hook 未见 token: $(cat "$ROOT/seen-token.log")"
+
+echo "== T38 apply 遇锁竞争(有活实例)→ 硬失败非零,不静默 no-op(pr-daemon #2)=="
+read NR NS < <(new_node t38 0.28.0)
+SHA="$(make_bundle 0.39.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.39.0.tar.gz" \
+  '[{version:"0.39.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 39 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+mkdir -p "$NS/lock"; echo "$$" > "$NS/lock/pid"     # 假装有个活着的实例(测试进程自身 pid)
+run_updater_args "$NR" "$NS" -- apply 0.39.0 >/dev/null 2>&1
+RC=$?
+rm -rf "$NS/lock"
+{ [ "$RC" != 0 ] && [ "$(st "$NS" current)" = "0.28.0" ]; } && ok "apply 锁竞争硬失败(exit=${RC} 非0,current 未变)" || bad "exit=$RC current=$(st "$NS" current)(应非零且未变)"
+
+echo "== T39 schema:notes 超长(>280)→ 拒绝(防超 Telegram 4096 无限重试,pr-daemon #5)=="
+read NR NS < <(new_node t39 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+BIGNOTES="$(printf 'x%.0s' $(seq 1 400))"   # 400 字符
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" --arg n "$BIGNOTES" \
+  '[{version:"0.29.0",security:true,notes:$n,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 40 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater "$NR" "$NS" check >/dev/null 2>&1; then
+  bad "超长 notes 却通过(schema 应拒)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "超长 notes 被 schema 拒" || bad "current=$(st "$NS" current)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""

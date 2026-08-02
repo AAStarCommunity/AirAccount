@@ -151,7 +151,7 @@ TA    : 否（纯 CA，可在线应用）
 aastar-node-updater apply 0.30.0
   1. flock;读 manifest（同 check:拉取 + minisign 验签 + schema + 新鲜度 + 防回滚）
   2. 断言 0.30.0 在 manifest 且 version>current 且 >=rollback_floor 且 min_version 满足
-  3. 若 ta_changed=true 且未显式 --allow-ta → 拒绝(“TA 变更请走 OOB/专门流程”)
+  3. 若 ta_changed=true → **一律拒绝**(决策 D:TA 在线一键=能力级砍掉,无 bypass;走 OOB/专门流程)
   4. 下载 tarball → sha256==manifest → 可选 tarball minisig → tar 加固
   5. 暂停:systemctl stop kms-api（DVT 同理可选）
   6. crash-safe 落盘 releases/0.30.0 + 原子切 current（复用 apply_version）
@@ -320,7 +320,7 @@ aastar-node-updater apply 0.30.0
 ## 8. 落地顺序（增量，每步可独立测）
 
 1. **通知 MVP**:`notify-telegram.sh` + manifest 增补 `severity/notes/ta_changed` + updater `notify` 文本升级 + 去重。（纯软件，本地 + 板上可测）
-2. **CLI `apply <ver>`**:加子命令 + `--allow-ta` 闸 + 结果回推。（复用 apply_version，风险低）
+2. **CLI `apply <ver>`**:加子命令 + 结果回推;含 TA 变更一律拒绝(决策 D,无 bypass)。（复用 apply_version，风险低）
 3. **签名 manifest 上线**:CI 生成 `stable.json` + 签名（`sign-channel.sh`），发到 repo；节点 `updater.env` 配 pin 公钥。
 4. **板子版本化目录迁移**:把现在 flat 的 `/opt/airaccount/kms-api-server` 迁到 `releases/<ver>/ + current 软链 + kms-api ExecStart drop-in`（auto-update-design §9 未完项，是 Web/CLI apply 在真机生效的前提）。
 5. **Web 管理台**（Phase 2）:独立 `airaccount-admin`(Rust/axum) + 5 屏 + **root helper**(非 sudoers) + Telegram 二次确认 + 启动自检拒公网 + Host/Origin/CORS。CLI 永久保留兜底。

@@ -38,6 +38,10 @@ case "$LEVEL" in
   *)     emoji="🔔" ;;
 esac
 TEXT="${emoji} [AAStar 节点更新] ${MSG}"
+# Telegram sendMessage 硬上限 4096 字符;超长会被 API 拒(→ 本 hook 非零 → updater 不写
+# 去重 key → 每个 timer 周期永远重试失败,pr-daemon #5)。这里防御性截断,保证能送达。
+# (上游 manifest schema 也已限 notes≤280,双保险。)
+if [ "${#TEXT}" -gt 3900 ]; then TEXT="${TEXT:0:3900}…(截断)"; fi
 
 # URL(含 token)走 --config stdin,不进 argv;data 在 argv(多行文本 argv 安全)。
 if printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" \

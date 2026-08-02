@@ -135,11 +135,16 @@ acquire_lock() {
     local oldpid=""
     [ -f "$LOCK_DIR/pid" ] && oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
     if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+      # 锁竞争:check(定时器)静默退 0 等下轮;apply(LOCK_FATAL=1,运维显式)必须硬失败
+      # —— 否则并发的 check 会让手动 apply 静默 no-op 却看似成功(pr-daemon #2)。
+      if [ "${LOCK_FATAL:-0}" = 1 ]; then die "另一个 updater 实例在跑(pid=$oldpid)—— apply 中止(未做任何更改)"; fi
       warn "另一个 updater 实例在跑(pid=$oldpid),退出"; exit 0
     fi
     warn "清理 stale lock(pid=${oldpid:-?} 已不在)"
     rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null || { warn "抢锁失败,退出"; exit 0; }
+    mkdir "$LOCK_DIR" 2>/dev/null || {
+      [ "${LOCK_FATAL:-0}" = 1 ] && die "抢锁失败(竞争)—— apply 中止(未做任何更改)"
+      warn "抢锁失败,退出"; exit 0; }
   fi
   echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
   trap cleanup EXIT
@@ -354,7 +359,7 @@ load_manifest() {
           and ((.auto_apply_allowed//false)|type=="boolean")
           and ((.ta_changed//false)|type=="boolean")
           and ((.severity//"none")|type=="string" and test("^(none|low|medium|high|critical)$"))
-          and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not)))
+          and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=280)))
           and ((.min_version//"0.0.0")|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
           and (.requires_ta_version==null or (.requires_ta_version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
           and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))))
@@ -424,7 +429,7 @@ download_verify_apply() { # <ver> <tarball> <sha>
       if [ -z "$cur_ta" ]; then
         warn "无基线 TA 可比对(flat/首装),跳过 TA 内容门 —— TA 版本化落地后强制(设计 §9)"
       elif [ "$bundle_ta" != "$cur_ta" ]; then
-        die "bundle 实际 TA 集合与当前不一致(增/删/改;但未授权 TA 变更)—— 拒绝。TA 更新走 OOB / --allow-ta。"
+        die "bundle 实际 TA 集合与当前不一致(增/删/改)—— 拒绝(apply 不放行 TA,决策 D)。TA 更新走 OOB / 专门流程。"
       fi
     fi
   fi
@@ -485,11 +490,12 @@ cmd_check() {
   need jq; need curl
   acquire_lock
   state_init
-  # 载入策略 env
+  # 载入策略 env。set -a:sourced 的 TELEGRAM_* 等自动 export,通知 hook(子进程)才看得到
+  # (pr-daemon #1:否则 Phase-1 通知永远静默 no-op)。
   AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
   TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
   # shellcheck disable=SC1090
-  [ -f "$AU_ENV_FILE" ] && . "$AU_ENV_FILE"
+  [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
 
   # TA 内容门授权位(codex High-2):check 只在 TA_AUTO_UPDATE=on 时才允许实际 TA 变更;
   # 否则 download_verify_apply 若发现 bundle 夹带变化的 TA(manifest 误标)会拒绝。
@@ -550,18 +556,23 @@ EOF
 # version 只作「在已验签 manifest 里选哪条」的索引;hash/URL 全取自已验签数据。
 cmd_apply() {
   local want="${1:-}"
-  [ -n "$want" ] || die "用法: aastar-node-updater apply <version> [--allow-ta]"
+  [ -n "$want" ] || die "用法: aastar-node-updater apply <version>"
   ver_valid "$want" || die "版本号非法(需 x.y.z): $want"
   need jq; need curl
+  STRICT_FETCH=1                      # 显式 apply:下载失败/锁竞争必须硬失败(codex/pr-daemon)
+  LOCK_FATAL=1                        # 锁竞争 → die,不静默 no-op(pr-daemon #2)
+  TA_OK=0                             # apply 永不放行 TA 变更(决策 D:TA 在线一键=能力级砍掉,
+                                      # pr-daemon #3/#4)。TA 内容门恒强制;含 TA 变更一律拒。
   acquire_lock
   state_init
   AUTO_UPDATE="notify-only"; CHANNEL="stable"; UPDATE_POLICY="security"
   TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
+  # set -a:sourced 的 TELEGRAM_* 等自动 export,通知 hook(子进程)才看得到(pr-daemon #1)。
+  # 放在 TA_OK/LOCK_FATAL 之后,防 updater.env 悄悄改写这些安全控制位(pr-daemon #3)。
   # shellcheck disable=SC1090
-  [ -f "$AU_ENV_FILE" ] && . "$AU_ENV_FILE"
+  [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
+  TA_OK=0; STRICT_FETCH=1; LOCK_FATAL=1   # 再钉一次:updater.env 不得覆盖 apply 的安全姿态
 
-  STRICT_FETCH=1                      # 显式 apply:下载失败必须硬失败(codex High-1)
-  TA_OK=$([ "${ALLOW_TA:-0}" = 1 ] && echo 1 || echo 0)   # TA 内容门授权位(codex High-2)
   WORK="$(mktemp -d)"
   load_manifest
 
@@ -581,8 +592,8 @@ EOF
   ver_gt "$r_ver" "$CUR"   || die "$want 不高于当前 $CUR —— 拒绝(降级请走 OOB break-glass)"
   ver_ge "$r_ver" "$FLOOR" || die "$want 低于 rollback_floor $FLOOR(有已知漏洞)—— 拒绝"
   ver_ge "$CUR" "$r_min"   || die "当前 $CUR 不满足 $want 要求的 min_version $r_min —— 需先升级中间版本"
-  if [ "$r_ta" = "true" ] && [ "${ALLOW_TA:-0}" != "1" ]; then
-    die "$want 含 TA 变更(ta_changed=true)。TA 更新不走在线一键(RSA-4096 签名 + secure storage 迁移),请走 OOB/专门流程。确需强制:apply $want --allow-ta。"
+  if [ "$r_ta" = "true" ]; then
+    die "$want 含 TA 变更(ta_changed=true)。TA 更新不走在线一键(RSA-4096 签名 + secure storage 迁移;apply_version 也不装 TA 到 OP-TEE 路径,会 CA/TA 不一致)——请走 OOB / 专门流程(决策 D)。"
   fi
   # 兼容门:要求的 TA 比当前新且本次不换 TA → 无法满足
   # (C4 待修:目前用 CA 版本 CUR 近似 TA 版本;TA 版本化落地后改读真实 TA 版本)
@@ -626,13 +637,11 @@ decide_action() { # decide_action cur cand security auto_apply ta_changed canary
 
 main() {
   local cmd="${1:-check}"; shift 2>/dev/null || true
-  # 解析选项(目前仅 apply 用 --allow-ta),位置参数收集到 POS[]
-  ALLOW_TA="${ALLOW_TA:-0}"
+  # 位置参数收集到 POS[];无选项(--allow-ta 已移除,决策 D:apply 不放行 TA)。
   local POS=()
   local a
   for a in "$@"; do
     case "$a" in
-      --allow-ta) ALLOW_TA=1 ;;
       --*) die "未知选项 $a" ;;
       *) POS+=("$a") ;;
     esac
@@ -640,14 +649,12 @@ main() {
   local npos="${#POS[@]}"
   case "$cmd" in
     check|recovery|status)
-      # 这些命令不接受位置参数或 --allow-ta(codex Low-2:严格校验,避免误用被静默吞掉)
       [ "$npos" -eq 0 ] || die "$cmd 不接受额外参数:${POS[*]}"
-      [ "$ALLOW_TA" = 1 ] && die "--allow-ta 仅用于 apply"
       "cmd_$cmd" ;;
     apply)
-      [ "$npos" -eq 1 ] || die "用法: $0 apply <ver> [--allow-ta](恰好一个版本参数)"
+      [ "$npos" -eq 1 ] || die "用法: $0 apply <ver>(恰好一个版本参数)"
       cmd_apply "${POS[0]}" ;;
-    *) die "用法: $0 {check | apply <ver> [--allow-ta] | recovery | status}" ;;
+    *) die "用法: $0 {check | apply <ver> | recovery | status}" ;;
   esac
 }
 main "$@"
