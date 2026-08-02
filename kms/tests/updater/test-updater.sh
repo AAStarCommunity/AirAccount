@@ -425,6 +425,44 @@ env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="
 [ "$(st "$NS" current)" = "0.28.0" ] && ok "版本核对失败→回滚(current 未变)" || bad "current=$(st "$NS" current)"
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T20 manifest 端点 HTTP 4xx(curl 22)→ 告警拒绝(不静默)=="
+read NR NS < <(new_node t20 0.28.0)
+printf '#!/usr/bin/env bash\nexit 22\n' > "$ROOT/fetch-4xx.sh"; chmod +x "$ROOT/fetch-4xx.sh"
+if env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+      AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
+      AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+      AU_FETCH_CMD="$ROOT/fetch-4xx.sh" bash "$UPDATER" check >/dev/null 2>&1; then
+  bad "HTTP 4xx 却成功了(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "4xx 拒绝,current 未变" || bad "current=$(st "$NS" current)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T20b manifest 网络失败(curl 7)→ 静默退出(exit 0),不告警 =="
+read NR NS < <(new_node t20b 0.28.0)
+printf '#!/usr/bin/env bash\nexit 7\n' > "$ROOT/fetch-net.sh"; chmod +x "$ROOT/fetch-net.sh"
+env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+    AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
+    AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+    AU_FETCH_CMD="$ROOT/fetch-net.sh" bash "$UPDATER" check >/dev/null 2>&1
+RC=$?
+[ "$RC" = 0 ] && ok "网络失败静默退出(exit 0)" || bad "exit=$RC(应 0)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T21 requires_ta_version 非 semver → schema fail-closed =="
+read NR NS < <(new_node t21 0.28.0)
+S="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:true,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"latest",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 21 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+if run_updater "$NR" "$NS" check >/dev/null 2>&1; then
+  bad "非法 requires_ta_version 却成功(应拒绝)"
+else
+  [ "$(st "$NS" current)" = "0.28.0" ] && ok "非法 requires_ta_version,current 未变" || bad "current=$(st "$NS" current)"
+  [ "$(st "$NS" seen_metadata_version)" = "0" ] && ok "seen 未污染(仍 0)" || bad "seen=$(st "$NS" seen_metadata_version)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
