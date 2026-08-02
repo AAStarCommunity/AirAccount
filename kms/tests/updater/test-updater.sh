@@ -20,6 +20,10 @@ UUID="4319f351-0b24-4097-b659-80ee4f824cdd"
 command -v minisign >/dev/null || { echo "SKIP: 需 minisign(brew install minisign)"; exit 0; }
 command -v jq >/dev/null || { echo "SKIP: 需 jq"; exit 0; }
 
+# 强制走 symlink CAS 回退路径,让锁相关用例在任意 host(含带 flock 的 Linux CI)结果一致。
+# 生产走 flock(内核原语,无需在此单测);flock 路径由 T57 在有 flock 时单独 smoke。
+export AU_LOCK_NO_FLOCK=1
+
 PASS=0; FAIL=0
 ok()   { echo -e "  \033[0;32mPASS\033[0m $*"; PASS=$((PASS+1)); }
 bad()  { echo -e "  \033[0;31mFAIL\033[0m $*"; FAIL=$((FAIL+1)); }
@@ -1004,8 +1008,9 @@ echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
 ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
 jq -n '{seen_metadata_version:6,current:"0.28.0",previous:"0.28.0",pending:"0.29.0"}' > "$NS/state.json"
 ln -s "$$" "$NS/lock"    # 活锁(测试进程 pid),模拟有 check/apply 正在跑
-run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1; RC=$?
 rm -f "$NS/lock"
+[ "$RC" != 0 ] && ok "recovery 锁竞争硬失败(exit=${RC} 非0,systemd 可见;不静默跳过回滚,七轮 #1)" || bad "recovery 竞争却 exit0(静默跳过回滚)"
 [ "$(cur_link "$NR")" = "0.29.0" ] && ok "活实例持锁时 recovery 未改 current(先持锁,竞争则让位)" || bad "current=$(cur_link "$NR")(被 lock-free 改了)"
 [ "$(st "$NS" pending)" = "0.29.0" ] && ok "pending 未被 recovery 改动(让位)" || bad "pending 被改=$(st "$NS" pending)"
 
@@ -1026,6 +1031,24 @@ run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/
 [ "$(st "$NS" pending)" = "0.29.0" ] && ok "第一次 boot 不可恢复:pending 未清(留作后续重报)" || bad "pending 被清=$(st "$NS" pending)"
 run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1; RC2=$?
 { [ "$RC1" != 0 ] && [ "$RC2" != 0 ]; } && ok "第二次 boot 仍 exit 非0 重报(不掩盖持久失败)" || bad "RC1=$RC1 RC2=$RC2"
+
+echo "== T57 生产路径 flock:有 flock 时用 flock 且能真互斥(pr-daemon 七轮 #3 定论)=="
+if command -v flock >/dev/null 2>&1; then
+  read NR NS < <(new_node t57 0.28.0)
+  write_manifest 57 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+  # 不设 AU_LOCK_NO_FLOCK → 走 flock。先占住 flock,再另一 apply 应硬失败。
+  ( exec 9>"$NS/lock.flock"; flock -n 9 && sleep 3 ) &   # 持 flock 3s
+  HOLDER=$!; sleep 0.5
+  env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+      AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=t \
+      AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+      bash "$UPDATER" apply 0.99.0 >/dev/null 2>&1; RC=$?
+  wait "$HOLDER" 2>/dev/null
+  [ "$RC" != 0 ] && ok "flock 被占时 apply 硬失败(真互斥)" || bad "flock 未互斥 apply exit0"
+  [ -f "$NS/lock.flock" ] && ok "走了 flock 路径(lock.flock 存在)" || bad "未走 flock"
+else
+  ok "SKIP flock 测试(本 host 无 flock,生产 Linux 有)"; ok "SKIP flock 路径存在性(同上)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
