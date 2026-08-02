@@ -33,7 +33,7 @@ AU_NOTIFY_CMD="${AU_NOTIFY_CMD:-}"          # 空 → logger/echo
 AU_FETCH_CMD="${AU_FETCH_CMD:-}"            # 空 → curl(支持 file://,便于测试)
 
 STATE_FILE="$AU_STATE_DIR/state.json"
-LOCK_DIR="$AU_STATE_DIR/lock"
+LOCK_LINK="$AU_STATE_DIR/lock"   # 互斥锁 = 原子 symlink,target 为持有者 pid(见 acquire_lock)
 
 # ── 日志 / 通知 ──────────────────────────────────────────────────────
 log()  { echo -e "\033[0;34m[updater]\033[0m $*"; }
@@ -78,12 +78,15 @@ queue_notify() { # <level> <msg>
   mkdir -p "$AU_STATE_DIR" 2>/dev/null || true
   { printf '%s\n' "$1"; printf '%s' "$2"; } > "$AU_STATE_DIR/pending-notify.tmp" 2>/dev/null \
     && mv -f "$AU_STATE_DIR/pending-notify.tmp" "$AU_STATE_DIR/pending-notify" 2>/dev/null || true
+  sync 2>/dev/null || true   # 这正是掉电恢复路径,紧接着可能再掉电 → fsync 保证告警落盘(pr-daemon 四轮 Low)
 }
 flush_pending_notify() {
   local f="$AU_STATE_DIR/pending-notify"
   [ -f "$f" ] || return 0
   local lvl msg
-  lvl="$(head -1 "$f" 2>/dev/null || echo warn)"
+  lvl="$(head -1 "$f" 2>/dev/null | tr -d '[:space:]')"
+  # level 白名单:空/坏首行不能直接喂给通知 hook(pr-daemon 四轮 Low)。
+  case "$lvl" in info|warn|error) : ;; *) lvl=warn ;; esac
   msg="$(tail -n +2 "$f" 2>/dev/null || true)"
   if notify_send "$lvl" "$msg"; then rm -f "$f" 2>/dev/null || true; log "已投递挂起告警"; else
     warn "挂起告警仍投递失败,下次 check 再试"; fi
@@ -98,6 +101,8 @@ load_policy_env() {
   TA_AUTO_UPDATE="off"; PIN_VERSION=""; KEEP_RELEASES=3
   # shellcheck disable=SC1090
   [ -f "$AU_ENV_FILE" ] && { set -a; . "$AU_ENV_FILE"; set +a; }
+  return 0   # 关键(pr-daemon 四轮 #1):无 env 文件时 `[ -f ]&&…` 返回 1,而本函数是 main 第一句,
+             # set -e 下会让所有子命令(含 status/recovery)在跑之前静默 exit 1。显式 return 0。
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺依赖 $1"; }
@@ -116,7 +121,9 @@ sha256_of() {
 # 不在 release 树、不随 rollback 变)。拿不到 → 回空;调用方一律 fail-closed。
 ta_version() {
   if [ -n "${AU_TA_VERSION:-}" ]; then echo "${AU_TA_VERSION#v}" | tr -d '[:space:]'; return; fi
-  local f="${AU_TA_VERSION_FILE:-$AU_STATE_DIR/ta-version}"
+  # 固定读状态目录(不给 AU_TA_VERSION_FILE 覆盖 —— 否则 updater.env 被 set -a source,
+  # 运维可把它指回 $AU_ROOT/ 下,重新引入 release 树耦合,pr-daemon 四轮 Low)。
+  local f="$AU_STATE_DIR/ta-version"
   [ -r "$f" ] && { head -1 "$f" 2>/dev/null | tr -d '[:space:]v'; return; }
   echo ""
 }
@@ -165,16 +172,15 @@ EOF
   [ "${a1:-0}" = "${b1:-0}" ] && ver_gt "$2" "$1"
 }
 
-# ── 原子锁(mkdir,全平台)+ 统一 EXIT 清理 ─────────────────────────
+# ── 互斥锁:原子 symlink(全平台,无 flock 依赖)+ 统一 EXIT 清理 ────────
+# 锁 = 一个 symlink,target 就是持有者 pid。`ln -s "$$" LOCK` 是**单个原子 syscall**
+# 且 name 已存在即失败 —— 没有「创建后再单独写 pid」的两步,故没有 mkdir/pid 之间的
+# TOCTOU 窗口,并发也绝不会两个进程都以为持锁(pr-daemon 三轮 #4 复现的 race)。
+# macOS 无 flock(1),故不用 flock;symlink 原子性 POSIX 保证,mac/Linux 一致。
 WORK=""
 cleanup() {
-  # 释放锁:LOCK_DIR 里有 pid 文件(非空),`rmdir` 会失败 → 之前被 `|| true` 掩盖 →
-  # 锁永不释放 → 下次 mkdir 失败,若旧 pid 被复用则误判「有实例在跑」→ check 永久
-  # 静默 no-op / apply 空闲板误报 contention(pr-daemon High,已复现)。改 `rm -rf`。
-  # 只删自己持有的锁(pid==$$;trap 在 acquire_lock 成功后才设,故运行到这里必是我们持有)。
-  if [ -f "$LOCK_DIR/pid" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-  fi
+  # 只删自己持有的锁(symlink target==$$);trap 在成功持锁后才设,故到这里必是我们持有。
+  [ "$(readlink "$LOCK_LINK" 2>/dev/null || true)" = "$$" ] && rm -f "$LOCK_LINK" 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   return 0
 }
@@ -185,28 +191,17 @@ lock_contended() { # <msg>
 }
 acquire_lock() {
   mkdir -p "$AU_STATE_DIR"
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # dir 已存在。看 PID 是否还活着。
-    local oldpid=""
-    [ -f "$LOCK_DIR/pid" ] && oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  local tries=0 oldpid
+  while ! ln -s "$$" "$LOCK_LINK" 2>/dev/null; do   # 原子:name 已存在即失败
+    oldpid="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
     if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
-      lock_contended "另一个 updater 实例在跑(pid=$oldpid)"
+      lock_contended "另一个 updater 实例在跑(pid=$oldpid)"   # 持有者活着 → 竞争(绝不清活锁)
     fi
-    # pid 空(正被别的进程获取、pid 还没写 —— 即 mkdir 与写 pid 之间的 TOCTOU 窗口)或已死。
-    # **不能** rm -rf 后重建:那会抢走正在获取锁的进程的目录,两个进程都以为持锁(pr-daemon #4,
-    # 已复现)。改用**原子 mv 抢占**:同一目录只有一个 racer 能 rename 成功,才算真正接管。
-    if mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
-      rm -rf "$LOCK_DIR.stale.$$" 2>/dev/null || true
-      mkdir "$LOCK_DIR" 2>/dev/null || lock_contended "抢锁失败(竞争)"
-    else
-      # mv 失败 = 别的 racer 已抢占/正持有 → 视为竞争。
-      lock_contended "锁竞争(有实例正获取/持有)"
-    fi
-  fi
-  echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
-  # 写后再读确认锁仍是我们的:若在 mkdir 与写 pid 之间被别的 racer mv 抢走并重建,这里会读到
-  # 对方的 pid(或空)→ 退避,绝不两个进程都以为持锁(pr-daemon #4 的收口确认)。
-  [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ] || lock_contended "锁被并发抢占"
+    # 持有者已死(或链接损坏)→ 清掉重试。ln 原子:并发 reclaim 也只有一个 ln 成功,
+    # 落败者下轮看到活锁 → contended。故不会两个进程都持锁。
+    rm -f "$LOCK_LINK" 2>/dev/null || true
+    tries=$((tries+1)); [ "$tries" -ge 5 ] && lock_contended "抢锁反复失败(竞争?)"
+  done
   trap cleanup EXIT
 }
 
@@ -357,12 +352,18 @@ apply_version() { # apply_version <ver> <bundle_dir>
 rollback() { # rollback <target_ver>
   local target="$1"
   if [ -z "$target" ] || [ ! -d "$AU_ROOT/releases/$target" ]; then
-    if [ -L "$AU_ROOT/last-good" ]; then
+    # last-good 必须是「指向真实存在目录」的软链 —— 只判 -L(是软链)不够:若 last-good
+    # 悬空(目标 release 已被删,掉电+FS 损坏时正会如此),会把 current 指向不存在的版本、
+    # 谎报回滚成功而板上零个有效 release(pr-daemon 四轮 #4,已复现)。加 -d(带尾 / 强制解析软链)。
+    if [ -L "$AU_ROOT/last-good" ] && [ -d "$AU_ROOT/last-good/" ]; then
       swap_symlink "$AU_ROOT/current" "$(readlink "$AU_ROOT/last-good")"
       target="$(basename "$(readlink "$AU_ROOT/last-good")")"
     else
       state_set pending ""
-      notify error "回滚失败:无可用 last-good(node=$AU_NODE_ID)—— 转 OOB 人工救板"
+      # 板子实质不可恢复 —— 这是全系统最该送达的告警。立即试,失败则入队(recovery 无网窗口),
+      # 下次 check flush(pr-daemon 四轮 #3:原来 notify||true fire-and-forget,此告警永久丢失)。
+      local emsg="回滚失败:无可用 last-good(node=$AU_NODE_ID)—— 板子不可恢复,转 OOB 人工救板"
+      notify_send error "$emsg" || queue_notify error "$emsg"
       return 1
     fi
   else
@@ -376,8 +377,8 @@ rollback() { # rollback <target_ver>
 # ── boot recovery:pending 未提交 → 回滚 ────────────────────────────
 cmd_recovery() {
   # env 已由 main 最先 source(含 Telegram 凭据)。
-  # boot 早期单线程:清 stale lock,别因它阻塞恢复(最需要恢复的正是掉电场景)。
-  rm -rf "$LOCK_DIR" 2>/dev/null || true
+  # boot 早期单线程:清可能残留的 stale 锁软链(崩溃进程的软链不会自动消失),别阻塞恢复。
+  rm -f "$LOCK_LINK" 2>/dev/null || true
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。
   # 只切回 symlink + state,kms-api 由正常 boot 顺序启动(读到已回滚的 current)。
   AU_RESTART_CMD="true"
@@ -387,11 +388,13 @@ cmd_recovery() {
   warn "检测到未提交更新 pending=$pending(疑似掉电中断)→ 回滚"
   # 回滚目标 = state.current:它在提交前始终是「上次已提交的版本」,才是正确的已知良好版。
   local target; target="$(state_get current)"
-  rollback "$target"
-  # 这条是全系统最重要的告警,但 recovery unit 跑在 network-online 之前 → 立即发大概率失败。
-  # 立即试一次(网络若已起就成),失败则入队,下次 check(网络已起)flush 投递(pr-daemon 三轮 #3)。
-  local rmsg="boot recovery:掉电中断已回滚到 $target(node=$AU_NODE_ID)"
-  notify_send warn "$rmsg" || { queue_notify warn "$rmsg"; warn "告警已入队,待下次 check 投递"; }
+  # `|| true`:rollback 走「无 last-good 不可恢复」分支时 return 1,而它已自行发/入队了那条
+  # 更紧急的告警;这里不能因 set -e 提前中断(否则连成功回滚的告警也发不出,pr-daemon 四轮 #3)。
+  if rollback "$target"; then
+    # 这条(回滚成功)也在 recovery 无网窗口 → 立即试一次,失败入队,下次 check flush。
+    local rmsg="boot recovery:掉电中断已回滚到 $target(node=$AU_NODE_ID)"
+    notify_send warn "$rmsg" || { queue_notify warn "$rmsg"; warn "告警已入队,待下次 check 投递"; }
+  fi
 }
 
 # ── status ──────────────────────────────────────────────────────────

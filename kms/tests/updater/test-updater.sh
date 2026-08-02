@@ -748,10 +748,10 @@ SHA="$(make_bundle 0.39.0 TA-0.28.0)"
 REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.39.0.tar.gz" \
   '[{version:"0.39.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
 write_manifest 39 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
-mkdir -p "$NS/lock"; echo "$$" > "$NS/lock/pid"     # 假装有个活着的实例(测试进程自身 pid)
+ln -s "$$" "$NS/lock"     # 锁=symlink→活着的 pid(测试进程自身),模拟有实例在跑
 run_updater_args "$NR" "$NS" -- apply 0.39.0 >/dev/null 2>&1
 RC=$?
-rm -rf "$NS/lock"
+rm -f "$NS/lock"
 { [ "$RC" != 0 ] && [ "$(st "$NS" current)" = "0.28.0" ]; } && ok "apply 锁竞争硬失败(exit=${RC} 非0,current 未变)" || bad "exit=$RC current=$(st "$NS" current)(应非零且未变)"
 
 echo "== T39 schema:notes 超长(>280)→ 拒绝(防超 Telegram 4096 无限重试,pr-daemon #5)=="
@@ -904,17 +904,60 @@ run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-log.sh" -- check >/dev/
 grep -q "boot recovery" "$ROOT/flushed.log" && ok "下次 check flush 投递了挂起告警" || bad "check 未投递挂起告警"
 [ ! -f "$NS/pending-notify" ] && ok "投递成功后队列已清" || bad "队列未清(会重复投递)"
 
-echo "== T47 空锁目录(无 pid,TOCTOU 窗口/遗弃锁)→ 原子 mv 抢占,不死锁(pr-daemon 三轮 #4)=="
+echo "== T47 stale 锁软链(→死 pid,崩溃遗留)→ 自动清理重取,不死锁(pr-daemon 四轮 #2)=="
 cat > "$ROOT/updater.env" <<'ENV'
 AUTO_UPDATE=notify-only
 UPDATE_POLICY=security
 ENV
 read NR NS < <(new_node t47 0.28.0)
 write_manifest 48 "2035-01-01T00:00:00Z" "0.0.0" "[]"
-mkdir -p "$NS/lock"    # 空锁目录:有 dir 无 pid(模拟别的进程在 mkdir 与写 pid 之间,或遗弃锁)
+ln -s 999999 "$NS/lock"   # 锁软链指向一个不存在的 pid(上次进程崩溃/掉电遗留)
 run_updater "$NR" "$NS" check >/dev/null 2>&1
 RC=$?
-{ [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "空锁被 mv 抢占,check 正常跑完且释放锁(不死锁)" || bad "exit=$RC lock残留=$([ -e "$NS/lock" ] && echo yes)"
+{ [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "stale 锁软链被清理重取,check 跑完且释放锁(不死锁)" || bad "exit=$RC lock残留=$([ -e "$NS/lock" ] && echo yes)"
+
+echo "== T48 无 updater.env → 各子命令仍 exit0(load_policy_env return 0,pr-daemon 四轮 #1 回归)=="
+read NR NS < <(new_node t48 0.28.0)
+NOENV="$ROOT/nonexistent-updater.env"; rm -f "$NOENV"
+write_manifest 49 "2035-01-01T00:00:00Z" "0.0.0" "[]"    # 空候选,check 不会 die
+for c in status check recovery; do
+  env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$NOENV" AU_PUBKEY="$ROOT/pub.key" \
+      AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
+      AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+      bash "$UPDATER" "$c" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" = 0 ] && ok "无 env 文件:$c exit 0" || bad "无 env 文件:$c exit=$rc(应 0,不静默 exit1)"
+done
+
+echo "== T49 并发:一实例持锁时,另一 apply 硬失败(真互斥,原子 symlink,pr-daemon 四轮 #2)=="
+read NR NS < <(new_node t49 0.28.0)
+write_manifest 50 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+# 慢 fetch:P1 的 check 在 acquire_lock 之后进 load_manifest 的 fetch 时 sleep,持锁约 2s
+cat > "$ROOT/fetch-slow.sh" <<SH
+#!/usr/bin/env bash
+sleep 2
+cp "\${1#file://}" "\$2"
+SH
+chmod +x "$ROOT/fetch-slow.sh"
+run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-slow.sh" -- check >/dev/null 2>&1 &
+P1=$!
+sleep 0.6                                   # 让 P1 先拿到锁并进入慢 fetch
+run_updater_args "$NR" "$NS" -- apply 0.99.0 >/dev/null 2>&1   # P2:持锁期间抢 → 应硬失败
+RC=$?
+wait "$P1" 2>/dev/null
+[ "$RC" != 0 ] && ok "P1 持锁时 P2 apply 硬失败(exit=${RC} 非0,真互斥)" || bad "P2 apply 竟成功(锁没互斥)"
+
+echo "== T50 悬空 last-good(目标目录不存在)→ 不谎报回滚成功 + 入队不可恢复告警(pr-daemon 四轮 #3/#4)=="
+NR="$ROOT/node-t50"; NS="$ROOT/state-t50"; mkdir -p "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"
+ln -sfn "releases/0.1.0"  "$NR/last-good"    # 悬空:releases/0.1.0 不存在
+jq -n '{seen_metadata_version:6,current:"0.5.0",previous:"0.5.0",pending:"0.29.0"}' > "$NS/state.json"  # current 0.5.0 也无对应目录
+printf '#!/usr/bin/env bash\nexit 3\n' > "$ROOT/notify-fail.sh"; chmod +x "$ROOT/notify-fail.sh"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "current 未被指向悬空 0.1.0(不谎报成功)" || bad "current=$(cur_link "$NR")(误指悬空)"
+[ "$(st "$NS" current)" != "0.1.0" ] && ok "state.current 未记成悬空 0.1.0" || bad "state.current=0.1.0(假成功)"
+{ [ -f "$NS/pending-notify" ] && grep -q "不可恢复\|OOB" "$NS/pending-notify"; } && ok "不可恢复告警已入队(未走 fire-and-forget 丢失)" || bad "不可恢复告警丢失/未入队"
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
