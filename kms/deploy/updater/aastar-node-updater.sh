@@ -69,6 +69,26 @@ notify_send() { # notify_send <level> <msg>
   fi
 }
 
+# ── 持久化告警队列(pr-daemon 三轮 #3)──────────────────────────────
+# boot-recovery unit 跑在 network-online 之前,notify-telegram 一次性 curl 必然失败、
+# 且 notify() 的 `|| true` 吞掉 → 「板子砖了已回滚」这条最重要的告警送不出去。
+# 解法:recovery 立即发一次(网络若已起就成),失败则**入队**;下次 check(定时器,网络已起)
+# 开头 flush 投递。队列文件在状态目录(非 release 树),首行 level 余下正文。
+queue_notify() { # <level> <msg>
+  mkdir -p "$AU_STATE_DIR" 2>/dev/null || true
+  { printf '%s\n' "$1"; printf '%s' "$2"; } > "$AU_STATE_DIR/pending-notify.tmp" 2>/dev/null \
+    && mv -f "$AU_STATE_DIR/pending-notify.tmp" "$AU_STATE_DIR/pending-notify" 2>/dev/null || true
+}
+flush_pending_notify() {
+  local f="$AU_STATE_DIR/pending-notify"
+  [ -f "$f" ] || return 0
+  local lvl msg
+  lvl="$(head -1 "$f" 2>/dev/null || echo warn)"
+  msg="$(tail -n +2 "$f" 2>/dev/null || true)"
+  if notify_send "$lvl" "$msg"; then rm -f "$f" 2>/dev/null || true; log "已投递挂起告警"; else
+    warn "挂起告警仍投递失败,下次 check 再试"; fi
+}
+
 # 载入策略默认 + source updater.env(set -a 导出 TELEGRAM_* 给通知 hook 子进程)。
 # 必须**尽早**调用(每个子命令入口),这样此后任何 die 的告警都能带上 Telegram 凭据送达
 # —— 否则早期失败(缺依赖/锁/损坏)恰恰最该告警,却因 env 还没 source 而静默(pr-daemon #2)。
@@ -88,12 +108,15 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
-# 真实 TA 版本(pr-daemon #3:兼容门不能用 CA 版本近似 = fail-open)。来源优先级:
-#   env AU_TA_VERSION(运维在 updater.env 声明) > $AU_ROOT/current/TA_VERSION 文件(installer/OOB 写)。
-# 拿不到 → 回空;调用方对「有 requires_ta_version 但 TA 版本未知」一律 fail-closed。
+# 真实 TA 版本(兼容门不能用 CA 版本近似 = fail-open)。来源**必须在 release 树之外**
+# (pr-daemon 三轮 #1):releases/<ver>/ 是从内容不可信的 tarball 解出的、且 rollback 会
+# 重指 current —— 若把 TA_VERSION 放那里:①current 一重指就消失 → 又 fail-close;
+# ②CA-only bundle 能自带 TA_VERSION 自证从未刷过的 TA → 重新 fail-open。
+# 故只认:env AU_TA_VERSION(运维声明) > $AU_STATE_DIR/ta-version(installer/OOB 写,状态目录,
+# 不在 release 树、不随 rollback 变)。拿不到 → 回空;调用方一律 fail-closed。
 ta_version() {
-  if [ -n "${AU_TA_VERSION:-}" ]; then echo "${AU_TA_VERSION#v}"; return; fi
-  local f="$AU_ROOT/current/TA_VERSION"
+  if [ -n "${AU_TA_VERSION:-}" ]; then echo "${AU_TA_VERSION#v}" | tr -d '[:space:]'; return; fi
+  local f="${AU_TA_VERSION_FILE:-$AU_STATE_DIR/ta-version}"
   [ -r "$f" ] && { head -1 "$f" 2>/dev/null | tr -d '[:space:]v'; return; }
   echo ""
 }
@@ -155,25 +178,35 @@ cleanup() {
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   return 0
 }
+# 锁竞争统一退出:apply(LOCK_FATAL=1)硬失败;check 静默退 0 等下轮。
+lock_contended() { # <msg>
+  if [ "${LOCK_FATAL:-0}" = 1 ]; then die "$1 —— apply 中止(未做任何更改)"; fi
+  warn "$1,退出"; exit 0
+}
 acquire_lock() {
   mkdir -p "$AU_STATE_DIR"
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # 可能是 stale lock(上次进程被 SIGKILL/掉电,EXIT trap 没跑)。看 PID 是否还活着。
+    # dir 已存在。看 PID 是否还活着。
     local oldpid=""
     [ -f "$LOCK_DIR/pid" ] && oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
     if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
-      # 锁竞争:check(定时器)静默退 0 等下轮;apply(LOCK_FATAL=1,运维显式)必须硬失败
-      # —— 否则并发的 check 会让手动 apply 静默 no-op 却看似成功(pr-daemon #2)。
-      if [ "${LOCK_FATAL:-0}" = 1 ]; then die "另一个 updater 实例在跑(pid=$oldpid)—— apply 中止(未做任何更改)"; fi
-      warn "另一个 updater 实例在跑(pid=$oldpid),退出"; exit 0
+      lock_contended "另一个 updater 实例在跑(pid=$oldpid)"
     fi
-    warn "清理 stale lock(pid=${oldpid:-?} 已不在)"
-    rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null || {
-      [ "${LOCK_FATAL:-0}" = 1 ] && die "抢锁失败(竞争)—— apply 中止(未做任何更改)"
-      warn "抢锁失败,退出"; exit 0; }
+    # pid 空(正被别的进程获取、pid 还没写 —— 即 mkdir 与写 pid 之间的 TOCTOU 窗口)或已死。
+    # **不能** rm -rf 后重建:那会抢走正在获取锁的进程的目录,两个进程都以为持锁(pr-daemon #4,
+    # 已复现)。改用**原子 mv 抢占**:同一目录只有一个 racer 能 rename 成功,才算真正接管。
+    if mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
+      rm -rf "$LOCK_DIR.stale.$$" 2>/dev/null || true
+      mkdir "$LOCK_DIR" 2>/dev/null || lock_contended "抢锁失败(竞争)"
+    else
+      # mv 失败 = 别的 racer 已抢占/正持有 → 视为竞争。
+      lock_contended "锁竞争(有实例正获取/持有)"
+    fi
   fi
   echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+  # 写后再读确认锁仍是我们的:若在 mkdir 与写 pid 之间被别的 racer mv 抢走并重建,这里会读到
+  # 对方的 pid(或空)→ 退避,绝不两个进程都以为持锁(pr-daemon #4 的收口确认)。
+  [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ] || lock_contended "锁被并发抢占"
   trap cleanup EXIT
 }
 
@@ -342,7 +375,7 @@ rollback() { # rollback <target_ver>
 
 # ── boot recovery:pending 未提交 → 回滚 ────────────────────────────
 cmd_recovery() {
-  load_policy_env    # 关键:掉电回滚是最该告警的场景,不 source env 则 Telegram 凭据缺失、告警发不出(pr-daemon #2)
+  # env 已由 main 最先 source(含 Telegram 凭据)。
   # boot 早期单线程:清 stale lock,别因它阻塞恢复(最需要恢复的正是掉电场景)。
   rm -rf "$LOCK_DIR" 2>/dev/null || true
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。
@@ -355,7 +388,10 @@ cmd_recovery() {
   # 回滚目标 = state.current:它在提交前始终是「上次已提交的版本」,才是正确的已知良好版。
   local target; target="$(state_get current)"
   rollback "$target"
-  notify warn "boot recovery:掉电中断已回滚到 $target(node=$AU_NODE_ID)"
+  # 这条是全系统最重要的告警,但 recovery unit 跑在 network-online 之前 → 立即发大概率失败。
+  # 立即试一次(网络若已起就成),失败则入队,下次 check(网络已起)flush 投递(pr-daemon 三轮 #3)。
+  local rmsg="boot recovery:掉电中断已回滚到 $target(node=$AU_NODE_ID)"
+  notify_send warn "$rmsg" || { queue_notify warn "$rmsg"; warn "告警已入队,待下次 check 投递"; }
 }
 
 # ── status ──────────────────────────────────────────────────────────
@@ -519,8 +555,9 @@ TA: $tatag"
 
 # ── check:主流程 ───────────────────────────────────────────────────
 cmd_check() {
-  load_policy_env               # 尽早 source env → 后续任何 die 的告警都能带 Telegram 凭据送达
+  # env 已由 main 最先 source(含 Telegram 凭据)。
   STRICT_FETCH=0                # check=定时器:网络失败静默重试(内部控制位)
+  flush_pending_notify         # 先投递上一轮 recovery 等挂起的告警(网络此时已起,pr-daemon 三轮 #3)
   need jq; need curl
   acquire_lock
   state_init
@@ -583,10 +620,10 @@ EOF
 # version 只作「在已验签 manifest 里选哪条」的索引;hash/URL 全取自已验签数据。
 cmd_apply() {
   local want="${1:-}"
+  # env 已由 main 最先 source(含 Telegram 凭据),故这两个早期 die 的告警也能送达(pr-daemon 三轮 #2)。
   [ -n "$want" ] || die "用法: aastar-node-updater apply <version>"
   ver_valid "$want" || die "版本号非法(需 x.y.z): $want"
-  load_policy_env                    # 尽早 source env(带 Telegram 凭据),再钉安全姿态覆盖它
-  # apply 的安全姿态:放在 source 之后钉死,updater.env 不得覆盖(pr-daemon #3):
+  # apply 的安全姿态:钉死在 main source 之后,updater.env 不得覆盖(pr-daemon #3):
   STRICT_FETCH=1                      # 下载失败必须硬失败(不静默误判成功)
   LOCK_FATAL=1                        # 锁竞争 → die,不静默 no-op(pr-daemon #2)
   TA_OK=0                             # apply 永不放行 TA 变更(决策 D,pr-daemon #3/#4)
@@ -620,7 +657,7 @@ EOF
   if [ -n "$r_reqta" ] && [ "$r_ta" != "true" ]; then
     local cur_ta_ver; cur_ta_ver="$(ta_version)"
     if [ -z "$cur_ta_ver" ] || ! ver_valid "$cur_ta_ver"; then
-      die "$want 要求 TA ≥ $r_reqta,但当前 TA 版本未知(设 AU_TA_VERSION 或 current/TA_VERSION)—— fail-closed 拒绝"
+      die "$want 要求 TA ≥ $r_reqta,但当前 TA 版本未知(设 AU_TA_VERSION 或写 \$AU_STATE_DIR/ta-version)—— fail-closed 拒绝"
     fi
     ver_ge "$cur_ta_ver" "$r_reqta" || die "$want 要求 TA ≥ $r_reqta,当前 TA $cur_ta_ver 不满足 —— 拒绝(需先升级 TA)"
   fi
@@ -664,6 +701,9 @@ decide_action() { # decide_action cur cand security auto_apply ta_changed canary
 }
 
 main() {
+  # 最先 source env(带 Telegram 凭据)—— 这样连 argv 校验/缺参这些最早的 die 告警也能送达
+  # (pr-daemon 三轮 #2:之前 cmd_apply/main 的早期 die 在 source 之前,告警静默)。
+  load_policy_env
   local cmd="${1:-check}"; shift 2>/dev/null || true
   # 位置参数收集到 POS[];无选项(--allow-ta 已移除,决策 D:apply 不放行 TA)。
   local POS=()

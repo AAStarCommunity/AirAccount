@@ -833,6 +833,89 @@ if run_updater_args "$NR" "$NS" -- apply 0.32.0 >/dev/null 2>&1; then
   [ "$(cur_link "$NR")" = "0.32.0" ] && ok "大写 sha256 被接受(归一小写比较)" || bad "link=$(cur_link "$NR")"
 else bad "大写 sha256 被误拒(fail-closed bug)"; fi
 
+echo "== T44 TA 版本源在 release 树之外:current/TA_VERSION 不被采信(pr-daemon 三轮 #1)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t44 0.30.0)
+echo "0.99.0" > "$NR/releases/0.30.0/TA_VERSION"   # 塞进 release 树(旧逻辑会误采信 → fail-open)
+SHA="$(make_bundle 0.33.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.33.0.tar.gz" \
+  '[{version:"0.33.0",security:false,auto_apply_allowed:true,ta_changed:false,requires_ta_version:"0.50.0",min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 44 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# current/TA_VERSION=0.99.0 若被采信会满足 0.50.0 → 放行(fail-open);新逻辑不读它 → fail-closed 拒
+if run_updater_args "$NR" "$NS" -- apply 0.33.0 >/dev/null 2>&1; then
+  bad "current/TA_VERSION 被采信 → fail-open 放行(应忽略并 fail-closed)"
+else
+  [ "$(cur_link "$NR")" = "0.30.0" ] && ok "current/TA_VERSION 被忽略,fail-closed 拒绝(不 fail-open)" || bad "link=$(cur_link "$NR")"
+fi
+# 写状态目录的 ta-version(release 树之外)→ 被采信
+echo "0.50.0" > "$NS/ta-version"
+echo 0 > "$ROOT/health_result"
+if run_updater_args "$NR" "$NS" -- apply 0.33.0 >/dev/null 2>&1; then
+  [ "$(cur_link "$NR")" = "0.33.0" ] && ok "\$AU_STATE_DIR/ta-version(树外)被采信 → 放行" || bad "link=$(cur_link "$NR")"
+else bad "状态目录 ta-version 满足却被拒"; fi
+
+echo "== T45 apply 早期 die(缺版本参数)的告警也带凭据(main 最先 source,pr-daemon 三轮 #2)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+TELEGRAM_BOT_TOKEN=APPLY_TOK
+TELEGRAM_CHAT_ID=1
+ENV
+read NR NS < <(new_node t45 0.28.0)
+cat > "$ROOT/notify-envcheck.sh" <<SH
+#!/usr/bin/env bash
+echo "TOKEN=\${TELEGRAM_BOT_TOKEN:-<unset>}" > "$ROOT/apply-die-token.log"
+SH
+chmod +x "$ROOT/notify-envcheck.sh"
+: > "$ROOT/apply-die-token.log"
+# apply 不给版本 → main 的 npos 校验 die(早于任何 per-command source);main 已最先 source env
+env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+    AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=testnode \
+    AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" \
+    AU_NOTIFY_CMD="$ROOT/notify-envcheck.sh" bash "$UPDATER" apply >/dev/null 2>&1
+grep -q "TOKEN=APPLY_TOK" "$ROOT/apply-die-token.log" && ok "apply 早期 die 的告警 hook 看到凭据" || bad "apply die hook 未见 token: $(cat "$ROOT/apply-die-token.log")"
+
+echo "== T46 recovery 告警入队 + 下次 check flush 投递(pr-daemon 三轮 #3)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+NR="$ROOT/node-t46"; NS="$ROOT/state-t46"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:6,current:"0.28.0",previous:"0.28.0",pending:"0.29.0"}' > "$NS/state.json"
+printf '#!/usr/bin/env bash\nexit 3\n' > "$ROOT/notify-fail.sh"; chmod +x "$ROOT/notify-fail.sh"
+# recovery + 失败通知 → 应入队(网络没起的模拟)
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1
+[ -f "$NS/pending-notify" ] && ok "recovery 告警投递失败 → 已入队 pending-notify" || bad "未入队(告警丢失)"
+grep -q "boot recovery" "$NS/pending-notify" 2>/dev/null && ok "队列内容是掉电回滚告警" || bad "队列内容不对"
+# 下次 check(网络已起,通知成功)→ flush 投递 + 删队列
+cat > "$ROOT/notify-log.sh" <<SH
+#!/usr/bin/env bash
+echo "\$2" >> "$ROOT/flushed.log"
+SH
+chmod +x "$ROOT/notify-log.sh"
+: > "$ROOT/flushed.log"
+# 无更高候选(空 releases)让 check 只做 flush;metadata_version 需 > seen(6)
+write_manifest 47 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-log.sh" -- check >/dev/null 2>&1
+grep -q "boot recovery" "$ROOT/flushed.log" && ok "下次 check flush 投递了挂起告警" || bad "check 未投递挂起告警"
+[ ! -f "$NS/pending-notify" ] && ok "投递成功后队列已清" || bad "队列未清(会重复投递)"
+
+echo "== T47 空锁目录(无 pid,TOCTOU 窗口/遗弃锁)→ 原子 mv 抢占,不死锁(pr-daemon 三轮 #4)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=notify-only
+UPDATE_POLICY=security
+ENV
+read NR NS < <(new_node t47 0.28.0)
+write_manifest 48 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+mkdir -p "$NS/lock"    # 空锁目录:有 dir 无 pid(模拟别的进程在 mkdir 与写 pid 之间,或遗弃锁)
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+RC=$?
+{ [ "$RC" = 0 ] && [ ! -e "$NS/lock" ]; } && ok "空锁被 mv 抢占,check 正常跑完且释放锁(不死锁)" || bad "exit=$RC lock残留=$([ -e "$NS/lock" ] && echo yes)"
+
 # ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL"
