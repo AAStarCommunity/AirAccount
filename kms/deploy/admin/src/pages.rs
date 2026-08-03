@@ -131,20 +131,20 @@ async function askApply(){
  if(v!=='ok')return;const ver=document.getElementById('ver')?.value?.trim();if(!ver)return;
  const {ok,b}=await j('/api/apply',{method:'POST',body:JSON.stringify({version:ver})});
  if(!ok){showLog(b.error||'发起失败');return;}
- await confirm2fa();
+ await confirm2fa(b.challenge_id);
 }
 async function askRollback(){
  const v=await dialog('<h3 style="margin:0 0 6px">回滚</h3><p class="muted">回滚到上一个健康版本?将发送 Telegram 确认码。</p>');
  if(v!=='ok')return;
  const {ok,b}=await j('/api/rollback',{method:'POST',body:JSON.stringify({})});
  if(!ok){showLog(b.error||'发起失败');return;}
- await confirm2fa();
+ await confirm2fa(b.challenge_id);
 }
-async function confirm2fa(){
- const v=await dialog('<h3 style="margin:0 0 6px">Telegram 二次确认</h3><label class="muted">已发确认码到 Telegram,请回填</label><input id="code" inputmode="numeric" placeholder="6 位码" autofocus>');
+async function confirm2fa(cid){
+ const v=await dialog('<h3 style="margin:0 0 6px">Telegram 二次确认</h3><label class="muted">已发确认码到 Telegram,请回填(8 位)</label><input id="code" inputmode="numeric" placeholder="8 位码" autofocus>');
  if(v!=='ok')return;const code=document.getElementById('code')?.value?.trim();if(!code)return;
  showLog('执行中…');
- const {ok,b}=await j('/api/apply/confirm',{method:'POST',body:JSON.stringify({code})});
+ const {ok,b}=await j('/api/apply/confirm',{method:'POST',body:JSON.stringify({challenge_id:cid,code})});
  showLog(b.log||b.error||(ok?'完成':'失败'));loadStatus();
 }
 function showLog(t){const p=document.getElementById('log');p.style.display='block';p.textContent=t;}

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # airaccount-admin-helper —— Web 管理台(非 root)与 updater(需 root 改 /opt/airaccount)之间的
 # **唯一特权边界**。设计:auto-update-web-admin-design.md §5.4 / Codex C1。
 #
@@ -19,6 +19,20 @@ set -euo pipefail
 UPDATER="/opt/airaccount/updater/aastar-node-updater.sh"
 STATE_DIR="/var/lib/airaccount/updater"
 ENV_FILE="/etc/airaccount/updater.env"
+
+# 部署完整性自检(tripwire):自身与将要 exec 的 updater 必须 root 拥有且 group/other 不可写,
+# 否则等于把 root 交给了能写这些文件的用户 —— 直接拒绝,别执行。
+assert_secure() {  # assert_secure <path>
+  local f="$1"
+  [ -e "$f" ] || { echo "helper: 缺文件 $f" >&2; exit 3; }
+  local owner; owner="$(stat -c '%u' "$f" 2>/dev/null)" || { echo "helper: stat 失败 $f" >&2; exit 3; }
+  [ "$owner" = "0" ] || { echo "helper: $f 非 root 拥有(uid=$owner),拒绝" >&2; exit 3; }
+  if find "$f" -maxdepth 0 -perm /022 -print -quit 2>/dev/null | grep -q .; then
+    echo "helper: $f 可被 group/other 写,拒绝(修 chmod go-w)" >&2; exit 3
+  fi
+}
+assert_secure "$0"
+assert_secure "$UPDATER"
 
 verb="${1:-}"; shift || true
 

@@ -51,9 +51,11 @@ cat > /etc/airaccount/admin.env <<'EOF'
 TELEGRAM_BOT_TOKEN=123456:abc...
 TELEGRAM_CHAT_ID=-100...
 AU_NODE_ID=mx93b
-# 默认 127.0.0.1:8788。要经 Tailscale 访问再放开下面两行:
+# 默认 127.0.0.1:8788。要经 Tailscale 访问再放开下面三行:
 # ADMIN_BIND_TAILSCALE=1
 # ADMIN_BIND_HOST=100.x.y.z
+# 若用 MagicDNS 名字访问(而非裸 100.x IP),把该 FQDN 加进 Host 白名单(逗号分隔可多个):
+# ADMIN_ALLOWED_HOSTS=mx93b.tailnet-xxxx.ts.net
 EOF
 chmod 0640 /etc/airaccount/admin.env; chown root:airaccount-admin /etc/airaccount/admin.env
 
@@ -77,9 +79,9 @@ systemctl daemon-reload && systemctl enable --now airaccount-admin
 | 层 | 机制 |
 |---|---|
 | 网络 | 仅回环/Tailscale;启动扫隧道配置,发现暴露即拒启 |
-| 认证 | argon2id 密码 → 会话 cookie(HttpOnly/SameSite=Strict) |
-| 写操作 | 会话 + CSRF + Origin/Host 精确校验 |
-| 高危动作 | apply/rollback 需 Telegram 一次性码二次确认 |
+| 认证 | argon2id 密码 → 会话 cookie(HttpOnly/SameSite=Strict);过期会话自动清理 |
+| 写操作 | 会话 + CSRF + Origin/Host **精确**白名单(非前缀,防 DNS rebinding)+ 16KiB body 上限 |
+| 高危动作 | apply/rollback 需 Telegram 8 位一次性码二次确认(绑 challenge_id,5 次错即作废,投递失败 fail-closed) |
 | 提权 | 非 root;仅经 helper(env -i + argv 白名单)触达 updater |
 | TA 变更 | 在线一键拒绝,需人工现场 |
 | 完整性 | updater 全程 minisign 验签 + sha256 + 健康门 + 自动回滚 |

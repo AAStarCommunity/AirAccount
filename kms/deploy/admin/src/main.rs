@@ -36,6 +36,11 @@ struct Config {
     session_ttl: Duration,
     twofa_ttl: Duration,
     allow_tailscale: bool,
+    allowed_hosts: Vec<String>, // 精确 Host/Origin authority 白名单(小写)
+    max_body: u64,              // 请求体上限(字节),防内存 DoS
+    twofa_max_attempts: u32,    // 每个 2FA 挑战允许的错误次数
+    #[cfg(test)]
+    telegram_override: Option<bool>, // 仅测试:短路 Telegram 投递结果,避免真打 API / 全局 env 竞态
 }
 
 impl Config {
@@ -43,6 +48,8 @@ impl Config {
         let host = std::env::var("ADMIN_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".into());
         let port: u16 = std::env::var("ADMIN_BIND_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8788);
         let ip: IpAddr = host.parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
+        let allow_tailscale = std::env::var("ADMIN_BIND_TAILSCALE").ok().as_deref() == Some("1");
+        let extra = std::env::var("ADMIN_ALLOWED_HOSTS").unwrap_or_default();
         Config {
             bind: SocketAddr::new(ip, port),
             admin_hash_file: env_or("ADMIN_HASH_FILE", "/etc/airaccount/admin.hash"),
@@ -50,9 +57,23 @@ impl Config {
             node_id: std::env::var("AU_NODE_ID").unwrap_or_else(|_| hostname()),
             session_ttl: Duration::from_secs(1800), // 30 min
             twofa_ttl: Duration::from_secs(300),     // 5 min
-            allow_tailscale: std::env::var("ADMIN_BIND_TAILSCALE").ok().as_deref() == Some("1"),
+            allow_tailscale,
+            allowed_hosts: security::build_allowed_hosts(port, &ip, allow_tailscale, &extra),
+            max_body: 16 * 1024, // 16 KiB:登录/apply body 都极小
+            twofa_max_attempts: 5,
+            #[cfg(test)]
+            telegram_override: None,
         }
     }
+}
+
+/// 投递 Telegram(生产走 helper::telegram;测试可用 cfg.telegram_override 短路,避免真打 API)。
+async fn deliver_telegram(cfg: &Config, msg: &str) -> bool {
+    #[cfg(test)]
+    if let Some(b) = cfg.telegram_override { return b; }
+    #[cfg(not(test))]
+    let _ = cfg;
+    helper::telegram(msg).await
 }
 
 fn env_or(k: &str, d: &str) -> String { std::env::var(k).unwrap_or_else(|_| d.into()) }
@@ -67,7 +88,13 @@ fn hostname() -> String {
 #[derive(Clone)]
 struct Session { expires: Instant }
 #[derive(Clone)]
-struct TwoFa { code: String, action: PendingAction, expires: Instant }
+struct TwoFa {
+    id: String,               // 挑战 id:confirm 必须回带,防同会话内被静默改换动作
+    code: String,             // 一次性数字码(Telegram OOB)
+    action: PendingAction,
+    expires: Instant,
+    attempts_left: u32,       // 剩余错误次数,归零即作废(防本机暴力)
+}
 #[derive(Clone)]
 enum PendingAction { Apply(String), Rollback }
 
@@ -76,6 +103,15 @@ struct AppState {
     sessions: HashMap<String, Session>, // token -> Session
     twofa: HashMap<String, TwoFa>,      // session token -> pending 2FA
     csrf: HashMap<String, String>,      // session token -> csrf token
+}
+impl AppState {
+    /// 清掉过期会话,并连带清掉其 csrf / 2FA(否则永不回访的会话会内存泄漏)。
+    fn purge(&mut self, now: Instant) {
+        self.sessions.retain(|_, s| s.expires > now);
+        let live: std::collections::HashSet<String> = self.sessions.keys().cloned().collect();
+        self.csrf.retain(|k, _| live.contains(k));
+        self.twofa.retain(|k, t| t.expires > now && live.contains(k));
+    }
 }
 type Shared = Arc<Mutex<AppState>>;
 
@@ -115,6 +151,9 @@ fn routes(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Err
     // 供 auth()/csrf_guard() 这类接收 `Shared` 值(而非过滤器)的辅助函数直接 clone。
     let c = { let cfg = cfg.clone(); warp::any().map(move || cfg.clone()) };
     let s = { let st = st.clone(); warp::any().map(move || st.clone()) };
+    let max_body = cfg.max_body;
+    // 每路由各自 `content_length_limit(max_body).and(body::json())`(json 类型逐路由推断,
+    // 不能共用一个闭包 —— 那会把所有路由的 body 类型强行统一)。
 
     // 页面(静态,内嵌;GET 不改状态,免 CSRF,但仍加安全头)
     let pages = warp::get().and(warp::path::end()).map(|| html(pages::LOGIN))
@@ -122,25 +161,26 @@ fn routes(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Err
 
     // POST /api/login {password}
     let login = warp::post().and(warp::path!("api" / "login"))
-        .and(origin_guard()).and(c.clone()).and(s.clone()).and(warp::body::json())
+        .and(origin_guard(cfg.clone())).and(c.clone()).and(s.clone()).and(warp::body::content_length_limit(max_body)).and(warp::body::json())
         .and_then(api_login);
 
-    // 需要会话的路由(读)
+    // GET /api/status —— 只读,会话即可
     let status = warp::get().and(warp::path!("api" / "status"))
         .and(auth(st.clone())).and(c.clone()).and_then(api_status);
+    // GET /api/candidates —— 有副作用(触发 helper check),故也加 Origin/Host 门(防跨站 GET)
     let candidates = warp::get().and(warp::path!("api" / "candidates"))
-        .and(auth(st.clone())).and(c.clone()).and_then(api_candidates);
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(c.clone()).and_then(api_candidates);
 
     // 写:会话 + CSRF + Origin(apply/rollback → 先发 2FA;confirm 才执行)
     let apply = warp::post().and(warp::path!("api" / "apply"))
-        .and(origin_guard()).and(auth(st.clone())).and(csrf_guard(st.clone()))
-        .and(c.clone()).and(s.clone()).and(warp::body::json()).and_then(api_apply_begin);
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
+        .and(c.clone()).and(s.clone()).and(warp::body::content_length_limit(max_body)).and(warp::body::json()).and_then(api_apply_begin);
     let apply_confirm = warp::post().and(warp::path!("api" / "apply" / "confirm"))
-        .and(origin_guard()).and(auth(st.clone())).and(csrf_guard(st.clone()))
-        .and(c.clone()).and(s.clone()).and(warp::body::json()).and_then(api_confirm);
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
+        .and(c.clone()).and(s.clone()).and(warp::body::content_length_limit(max_body)).and(warp::body::json()).and_then(api_confirm);
     let rollback = warp::post().and(warp::path!("api" / "rollback"))
-        .and(origin_guard()).and(auth(st.clone())).and(csrf_guard(st.clone()))
-        .and(c.clone()).and(s.clone()).and(warp::body::json()).and_then(api_rollback_begin);
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
+        .and(c.clone()).and(s.clone()).and(warp::body::content_length_limit(max_body)).and(warp::body::json()).and_then(api_rollback_begin);
     let logout = warp::post().and(warp::path!("api" / "logout"))
         .and(auth(st.clone())).and(s.clone()).and_then(api_logout);
 
@@ -163,22 +203,21 @@ fn security_headers() -> warp::http::HeaderMap {
 }
 fn html(body: &'static str) -> warp::reply::Html<&'static str> { warp::reply::html(body) }
 
-// ── Origin/Host 守卫(所有写操作;防 DNS rebinding / CSRF via localhost,H3)──────
-fn origin_guard() -> impl Filter<Extract = (), Error = Rejection> + Clone {
+// ── Origin/Host 守卫(所有写操作 + 有副作用的 GET;防 DNS rebinding / 跨站,H3)──────
+// **精确**匹配 authority 白名单(见 security::build_allowed_hosts),不做前缀/后缀。
+fn origin_guard(cfg: Arc<Config>) -> impl Filter<Extract = (), Error = Rejection> + Clone {
     warp::header::optional::<String>("origin")
         .and(warp::header::optional::<String>("host"))
-        .and_then(|origin: Option<String>, host: Option<String>| async move {
-            // Host 必须是回环/tailscale 名(不接受任意 Host → 防 DNS rebinding)。
+        .and(warp::any().map(move || cfg.clone()))
+        .and_then(|origin: Option<String>, host: Option<String>, cfg: Arc<Config>| async move {
             let host = host.unwrap_or_default();
-            let host_ok = host.starts_with("127.0.0.1") || host.starts_with("localhost")
-                || host.starts_with("[::1]") || host.ends_with(".ts.net")
-                || host.split(':').next().map(security::is_tailscale_ip).unwrap_or(false);
-            if !host_ok { return Err(warp::reject::custom(Denied("bad Host"))); }
-            // Origin 若存在必须与 Host 精确同源;缺失(同源 fetch 常缺)放行但已有 Host 门槛。
+            if !security::host_allowed(&cfg.allowed_hosts, &host) {
+                return Err(warp::reject::custom(Denied("Host 不在白名单")));
+            }
+            // Origin 若存在必须命中同一白名单(跨站请求带的 Origin ≠ 我们的 authority)。
             if let Some(o) = origin {
-                let o_host = o.rsplit('/').next().unwrap_or("");
-                if o_host != host && !o.is_empty() {
-                    return Err(warp::reject::custom(Denied("origin!=host")));
+                if !o.is_empty() && !security::origin_authority_allowed(&cfg.allowed_hosts, &o) {
+                    return Err(warp::reject::custom(Denied("Origin 不在白名单")));
                 }
             }
             Ok::<(), Rejection>(())
@@ -191,6 +230,7 @@ fn auth(st: Shared) -> impl Filter<Extract = (String,), Error = Rejection> + Clo
         .and_then(|sid: Option<String>, st: Shared| async move {
             let sid = sid.ok_or_else(|| warp::reject::custom(Unauthorized))?;
             let mut g = st.lock().await;
+            g.purge(Instant::now()); // 顺手清过期会话/csrf/2FA
             match g.sessions.get(&sid) {
                 Some(s) if s.expires > Instant::now() => Ok(sid),
                 _ => { g.sessions.remove(&sid); Err(warp::reject::custom(Unauthorized)) }
@@ -226,6 +266,7 @@ async fn api_login(cfg: Arc<Config>, st: Shared, req: LoginReq) -> Result<impl R
     let sid = gen_token(); let csrf = gen_token();
     {
         let mut g = st.lock().await;
+        g.purge(Instant::now()); // 登录时顺手清过期态,防泄漏
         g.sessions.insert(sid.clone(), Session { expires: Instant::now() + cfg.session_ttl });
         g.csrf.insert(sid.clone(), csrf.clone());
     }
@@ -281,15 +322,28 @@ async fn api_rollback_begin(sid: String, cfg: Arc<Config>, st: Shared, _body: se
     begin_2fa(sid, cfg, st, PendingAction::Rollback, "确认回滚到上一个健康版本".into()).await
 }
 
-#[derive(Deserialize)] struct ConfirmReq { code: String }
+#[derive(Deserialize)] struct ConfirmReq { challenge_id: String, code: String }
 async fn api_confirm(sid: String, cfg: Arc<Config>, st: Shared, req: ConfirmReq) -> Result<impl Reply, Rejection> {
+    // 校验(全程持锁):挑战存在且未过期 → id 精确匹配(防同会话动作被静默改换)→ 剩余次数 → 码匹配。
+    // 码错则扣次数,归零即作废(防本机对 8 位码暴力);任何一步失败都不执行 helper。
     let action = {
         let mut g = st.lock().await;
-        match g.twofa.get(&sid) {
-            Some(tf) if tf.expires > Instant::now() && ct_eq(&tf.code, &req.code) => {
-                let a = tf.action.clone(); g.twofa.remove(&sid); a
-            }
-            _ => return Ok(warp::reply::with_status(warp::reply::json(&err("二次确认码错误或已过期")), StatusCode::UNAUTHORIZED).into_response()),
+        let now = Instant::now();
+        let Some(tf) = g.twofa.get_mut(&sid) else {
+            return Ok(reply_status(StatusCode::UNAUTHORIZED, "没有待确认的操作"));
+        };
+        if tf.expires <= now { g.twofa.remove(&sid); return Ok(reply_status(StatusCode::UNAUTHORIZED, "确认已过期")); }
+        if !ct_eq(&tf.id, &req.challenge_id) {
+            return Ok(reply_status(StatusCode::UNAUTHORIZED, "挑战 id 不匹配(可能已被新的操作取代)"));
+        }
+        if ct_eq(&tf.code, &req.code) {
+            let a = tf.action.clone(); g.twofa.remove(&sid); a
+        } else {
+            tf.attempts_left = tf.attempts_left.saturating_sub(1);
+            let left = tf.attempts_left;
+            if left == 0 { g.twofa.remove(&sid); }
+            return Ok(reply_status(StatusCode::UNAUTHORIZED,
+                &format!("确认码错误(剩余 {left} 次)")));
         }
     };
     // 二因子通过 → 经 helper 调 updater(helper 清 env + 固定 argv;updater 全程验签)
@@ -304,18 +358,31 @@ async fn api_confirm(sid: String, cfg: Arc<Config>, st: Shared, req: ConfirmReq)
 async fn begin_2fa(sid: String, cfg: Arc<Config>, st: Shared, action: PendingAction, summary: String)
     -> Result<warp::reply::Response, Rejection>
 {
-    let code = security::gen_numeric_code(6);
+    let id = gen_token();
+    let code = security::gen_numeric_code(8); // 8 位:配合 5 次上限,本机暴力不可行
+    // 先发 Telegram,**发成功才登记挑战** —— 否则运维拿不到码,登记了也没用,徒增内存/误导。
+    let msg = format!(
+        "🔐 管理台二次确认\n{summary}\n确认码: {code}\n(node={}, {}s 内有效)",
+        cfg.node_id, cfg.twofa_ttl.as_secs());
+    if !deliver_telegram(&cfg, &msg).await {
+        return Ok(reply_status(StatusCode::BAD_GATEWAY, "Telegram 发送失败,未生成待确认操作(检查 TOKEN/CHAT_ID/网络)"));
+    }
     {
         let mut g = st.lock().await;
-        g.twofa.insert(sid, TwoFa { code: code.clone(), action, expires: Instant::now() + cfg.twofa_ttl });
+        g.twofa.insert(sid, TwoFa {
+            id: id.clone(), code, action,
+            expires: Instant::now() + cfg.twofa_ttl,
+            attempts_left: cfg.twofa_max_attempts,
+        });
     }
-    // OOB 发到 Telegram(复用 notify-telegram.sh 的环境;这里直接 shell 出一条)。
-    let msg = format!("🔐 管理台二次确认\n{}\n确认码: {}\n(node={}, {}s 内有效)", summary, code, cfg.node_id, cfg.twofa_ttl.as_secs());
-    helper::telegram(&msg).await; // best-effort
     Ok(warp::reply::json(&serde_json::json!({
-        "ok": true, "twofa": "sent",
+        "ok": true, "twofa": "sent", "challenge_id": id,
         "note": "一次性确认码已发到 Telegram,请回填 /api/apply/confirm"
     })).into_response())
+}
+
+fn reply_status(code: StatusCode, msg: &str) -> warp::reply::Response {
+    warp::reply::with_status(warp::reply::json(&err(msg)), code).into_response()
 }
 
 // ── 错误 ─────────────────────────────────────────────────────────────
@@ -346,7 +413,9 @@ mod pages;
 mod http_tests {
     use super::*;
 
-    fn test_cfg() -> Arc<Config> {
+    fn test_cfg() -> Arc<Config> { test_cfg_tg(None) }
+    fn test_cfg_tg(telegram_override: Option<bool>) -> Arc<Config> {
+        let ip = "127.0.0.1".parse().unwrap();
         Arc::new(Config {
             bind: "127.0.0.1:8788".parse().unwrap(),
             admin_hash_file: "/nonexistent/admin.hash".into(),
@@ -355,6 +424,10 @@ mod http_tests {
             session_ttl: Duration::from_secs(60),
             twofa_ttl: Duration::from_secs(60),
             allow_tailscale: false,
+            allowed_hosts: security::build_allowed_hosts(8788, &ip, false, ""),
+            max_body: 16 * 1024,
+            twofa_max_attempts: 5,
+            telegram_override,
         })
     }
     fn fresh_state() -> Shared { Arc::new(Mutex::new(AppState::default())) }
@@ -433,17 +506,63 @@ mod http_tests {
     async fn apply_good_semver_sends_2fa() {
         let st = fresh_state();
         let (sid, csrf) = seed(&st).await;
-        let r = app(test_cfg(), st.clone());
+        let r = app(test_cfg_tg(Some(true)), st.clone()); // Telegram 投递成功
         let resp = warp::test::request().method("POST").path("/api/apply")
             .header("host", "127.0.0.1:8788")
             .header("cookie", format!("sid={sid}"))
             .header("x-csrf-token", csrf)
             .json(&serde_json::json!({"version":"0.29.1"}))
             .reply(&r).await;
-        assert_eq!(resp.status(), 200, "合法 apply 应进入 2FA 流程");
-        // 断言 pending 2FA 已登记(尚未真正执行 helper)
+        assert_eq!(resp.status(), 200, "合法 apply + Telegram 成功 → 进入 2FA 流程");
         let g = st.lock().await;
         assert!(g.twofa.contains_key(&sid), "应生成待确认的 2FA 挑战");
+    }
+
+    #[tokio::test]
+    async fn apply_502_when_telegram_fails() {
+        let st = fresh_state();
+        let (sid, csrf) = seed(&st).await;
+        let r = app(test_cfg_tg(Some(false)), st.clone()); // Telegram 投递失败
+        let resp = warp::test::request().method("POST").path("/api/apply")
+            .header("host", "127.0.0.1:8788")
+            .header("cookie", format!("sid={sid}"))
+            .header("x-csrf-token", csrf)
+            .json(&serde_json::json!({"version":"0.29.1"}))
+            .reply(&r).await;
+        assert_eq!(resp.status(), 502, "Telegram 投递失败必须拒绝(fail-closed),不留挑战");
+        assert!(!st.lock().await.twofa.contains_key(&sid), "投递失败不应登记挑战");
+    }
+
+    #[tokio::test]
+    async fn confirm_rejects_wrong_code_and_bad_challenge() {
+        // 直接种一个已知挑战,绕过 Telegram,测 confirm 的三道门。
+        let st = fresh_state();
+        let (sid, csrf) = seed(&st).await;
+        {
+            let mut g = st.lock().await;
+            g.twofa.insert(sid.clone(), TwoFa {
+                id: "chal-xyz".into(), code: "12345678".into(),
+                action: PendingAction::Rollback,
+                expires: Instant::now() + Duration::from_secs(60),
+                attempts_left: 5,
+            });
+        }
+        let r = app(test_cfg(), st.clone());
+        let post = |body: serde_json::Value| {
+            let sid = sid.clone(); let csrf = csrf.clone();
+            warp::test::request().method("POST").path("/api/apply/confirm")
+                .header("host", "127.0.0.1:8788")
+                .header("cookie", format!("sid={sid}"))
+                .header("x-csrf-token", csrf)
+                .json(&body)
+        };
+        // 错误挑战 id → 401,且不扣次数
+        let resp = post(serde_json::json!({"challenge_id":"wrong","code":"12345678"})).reply(&r).await;
+        assert_eq!(resp.status(), 401, "挑战 id 不符必须拒");
+        // 错误码 → 401,扣次数
+        let resp = post(serde_json::json!({"challenge_id":"chal-xyz","code":"00000000"})).reply(&r).await;
+        assert_eq!(resp.status(), 401, "错误码必须拒");
+        assert_eq!(st.lock().await.twofa.get(&sid).unwrap().attempts_left, 4, "错误码应扣 1 次");
     }
 
     #[tokio::test]

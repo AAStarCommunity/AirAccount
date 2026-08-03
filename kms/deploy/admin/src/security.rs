@@ -124,6 +124,39 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
+/// 构造允许的 Host/Origin authority 精确集合(小写,含带端口与不带端口两式)。
+/// 回环三式 + 可选 Tailscale 绑定地址 + `ADMIN_ALLOWED_HOSTS`(逗号分隔的 FQDN/IP)。
+/// **精确匹配**,绝不前缀/后缀 —— 否则 `127.0.0.1.evil.com` / `x.ts.net` 能骗过 DNS-rebinding 门。
+pub fn build_allowed_hosts(port: u16, bind_ip: &IpAddr, allow_tailscale: bool, extra_csv: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let mut push = |base: &str| { v.push(base.to_ascii_lowercase()); v.push(format!("{}:{port}", base.to_ascii_lowercase())); };
+    push("127.0.0.1"); push("localhost"); push("[::1]");
+    if allow_tailscale {
+        // 只把**实际绑定的** IP 加进白名单(而非整个 100.64/10 段);IPv6 需方括号。
+        let b = match bind_ip { IpAddr::V6(_) => format!("[{bind_ip}]"), IpAddr::V4(_) => bind_ip.to_string() };
+        push(&b);
+    }
+    for e in extra_csv.split(',') {
+        let e = e.trim();
+        if !e.is_empty() { push(e); }
+    }
+    v.sort(); v.dedup(); v
+}
+
+/// authority 是否在允许集合内(精确、大小写不敏感)。
+pub fn host_allowed(allowed: &[String], host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    allowed.iter().any(|a| a == &h)
+}
+
+/// 从 Origin 头(`scheme://authority[/...]`)提取 authority 并精确校验。空 Origin 交由调用方决定。
+pub fn origin_authority_allowed(allowed: &[String], origin: &str) -> bool {
+    let o = origin.trim().to_ascii_lowercase();
+    let no_scheme = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")).unwrap_or(&o);
+    let authority = no_scheme.split('/').next().unwrap_or("");
+    allowed.iter().any(|a| a == authority)
+}
+
 /// 严格 semver x.y.z(可带 v 前缀)。
 pub fn is_semver(v: &str) -> bool {
     let v = v.strip_prefix('v').unwrap_or(v);
@@ -163,6 +196,40 @@ mod tests {
         assert!(is_semver("1.2.3")); assert!(is_semver("v0.29.1"));
         assert!(!is_semver("latest")); assert!(!is_semver("1.2")); assert!(!is_semver("1.2.3.4"));
         assert!(!is_semver("1.2.x"));
+    }
+    #[test]
+    fn host_allowlist_is_exact() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let allowed = build_allowed_hosts(8788, &ip, false, "");
+        assert!(host_allowed(&allowed, "127.0.0.1:8788"));
+        assert!(host_allowed(&allowed, "localhost:8788"));
+        assert!(host_allowed(&allowed, "127.0.0.1"));
+        assert!(host_allowed(&allowed, "LOCALHOST:8788")); // 大小写不敏感
+        // 关键:前缀/后缀混淆一律拒
+        assert!(!host_allowed(&allowed, "127.0.0.1.evil.com"));
+        assert!(!host_allowed(&allowed, "localhost.evil.com"));
+        assert!(!host_allowed(&allowed, "evil.ts.net"));
+        assert!(!host_allowed(&allowed, "127.0.0.1:9999")); // 端口不符
+        assert!(!host_allowed(&allowed, "evil.com"));
+    }
+    #[test]
+    fn tailscale_host_only_when_bound() {
+        let ts: IpAddr = "100.69.249.7".parse().unwrap();
+        let a = build_allowed_hosts(8788, &ts, true, "");
+        assert!(host_allowed(&a, "100.69.249.7:8788"));
+        assert!(!host_allowed(&a, "100.64.0.1:8788")); // 段内但非绑定地址 → 拒
+        let extra = build_allowed_hosts(8788, &"127.0.0.1".parse().unwrap(), false, "mx93b.tailnet.ts.net");
+        assert!(host_allowed(&extra, "mx93b.tailnet.ts.net:8788"));
+        assert!(!host_allowed(&extra, "other.tailnet.ts.net:8788"));
+    }
+    #[test]
+    fn origin_authority_exact() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let allowed = build_allowed_hosts(8788, &ip, false, "");
+        assert!(origin_authority_allowed(&allowed, "http://127.0.0.1:8788"));
+        assert!(origin_authority_allowed(&allowed, "http://localhost:8788/dashboard"));
+        assert!(!origin_authority_allowed(&allowed, "http://127.0.0.1.evil.com:8788"));
+        assert!(!origin_authority_allowed(&allowed, "https://evil.com"));
     }
     #[test]
     fn ct_eq_works() {
