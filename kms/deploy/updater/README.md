@@ -70,8 +70,12 @@ bash kms/tests/updater/test-updater.sh
 
 ## 生产接线(评审通过后)
 
-1. CI:发版时生成 `channels/<channel>.json`(含 sha256/security/兼容字段),用 minisign 私钥(CI secret / 离线)签名 → `.minisig`;发布到节点可拉的稳定 URL(`AU_MANIFEST_BASE`)。
-2. 板子:installer 落地 `updater.env` + 验签公钥 + 版本化目录 + enable timer & recovery unit。
+1. 发版:`release-sign.sh --version X.Y.Z --tarball <bundle.tar.gz> [--severity … --security --ta-changed]`
+   —— 自动算 sha256、组装/累积 `channels/<channel>.json`(bump `metadata_version`、刷新 `expires`)、
+   jq 校验 schema、用 minisign 私钥签名并**用仓库公钥自验**。私钥默认 `~/.ssh/aastar-updater.key`
+   (密码加密,绝不入库,见 [`SIGNING-KEY.md`](./SIGNING-KEY.md))。把 `<channel>.json` + `.minisig`
+   传到节点可拉的稳定 URL(`AU_MANIFEST_BASE`),tarball 传到 GitHub release。
+2. 板子:installer 落地 `updater.env` + 验签公钥([`updater-pubkey.pub`](./updater-pubkey.pub) → `/etc/airaccount/updater-pubkey.pub`)+ 版本化目录 + enable timer & recovery unit。
 3. 监控:`AU_NOTIFY_CMD` 接 `AAstarMonitorBot`(telegram);`monitor.html` 加版本/更新状态列。
 
 ## 本增量**未做**(见设计文档 §9,真机/CI 阶段接)
