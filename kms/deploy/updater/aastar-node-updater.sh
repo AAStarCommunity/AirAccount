@@ -62,7 +62,7 @@ notify() { # notify <level> <msg> —— set -e 安全:永远返回 0(通知失�
 notify_send() { # notify_send <level> <msg>
   local level="$1"; shift; local msg="$*"
   if [ -n "$AU_NOTIFY_CMD" ]; then
-    $AU_NOTIFY_CMD "$level" "$msg"
+    $AU_NOTIFY_CMD "$level" "$msg" 9>&-
   else
     logger -t aastar-updater "[$level] $msg" 2>/dev/null || true
     echo "[notify:$level] $msg"
@@ -193,7 +193,15 @@ lock_contended() { # apply/recovery(LOCK_FATAL=1)硬失败;check 静默退 0 等
   if [ "${LOCK_FATAL:-0}" = 1 ]; then die "$1 —— 中止(未做任何更改)"; fi
   warn "$1,退出"; exit 0
 }
-lock_stale_min() { local s="10#${LOCK_STALE_SECS:-}"; case "${LOCK_STALE_SECS:-}" in ''|*[!0-9]*|0*) s="10#86400";; esac; echo "$(( s/60 ))"; }
+lock_stale_min() {  # 秒→分,兜非法/前导零/超长(防 10# 溢出报错崩脚本,codex Low),clamp 到 60s..7d
+  local secs="${LOCK_STALE_SECS:-86400}"
+  case "$secs" in ''|*[!0-9]*|0*) secs=86400 ;; esac
+  [ "${#secs}" -gt 6 ] && secs=604800
+  secs=$(( 10#$secs ))
+  [ "$secs" -lt 60 ] && secs=60
+  [ "$secs" -gt 604800 ] && secs=604800
+  echo "$(( secs/60 ))"
+}
 lock_is_old() { [ -n "$(find "$LOCK_LINK" -prune -mmin "+$(lock_stale_min)" 2>/dev/null)" ]; }
 # 持有者是否「活着且不算 stale」。pid 必须无前导零的正十进制(排除空/非数字/0/00/000 —— kill -0
 # 0/00/000 命中进程组 0 会误判存活,pr-daemon 六/七轮)。
@@ -221,6 +229,12 @@ reclaim_stale_lock() { # <expected_oldpid>
 acquire_lock() {
   mkdir -p "$AU_STATE_DIR"
   trap cleanup EXIT
+  # split-brain 防护(codex High):AU_LOCK_NO_FLOCK 会让锁落在 lock(symlink)而非 lock.flock,与
+  # 走 flock 的实例形成两套互斥面 → 双持。故它**仅测试可用**(必须同时 AU_TEST_MODE=1);生产上
+  # 有 flock 却设了它 = 配置事故,直接 die,绝不让 timer/apply/recovery 用不同互斥面。
+  if [ "${AU_LOCK_NO_FLOCK:-0}" = 1 ] && [ "${AU_TEST_MODE:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
+    die "AU_LOCK_NO_FLOCK 仅测试用(需 AU_TEST_MODE=1)—— 生产有 flock 时禁用,防 split-brain 双持"
+  fi
   # 生产路径:flock -n 在 lock.flock 上;拿不到即竞争。(独立文件,不与老 symlink/mkdir 锁路径撞型)
   if [ "${AU_LOCK_NO_FLOCK:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
     exec 9>"$AU_STATE_DIR/lock.flock" 2>/dev/null || lock_contended "无法打开锁文件"
@@ -282,7 +296,7 @@ state_set_num() { # 单独处理数字字段(metadata_version)
 
 # ── 下载(curl,file:// 亦可)────────────────────────────────────────
 fetch() { # fetch <url> <out>
-  if [ -n "$AU_FETCH_CMD" ]; then $AU_FETCH_CMD "$1" "$2"; return; fi
+  if [ -n "$AU_FETCH_CMD" ]; then $AU_FETCH_CMD "$1" "$2" 9>&-; return; fi
   curl -fSL --connect-timeout 15 --max-time 300 "$1" -o "$2"
 }
 
@@ -314,7 +328,7 @@ swap_symlink() { # swap_symlink <linkpath> <target>
 
 # ── 健康门(默认内置;可 hook 覆盖)─────────────────────────────────
 run_health() {
-  if [ -n "$AU_HEALTH_CMD" ]; then $AU_HEALTH_CMD; return; fi
+  if [ -n "$AU_HEALTH_CMD" ]; then $AU_HEALTH_CMD 9>&-; return; fi
   # 内置默认:HTTP 层检查(真机深度门见设计文档 §3.2,后续接)
   local base="http://127.0.0.1:3000"
   curl -fsS --max-time 10 "$base/health" >/dev/null || return 1
@@ -331,7 +345,7 @@ run_health() {
 
 restart_service() {
   log "restart: $AU_RESTART_CMD"
-  $AU_RESTART_CMD
+  $AU_RESTART_CMD 9>&-
 }
 
 # ── vacuum 旧版本(保留 N,绝不删 current/previous)─────────────────

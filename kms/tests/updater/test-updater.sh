@@ -22,7 +22,8 @@ command -v jq >/dev/null || { echo "SKIP: 需 jq"; exit 0; }
 
 # 强制走 symlink CAS 回退路径,让锁相关用例在任意 host(含带 flock 的 Linux CI)结果一致。
 # 生产走 flock(内核原语,无需在此单测);flock 路径由 T57 在有 flock 时单独 smoke。
-export AU_LOCK_NO_FLOCK=1
+# AU_TEST_MODE=1 是 split-brain 防护要求的显式测试标记(生产设 AU_LOCK_NO_FLOCK 且有 flock 会 die)。
+export AU_LOCK_NO_FLOCK=1 AU_TEST_MODE=1
 
 PASS=0; FAIL=0
 ok()   { echo -e "  \033[0;32mPASS\033[0m $*"; PASS=$((PASS+1)); }
@@ -1039,7 +1040,8 @@ if command -v flock >/dev/null 2>&1; then
   # 不设 AU_LOCK_NO_FLOCK → 走 flock。先占住 flock,再另一 apply 应硬失败。
   ( exec 9>"$NS/lock.flock"; flock -n 9 && sleep 3 ) &   # 持 flock 3s
   HOLDER=$!; sleep 0.5
-  env AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
+  # 清掉全局 AU_LOCK_NO_FLOCK,让本次真正走 flock 路径
+  env -u AU_LOCK_NO_FLOCK AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
       AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=t \
       AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
       bash "$UPDATER" apply 0.99.0 >/dev/null 2>&1; RC=$?
@@ -1048,6 +1050,20 @@ if command -v flock >/dev/null 2>&1; then
   [ -f "$NS/lock.flock" ] && ok "走了 flock 路径(lock.flock 存在)" || bad "未走 flock"
 else
   ok "SKIP flock 测试(本 host 无 flock,生产 Linux 有)"; ok "SKIP flock 路径存在性(同上)"
+fi
+
+echo "== T58 split-brain 防护:有 flock 时设 AU_LOCK_NO_FLOCK 但无 AU_TEST_MODE → die(codex High)=="
+if command -v flock >/dev/null 2>&1; then
+  read NR NS < <(new_node t58 0.28.0)
+  write_manifest 58 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+  if env -u AU_TEST_MODE AU_LOCK_NO_FLOCK=1 AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" \
+        AU_PUBKEY="$ROOT/pub.key" AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=t \
+        AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
+        bash "$UPDATER" check >/dev/null 2>&1; then
+    bad "生产(有 flock)no-flock 无 TEST_MODE 却放行(应 die 防 split-brain)"
+  else ok "生产 no-flock 无 AU_TEST_MODE → die(不许两套互斥面)"; fi
+else
+  ok "SKIP split-brain 测试(本 host 无 flock)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════
