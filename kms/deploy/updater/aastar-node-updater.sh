@@ -183,7 +183,7 @@ WORK=""; LOCK_FD_HELD=0
 cleanup() {
   # flock:fd 关闭即自动释放,无需删文件(lock.flock 常驻无害)。
   # symlink 回退:只删自己持有的软链(target==$$)+ 自己遗留的 .stale.$$。
-  if [ "$LOCK_FD_HELD" = 1 ]; then exec 9>&- 2>/dev/null || true; fi
+  if [ "$LOCK_FD_HELD" = 1 ]; then { exec 9>&-; } 2>/dev/null || true; fi   # 花括号组:别永久重定向 stderr(八轮 #1)
   [ "$(readlink "$LOCK_LINK" 2>/dev/null || true)" = "$$" ] && rm -f "$LOCK_LINK" 2>/dev/null || true
   rm -f "$LOCK_LINK.stale.$$" 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
@@ -237,11 +237,25 @@ acquire_lock() {
   fi
   # 生产路径:flock -n 在 lock.flock 上;拿不到即竞争。(独立文件,不与老 symlink/mkdir 锁路径撞型)
   if [ "${AU_LOCK_NO_FLOCK:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
-    exec 9>"$AU_STATE_DIR/lock.flock" 2>/dev/null || lock_contended "无法打开锁文件"
+    log "lock backend: flock"   # 记录选路,便于事后诊断 split-brain(pr-daemon 八轮 #6)
+    # 用**花括号组**局部化 2>/dev/null:`exec 9>file 2>/dev/null`(无命令)会把 stderr 永久
+    # 重定向到 /dev/null,之后所有 warn/die/curl 报错全丢(pr-daemon 八轮 #1,已复现)。
+    { exec 9>"$AU_STATE_DIR/lock.flock"; } 2>/dev/null || lock_contended "无法打开锁文件"
     flock -n 9 || lock_contended "另一个 updater 实例持锁(flock)"
     LOCK_FD_HELD=1
+    # 跨版本迁移防护(八轮 #2):flock 与旧版 symlink/mkdir 锁是两套面。升级切换窗口里,旧版
+    # updater 可能仍持 $LOCK_LINK(symlink)或老 mkdir 目录 → 对 flock 实例不可见 → 双持改 state。
+    # 故拿到 flock 后再查一遍老锁面;旧版仍活则让位(过渡期保险,几轮后旧版绝迹可移除)。
+    local lpid=""
+    if [ -L "$LOCK_LINK" ]; then lpid="$(readlink "$LOCK_LINK" 2>/dev/null || true)"
+      lock_holder_alive "$lpid" && lock_contended "旧版 updater 仍持 symlink 锁(升级切换中)"
+    elif [ -e "$LOCK_LINK" ] && [ ! -L "$LOCK_LINK" ]; then
+      [ -f "$LOCK_LINK/pid" ] && lpid="$(cat "$LOCK_LINK/pid" 2>/dev/null || true)"
+      lock_holder_alive "$lpid" && lock_contended "旧版 updater 仍持 mkdir 锁(升级切换中)"
+    fi
     return 0
   fi
+  log "lock backend: symlink-cas"
   # 回退(macOS 无 flock):symlink CAS。每轮都先做 legacy 迁移(闭合「检查后目录才出现」的 TOCTOU,
   # 七轮 #6)+ ln 成功后**再读确认是自己的软链**(七轮 #3/#6:若落进目录/被人抢会读不到 $$)。
   local tries=0 oldpid
@@ -440,7 +454,10 @@ cmd_recovery() {
   # env 已由 main 最先 source(含 Telegram 凭据)。
   # **recovery 也必须持锁再改 state/软链**(pr-daemon 六轮 #1):boot unit 排序只保证启动次序、
   # 不保证别的 check/apply 已退出,lock-free 改 current/state.json 会与在跑的实例竞争同一批文件。
-  # LOCK_FATAL=1(七轮 #1):拿不到锁必须**硬失败**让 systemd 可见,绝不静默 exit 0 跳过掉电回滚。
+  # LOCK_FATAL=1(七轮 #1):拿不到锁 → 非零退出,让失败在 journal / systemctl status 可见,不静默
+  # exit 0 假装成功。注意(八轮 #5):recovery.service 只 Before=kms-api(排序,非 Requires/BindsTo)
+  # → 本次失败**不阻塞** kms-api 启动;若需真正 gate boot 要给 kms-api drop-in 加 Requires=。此处
+  # 只保证「失败可见」,不保证「阻塞启动」。
   LOCK_FATAL=1
   acquire_lock
   # recovery 不同步 restart:本 unit Before=kms-api,restart 会与 boot 事务自锁。

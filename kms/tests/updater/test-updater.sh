@@ -25,9 +25,10 @@ command -v jq >/dev/null || { echo "SKIP: 需 jq"; exit 0; }
 # AU_TEST_MODE=1 是 split-brain 防护要求的显式测试标记(生产设 AU_LOCK_NO_FLOCK 且有 flock 会 die)。
 export AU_LOCK_NO_FLOCK=1 AU_TEST_MODE=1
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok()   { echo -e "  \033[0;32mPASS\033[0m $*"; PASS=$((PASS+1)); }
 bad()  { echo -e "  \033[0;31mFAIL\033[0m $*"; FAIL=$((FAIL+1)); }
+skip() { echo -e "  \033[0;33mSKIP\033[0m $*"; SKIP=$((SKIP+1)); }   # 不计入 PASS,避免虚增(pr-daemon 八轮 #4)
 
 ROOT="$(mktemp -d)" || { echo "FATAL: mktemp 失败"; exit 1; }
 trap 'rm -rf "$ROOT"' EXIT
@@ -1033,40 +1034,44 @@ run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/
 run_updater_args "$NR" "$NS" AU_NOTIFY_CMD="$ROOT/notify-fail.sh" -- recovery >/dev/null 2>&1; RC2=$?
 { [ "$RC1" != 0 ] && [ "$RC2" != 0 ]; } && ok "第二次 boot 仍 exit 非0 重报(不掩盖持久失败)" || bad "RC1=$RC1 RC2=$RC2"
 
-echo "== T57 生产路径 flock:有 flock 时用 flock 且能真互斥(pr-daemon 七轮 #3 定论)=="
+echo "== T57 生产 flock 路径:真互斥 + 非空 stderr(用真候选,current 作判别,pr-daemon 八轮 #3)=="
 if command -v flock >/dev/null 2>&1; then
   read NR NS < <(new_node t57 0.28.0)
-  write_manifest 57 "2035-01-01T00:00:00Z" "0.0.0" "[]"
-  # 不设 AU_LOCK_NO_FLOCK → 走 flock。先占住 flock,再另一 apply 应硬失败。
-  ( exec 9>"$NS/lock.flock"; flock -n 9 && sleep 3 ) &   # 持 flock 3s
+  S="$(make_bundle 0.60.0 TA-0.28.0)"   # **真** applicable release:无竞争时 apply 会成功
+  REL="$(jq -n --arg s "$S" --arg u "file://$SERVER/airaccount-node-0.60.0.tar.gz" \
+    '[{version:"0.60.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+  write_manifest 60 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+  echo 0 > "$ROOT/health_result"
+  ( exec 9>"$NS/lock.flock"; flock -n 9 && sleep 3 ) &    # 外部持 flock 3s
   HOLDER=$!; sleep 0.5
-  # 清掉全局 AU_LOCK_NO_FLOCK,让本次真正走 flock 路径
   env -u AU_LOCK_NO_FLOCK AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" AU_PUBKEY="$ROOT/pub.key" \
       AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=t \
       AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
-      bash "$UPDATER" apply 0.99.0 >/dev/null 2>&1; RC=$?
+      bash "$UPDATER" apply 0.60.0 >/dev/null 2>"$ROOT/t57.stderr"; RC=$?
   wait "$HOLDER" 2>/dev/null
-  [ "$RC" != 0 ] && ok "flock 被占时 apply 硬失败(真互斥)" || bad "flock 未互斥 apply exit0"
-  [ -f "$NS/lock.flock" ] && ok "走了 flock 路径(lock.flock 存在)" || bad "未走 flock"
+  # 判别:flock 被占 → apply 应硬失败**且 current 没被换到 0.60.0**(若锁没互斥,apply 会成功换掉)
+  { [ "$RC" != 0 ] && [ "$(cur_link "$NR")" = "0.28.0" ]; } && ok "flock 被占 → apply 硬失败且 current 未变(真互斥)" || bad "RC=$RC current=$(cur_link "$NR")"
+  # stderr 非空(八轮 #1:exec 2>/dev/null 曾把 stderr 永久打死 → 这里必须能看到竞争红字)
+  [ -s "$ROOT/t57.stderr" ] && grep -q "持锁\|实例" "$ROOT/t57.stderr" && ok "flock 竞争有 stderr 输出(未被 exec 永久重定向吞掉)" || bad "stderr 空/无竞争信息: $(cat "$ROOT/t57.stderr")"
 else
-  ok "SKIP flock 测试(本 host 无 flock,生产 Linux 有)"; ok "SKIP flock 路径存在性(同上)"
+  skip "flock 真互斥(本 host 无 flock,生产 Linux 有)"; skip "flock stderr 非空(同上)"
 fi
 
-echo "== T58 split-brain 防护:有 flock 时设 AU_LOCK_NO_FLOCK 但无 AU_TEST_MODE → die(codex High)=="
+echo "== T58 split-brain 防护:有 flock 时设 AU_LOCK_NO_FLOCK 但无 AU_TEST_MODE → die 且报 split-brain(八轮 #7)=="
 if command -v flock >/dev/null 2>&1; then
   read NR NS < <(new_node t58 0.28.0)
-  write_manifest 58 "2035-01-01T00:00:00Z" "0.0.0" "[]"
+  write_manifest 61 "2035-01-01T00:00:00Z" "0.0.0" "[]"
   if env -u AU_TEST_MODE AU_LOCK_NO_FLOCK=1 AU_ROOT="$NR" AU_STATE_DIR="$NS" AU_ENV_FILE="$ROOT/updater.env" \
         AU_PUBKEY="$ROOT/pub.key" AU_MANIFEST_BASE="file://$SERVER/channels" AU_NODE_ID=t \
         AU_RESTART_CMD="$ROOT/mock-restart.sh" AU_HEALTH_CMD="$ROOT/mock-health.sh" AU_NOTIFY_CMD="$ROOT/mock-notify.sh" \
-        bash "$UPDATER" check >/dev/null 2>&1; then
+        bash "$UPDATER" check >/dev/null 2>"$ROOT/t58.stderr"; then
     bad "生产(有 flock)no-flock 无 TEST_MODE 却放行(应 die 防 split-brain)"
-  else ok "生产 no-flock 无 AU_TEST_MODE → die(不许两套互斥面)"; fi
+  else grep -q "split-brain" "$ROOT/t58.stderr" && ok "生产 no-flock 无 AU_TEST_MODE → die 且明确 split-brain" || bad "die 了但非 split-brain 原因: $(cat "$ROOT/t58.stderr")"; fi
 else
-  ok "SKIP split-brain 测试(本 host 无 flock)"
+  skip "split-brain 防护(本 host 无 flock)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
-echo "结果: PASS=$PASS FAIL=$FAIL"
+echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]
