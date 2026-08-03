@@ -1,0 +1,9 @@
+# /etc/sudoers.d/airaccount-admin —— 装成 0440 root:root。用 `visudo -cf` 校验后再放。
+#
+# 极窄授权:Web 服务用户(airaccount-admin)**只能**免密调这一个 helper,别的一律不行。
+# helper 内部清 env(env -i)+ 固定 argv 白名单(status|check|apply <semver>|rollback),
+# 故即便 Web 被 RCE,可达能力也被收死在这四个动词内,且 TA 变更由 updater 自身拒。
+#
+# 注意:路径必须与实际部署完全一致(含符号链接会被 sudo 拒);helper 须 root 拥有、0755、不可被
+# airaccount-admin 写(否则等于把 root 交出去)。
+airaccount-admin ALL=(root) NOPASSWD: /opt/airaccount/updater/airaccount-admin-helper

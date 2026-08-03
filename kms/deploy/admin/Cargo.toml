@@ -1,0 +1,22 @@
+[package]
+name = "airaccount-admin"
+version = "0.1.0"
+edition = "2021"
+description = "AAStar 社区节点更新 Web 管理台(仅本机/Tailscale,非 root,经 helper 调 updater)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "airaccount-admin"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "process", "sync", "time", "signal"] }
+warp = "0.3.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+argon2 = "0.5"          # 管理员密码 argon2id 校验(§6.2)
+rand = "0.8"            # 会话/CSRF token
+subtle = "2.5"          # 常量时间比较(会话/CSRF token 防时序侧信道)
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["rt", "macros", "test-util"] }

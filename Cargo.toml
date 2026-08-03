@@ -2,6 +2,7 @@
 members = [
     "kms/proto",
     "kms/host",
+    "kms/deploy/admin",
 ]
 exclude = [
     "third_party",

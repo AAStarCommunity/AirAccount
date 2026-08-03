@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# airaccount-admin-helper —— Web 管理台(非 root)与 updater(需 root 改 /opt/airaccount)之间的
+# **唯一特权边界**。设计:auto-update-web-admin-design.md §5.4 / Codex C1。
+#
+# 为什么不是「让 Web 直接 sudo updater 脚本」:updater 行为受一大堆 env 控制(AU_RESTART_CMD /
+# AU_FETCH_CMD / AU_ROOT …)且会 source updater.env —— 若 Web 能影响 env 或拼 shell,就是提权 RCE 面。
+# 本 helper 做三件事把爆炸半径收死:
+#   1. **清空环境**：exec env -i,只放白名单里的固定变量 —— Web 传来的任何 env 一律不带入。
+#   2. **固定绝对路径**：updater / manifest 路径写死,不接受调用方指定。
+#   3. **严格 argv 白名单**：只认 status / candidates / apply <semver> / rollback 这几个定长动词,
+#      version 先过 `^v?\d+\.\d+\.\d+$` 校验;其它一律拒。TA 变更由 updater 自身拒(决策 D)。
+#
+# 部署:root 拥有、0755;Web 服务用户经**极窄 sudoers** 只能调本 helper(不能调 updater/别的):
+#   airaccount-admin ALL=(root) NOPASSWD: /opt/airaccount/updater/airaccount-admin-helper
+# helper 内部再 su 到 updater 需要的权限;绝不把裸 root/任意 argv 暴露给 Web。
+set -euo pipefail
+
+# 固定路径(不接受调用方覆盖)——
+UPDATER="/opt/airaccount/updater/aastar-node-updater.sh"
+STATE_DIR="/var/lib/airaccount/updater"
+ENV_FILE="/etc/airaccount/updater.env"
+
+verb="${1:-}"; shift || true
+
+# updater 以固定、干净的环境运行(env -i);只显式传它必须的几个,绝不继承 Web 的环境。
+run_updater() {  # run_updater <updater-args...>
+  exec env -i \
+    PATH="/usr/sbin:/usr/bin:/sbin:/bin" \
+    AU_ROOT="/opt/airaccount" \
+    AU_STATE_DIR="$STATE_DIR" \
+    AU_ENV_FILE="$ENV_FILE" \
+    AU_PUBKEY="/etc/airaccount/updater-pubkey.pub" \
+    bash "$UPDATER" "$@"
+}
+
+is_semver() { printf '%s' "$1" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$'; }
+
+case "$verb" in
+  status)
+    [ "$#" -eq 0 ] || { echo "helper: status 不接受参数" >&2; exit 2; }
+    run_updater status ;;
+  check)
+    [ "$#" -eq 0 ] || { echo "helper: check 不接受参数" >&2; exit 2; }
+    run_updater check ;;
+  apply)
+    [ "$#" -eq 1 ] || { echo "helper: apply 需恰好一个版本参数" >&2; exit 2; }
+    is_semver "$1" || { echo "helper: 版本号非法(需 x.y.z)" >&2; exit 2; }
+    run_updater apply "$1" ;;      # 含 TA 变更由 updater 自身拒(决策 D:无 --allow-ta)
+  rollback)
+    # rollback 走 recovery(回滚到 last-good);无参数
+    [ "$#" -eq 0 ] || { echo "helper: rollback 不接受参数" >&2; exit 2; }
+    run_updater recovery ;;
+  *)
+    echo "helper: 未知动词 '$verb'(只允许 status|check|apply <ver>|rollback)" >&2
+    exit 2 ;;
+esac
