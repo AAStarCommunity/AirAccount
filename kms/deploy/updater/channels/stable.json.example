@@ -9,6 +9,9 @@
     {
       "version": "0.29.0",
       "security": false,
+      "severity": "none",
+      "notes": "portal 三语(英/中/泰)+ 常规修复",
+      "notes_url": "https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.29.0",
       "auto_apply_allowed": true,
       "ta_changed": false,
       "min_version": "0.28.0",
@@ -22,6 +25,8 @@
       "version": "0.28.1",
       "security": true,
       "severity": "high",
+      "notes": "修 stats 页 UTF-8 panic + 认证 fail-closed",
+      "notes_url": "https://github.com/AAStarCommunity/AirAccount/releases/tag/airaccount-node-v0.28.1",
       "cve": ["GHSA-xxxx-xxxx-xxxx"],
       "auto_apply_allowed": true,
       "ta_changed": false,
