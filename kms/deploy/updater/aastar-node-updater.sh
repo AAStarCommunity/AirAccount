@@ -483,6 +483,23 @@ cmd_recovery() {
   fi
 }
 
+# ── 面板/运维发起的回滚(区别于 boot recovery)──────────────────────
+# recovery 是掉电中断专用:只有 pending 非空才动,apply **成功后** pending 已清空 → recovery
+# 命中 `无 pending,无需恢复` return 0,于是「面板回滚按钮」成了静默空操作(用户白烧一次 2FA 码)。
+# 面板要的是「把刚装的坏版本换回上一个已知良好版本」,故走本 verb:无条件回到 state.previous +
+# **正常 restart**(recovery 那条 AU_RESTART_CMD=true 是为 boot 事务不自锁,面板场景反而要真重启)。
+cmd_rollback() {
+  LOCK_FATAL=1
+  acquire_lock                       # 与 apply/check 竞争同一批 state/软链,必须持锁;竞争则硬失败可见
+  state_init
+  local cur prev; cur="$(state_get current)"; prev="$(state_get previous)"
+  [ -n "$prev" ] || die "无 previous 版本可回滚(current=$cur)—— 进一步恢复走 OOB 人工救板"
+  [ -d "$AU_ROOT/releases/$prev" ] || die "回滚目标 releases/$prev 不存在 —— 走 OOB 人工救板"
+  log "面板回滚:$cur → $prev(正常重启)"
+  rollback "$prev"                   # 换软链 + 真实 restart_service + state_set current=$prev pending=""
+  state_set previous "$cur"          # 记录回滚来源(toggle 语义:再点一次可回 $cur;panel 显示 current)
+}
+
 # ── status ──────────────────────────────────────────────────────────
 cmd_status() { state_init; cat "$STATE_FILE"; }
 
@@ -805,13 +822,13 @@ main() {
   done
   local npos="${#POS[@]}"
   case "$cmd" in
-    check|recovery|status)
+    check|recovery|status|rollback)
       [ "$npos" -eq 0 ] || die "$cmd 不接受额外参数:${POS[*]}"
       "cmd_$cmd" ;;
     apply)
       [ "$npos" -eq 1 ] || die "用法: $0 apply <ver>(恰好一个版本参数)"
       cmd_apply "${POS[0]}" ;;
-    *) die "用法: $0 {check | apply <ver> | recovery | status}" ;;
+    *) die "用法: $0 {check | apply <ver> | rollback | recovery | status}" ;;
   esac
 }
 main "$@"

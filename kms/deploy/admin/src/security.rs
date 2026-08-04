@@ -52,6 +52,21 @@ pub fn preflight_bind_check(bind: &SocketAddr, allow_tailscale: bool) -> Result<
     Ok(())
 }
 
+/// 文本里是否提到 `:PORT` 作为**完整端口字段**(后面不接数字)—— 避免查端口 80 时命中 8080。
+fn mentions_port(text: &str, port: u16) -> bool {
+    let needle = format!(":{port}");
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(&needle) {
+        let start = from + rel;
+        let after = start + needle.len();
+        if after >= bytes.len() || !bytes[after].is_ascii_digit() { return true; }
+        from = start + 1;
+        if from >= text.len() { break; }
+    }
+    false
+}
+
 /// 扫常见隧道/反代配置,发现本端口被暴露就拒绝启动。best-effort(文件不存在=没配=放行)。
 fn check_not_proxied(port: u16) -> Result<(), String> {
     let needle_port = port.to_string();
@@ -66,7 +81,7 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
     for f in files {
         if let Ok(content) = std::fs::read_to_string(f) {
             // 端口出现 + 该文件本就是隧道/反代 → 强烈信号
-            if content.contains(&format!(":{needle_port}")) || content.contains(&format!("= {needle_port}"))
+            if mentions_port(&content, port) || content.contains(&format!("= {needle_port}"))
                 || content.contains(&format!("localPort = {needle_port}"))
             {
                 return Err(format!("端口 {port} 疑似被 {f} 暴露到隧道/公网 —— 拒绝启动(移除该 ingress)"));
@@ -77,7 +92,7 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
     if let Ok(rd) = std::fs::read_dir("/etc/nginx/sites-enabled") {
         for e in rd.flatten() {
             if let Ok(content) = std::fs::read_to_string(e.path()) {
-                if content.contains("proxy_pass") && content.contains(&format!(":{needle_port}")) {
+                if content.contains("proxy_pass") && mentions_port(&content, port) {
                     return Err(format!("端口 {port} 疑似被 nginx({:?}) 反代 —— 拒绝启动", e.path()));
                 }
             }
@@ -87,7 +102,7 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
     // serve 只在 tailnet 内(非公网),不查以免误报。带 3s 超时:tailscaled 无响应也不卡启动。
     // best-effort —— 非 root 大概率取不到状态而静默跳过(下面注释说明权威防线)。
     if let Some(s) = run_with_timeout("tailscale", &["funnel", "status"], std::time::Duration::from_secs(3)) {
-        if s.contains(&format!(":{needle_port}")) {
+        if mentions_port(&s, port) {
             return Err(format!("端口 {port} 疑似被 tailscale funnel 发布到公网 —— 拒绝启动(tailscale funnel off)"));
         }
     }
@@ -98,6 +113,8 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
 
 /// 跑一条命令、最多等 timeout;成功返回 stdout,超时/失败/命令不存在返回 None(best-effort)。
 /// 用独立线程 + recv_timeout,避免 tailscaled 卡死时挂住同步的启动自检。
+/// 注:超时时**故意**不 join 那个分离线程(及其 tailscale 子进程)—— 仅启动时至多调一次,
+/// 子进程会自行退出,不值得为此引入 kill/join 复杂度。
 fn run_with_timeout(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
@@ -263,6 +280,15 @@ mod tests {
         assert!(origin_authority_allowed(&allowed, "http://localhost:8788/dashboard"));
         assert!(!origin_authority_allowed(&allowed, "http://127.0.0.1.evil.com:8788"));
         assert!(!origin_authority_allowed(&allowed, "https://evil.com"));
+    }
+    #[test]
+    fn mentions_port_whole_field() {
+        assert!(mentions_port("proxy_pass http://127.0.0.1:8788;", 8788));
+        assert!(mentions_port("bind :8788", 8788));
+        assert!(!mentions_port("listen :87880", 8788)); // 后接数字 → 非完整字段
+        assert!(!mentions_port("localPort = 8080", 80)); // 80 不该命中 8080
+        assert!(mentions_port("a :80\nb :8080", 80));    // 有真正的 :80 字段
+        assert!(!mentions_port("only :8080 here", 80));
     }
     #[test]
     fn ct_eq_works() {

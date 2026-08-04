@@ -1071,6 +1071,35 @@ else
   skip "split-brain 防护(本 host 无 flock)"
 fi
 
+echo "== T59 面板 rollback verb:apply 成功后(pending 空)无条件回到 previous + 真实 restart =="
+# 这正是 recovery 会静默 no-op 的状态(pending 空);面板按钮必须真回滚。
+NR="$ROOT/n59"; NS="$ROOT/s59"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+: > "$ROOT/rb-restart.log"
+cat > "$ROOT/rec-restart.sh" <<SH
+#!/usr/bin/env bash
+echo restarted >> "$ROOT/rb-restart.log"
+SH
+chmod +x "$ROOT/rec-restart.sh"
+# 先证明:同状态下 recovery 是空操作(pending 空 → current 不变)
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "recovery 在 pending 空时确为 no-op(current 未动)" || bad "recovery 竟动了 current=$(cur_link "$NR")"
+# 再证明:rollback verb 真回滚
+run_updater "$NR" "$NS" rollback AU_RESTART_CMD="$ROOT/rec-restart.sh" >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "rollback:current 软链→0.28.0(真回滚,非空操作)" || bad "link=$(cur_link "$NR")"
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "rollback:state.current=0.28.0" || bad "current=$(st "$NS" current)"
+[ "$(st "$NS" previous)" = "0.29.0" ] && ok "rollback:previous 记录回滚来源=0.29.0(toggle)" || bad "previous=$(st "$NS" previous)"
+[ -s "$ROOT/rb-restart.log" ] && ok "rollback:执行了真实 restart(非 recovery 的 AU_RESTART_CMD=true)" || bad "rollback 未 restart"
+
+echo "== T60 rollback 无 previous → 硬失败(die),不静默成功、不动 current =="
+NR="$ROOT/n60"; NS="$ROOT/s60"; mkdir -p "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.29.0/VERSION"; ln -sfn "releases/0.29.0" "$NR/current"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"",pending:""}' > "$NS/state.json"
+if run_updater "$NR" "$NS" rollback >/dev/null 2>&1; then bad "无 previous 竟 exit 0(应 die)"; else ok "无 previous → 硬失败(exit 非0)"; fi
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "无 previous:current 未被动(0.29.0)" || bad "current 被动=$(cur_link "$NR")"
+
 # ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"

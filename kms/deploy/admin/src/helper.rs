@@ -34,7 +34,10 @@ fn helper_stuck() -> &'static std::sync::atomic::AtomicBool {
     &STUCK
 }
 fn is_mutating(args: &[&str]) -> bool {
-    matches!(args.first().copied(), Some("apply") | Some("rollback"))
+    // check 也算变更:updater 的 cmd_check 在候选 auto_apply_allowed + 策略过关时会**真装**
+    // (download_verify_apply:换软链 + restart + 写 state)。故与 apply/rollback 一样走 mut_sem
+    // 串行 + 受 STUCK 闩保护,绝不能当只读动词与 apply 并发、或超时后不置闩。
+    matches!(args.first().copied(), Some("apply") | Some("rollback") | Some("check"))
 }
 
 fn cap(mut s: String) -> String {

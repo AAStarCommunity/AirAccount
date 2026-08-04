@@ -71,6 +71,8 @@ visudo -cf /etc/sudoers.d/airaccount-admin
 #    服务用户 airaccount-admin,又变成「Web 用户拥有 trust 相关目录」的那类问题)。
 install -d -m0755 -o root -g root /var/lib/airaccount/updater
 install -d -m0755 -o root -g root /opt/airaccount   # 一般已由步骤 2 建;确保存在
+# ⚠️ **升级已在跑的节点**同样要先跑上面这两行(尤其 /var/lib/airaccount)再重启服务 ——
+#    否则 ReadWritePaths 绑定的父目录不存在会 226/NAMESPACE。
 
 # 7) systemd
 install -m0644 airaccount-admin.service /etc/systemd/system/

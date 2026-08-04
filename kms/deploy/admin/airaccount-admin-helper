@@ -36,8 +36,11 @@ assert_secure() {  # assert_secure <path>(文件或目录)
 verb="${1:-}"   # 先取动词(下面 pubkey 断言按动词区分);实参在断言后再 shift。
 
 # 承载 trust root 的目录也查(防目录可写→绕过文件权限替换里面的 env/pubkey/updater/release)。
-# STATE_DIR/releases 存在才查(fresh box 首次 apply 前 releases 尚不存在)。
-for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater "$STATE_DIR"; do assert_secure "$d"; done
+# 必存在的目录(含 STATE_DIR 的父 /var/lib/airaccount,由 service ReadWritePaths 绑定保证存在)
+# 进无条件 loop;STATE_DIR / releases 在 updater 首次运行前可能尚不存在(state_init 才 mkdir),
+# 故**存在才查**,否则升级过的节点上每个动词(含只读 status)会 exit 3 挂掉整个面板。
+for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater /var/lib/airaccount; do assert_secure "$d"; done
+[ -e "$STATE_DIR" ] && assert_secure "$STATE_DIR"
 [ -e /opt/airaccount/releases ] && assert_secure /opt/airaccount/releases
 assert_secure "$0"
 assert_secure "$UPDATER"
@@ -74,9 +77,10 @@ case "$verb" in
     is_semver "$1" || { echo "helper: 版本号非法(需 x.y.z)" >&2; exit 2; }
     run_updater apply "$1" ;;      # 含 TA 变更由 updater 自身拒(决策 D:无 --allow-ta)
   rollback)
-    # rollback 走 recovery(回滚到 last-good);无参数
+    # rollback 走 updater 的 **rollback** verb(无条件回到 state.previous + 正常重启),
+    # **不是** recovery(那是 boot 掉电专用,apply 成功后 pending 空会静默无操作)。无参数。
     [ "$#" -eq 0 ] || { echo "helper: rollback 不接受参数" >&2; exit 2; }
-    run_updater recovery ;;
+    run_updater rollback ;;
   *)
     echo "helper: 未知动词 '$verb'(只允许 status|check|apply <ver>|rollback)" >&2
     exit 2 ;;
