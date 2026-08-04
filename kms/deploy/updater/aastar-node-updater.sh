@@ -151,7 +151,7 @@ EOF
 }
 ver_ge() { [ "$(ver_cmp "$1" "$2")" != "-1" ]; }
 ver_gt() { [ "$(ver_cmp "$1" "$2")" = "1" ]; }
-ver_valid() { echo "${1#v}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; }  # 严格 x.y.z
+ver_valid() { [[ "${1#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }  # 严格 x.y.z(整串匹配,非逐行 grep:防内嵌换行绕过)
 is_patch_bump() { # major==,minor==,patch>
   local a b; a="$(ver_norm "$1")"; b="$(ver_norm "$2")"
   local a1 a2 b1 b2; IFS=. read -r a1 a2 _ <<EOF

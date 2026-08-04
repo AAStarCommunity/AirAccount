@@ -37,7 +37,10 @@ install -Dm0755 airaccount-admin-helper       /opt/airaccount/updater/airaccount
 chown root:root /opt/airaccount/updater/airaccount-admin-helper
 
 # 3) 管理员密码 hash(不落明文;直接写进受保护文件)
-install -d -m0750 -o airaccount-admin -g airaccount-admin /etc/airaccount
+# ⚠️ 目录必须 **root 拥有**(仅组 airaccount-admin 可读)—— 非 root 服务用户若拥有此目录,
+#    凭目录 unlink/create 权即可替换 updater.env / updater-pubkey.pub(root updater 会 source
+#    env、信任 pubkey),= Web RCE 直通 root。服务只需**读** admin.hash/admin.env,不需拥有目录。
+install -d -m0750 -o root -g airaccount-admin /etc/airaccount
 read -rs PW; echo
 printf '%s' "$PW" | /opt/airaccount/admin/airaccount-admin hash-password \
   > /etc/airaccount/admin.hash

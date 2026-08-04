@@ -15,10 +15,23 @@ use tokio::sync::Semaphore;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(180); // updater apply/check 的上限
 const OUTPUT_CAP: usize = 64 * 1024;                       // 截断 helper 输出,防内存膨胀
 
-/// 限制并发 helper 进程数:防被反复触发 apply 造成 sudo/进程风暴(updater 自身还有 flock 串行)。
+/// 全局串行化 **所有** helper 调用(permit=1)。原来 permit=2 会放两个并发变更动词
+/// (apply/rollback)同时进 —— 而超时时 kill_on_drop 发的 SIGKILL 打不动**已 exec 进 root
+/// updater 的 sudo 子进程**(Linux 按当前 uid 判权,非 root 父进程杀不了 root 子进程),
+/// 释放的 permit 会让重试再起一个并发 apply。串行到 1 + 下面的 STUCK 闩一起堵死这条路。
 fn helper_sem() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(2))
+    SEM.get_or_init(|| Semaphore::new(1))
+}
+
+/// 变更动词一旦超时(root updater 可能还活着、杀不掉),置此闩 → 拒绝后续变更动词自动重试,
+/// 要求人工介入(fail-closed;updater 自身的 flock 也会挡住第二个 apply,这是纵深防御)。
+fn helper_stuck() -> &'static std::sync::atomic::AtomicBool {
+    static STUCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &STUCK
+}
+fn is_mutating(args: &[&str]) -> bool {
+    matches!(args.first().copied(), Some("apply") | Some("rollback"))
 }
 
 fn cap(mut s: String) -> String {
@@ -29,6 +42,12 @@ fn cap(mut s: String) -> String {
 /// 经 sudo 调 helper。返回 Ok(stdout) 或 Err(拼接的 stderr/说明)。
 /// args 已是定长白名单动词(status/check/apply <ver>/rollback),逐个作为独立 argv 传入。
 pub async fn run(helper: &str, args: &[&str]) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    let mutating = is_mutating(args);
+    // 上次变更超时未回收 → 拒绝新的变更动词(读动词 status/check 仍放行,便于诊断)。
+    if mutating && helper_stuck().load(Ordering::SeqCst) {
+        return Err("上一次变更操作超时且可能仍在后台运行,已拒绝新的变更(需人工检查 updater/flock 后重启 admin 服务)".into());
+    }
     let _permit = helper_sem().acquire().await.map_err(|_| "并发信号量关闭".to_string())?;
     let child = Command::new("sudo")
         .arg("-n")
@@ -46,7 +65,11 @@ pub async fn run(helper: &str, args: &[&str]) -> Result<String, String> {
     let out = match tokio::time::timeout(HELPER_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return Err(format!("helper 执行错误: {e}")),
-        Err(_) => return Err(format!("helper 超时(>{}s),已终止", HELPER_TIMEOUT.as_secs())),
+        Err(_) => {
+            // 变更动词超时:root updater 可能仍在跑(杀不掉)→ 置闩,拒绝后续变更自动重试。
+            if mutating { helper_stuck().store(true, Ordering::SeqCst); }
+            return Err(format!("helper 超时(>{}s);若为 apply/rollback,updater 可能仍在后台运行,已锁定不再自动重试", HELPER_TIMEOUT.as_secs()));
+        }
     };
     let stdout = cap(String::from_utf8_lossy(&out.stdout).to_string());
     let stderr = cap(String::from_utf8_lossy(&out.stderr).to_string());

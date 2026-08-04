@@ -83,6 +83,22 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
             }
         }
     }
+    // Tailscale serve/funnel:ADMIN_BIND_TAILSCALE=1 模式下最可能的「误发公网」路径 ——
+    // `tailscale funnel` 会把本端口发布成公开 *.ts.net HTTPS。best-effort(取不到状态就跳过)。
+    for sub in [["funnel", "status"], ["serve", "status"]] {
+        if let Ok(out) = std::process::Command::new("tailscale").args(sub).output() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // funnel status 会列出被发布的端口;本端口出现即视为暴露。
+            if out.status.success()
+                && (s.contains(&format!(":{needle_port}")) || s.contains(&format!("127.0.0.1:{needle_port}")))
+                && (sub[0] == "funnel" || s.to_lowercase().contains("funnel"))
+            {
+                return Err(format!("端口 {port} 疑似被 tailscale {} 发布到公网 —— 拒绝启动(tailscale funnel off)", sub[0]));
+            }
+        }
+    }
+    // 注:本进程以非 root 运行,root-only 的 /root/.cloudflared/config.yml 读不到会被静默跳过;
+    // 隧道/反代的**权威**防线是绑定回环 + 上面的启动自检 + 部署侧 nftables/防火墙,配置扫描仅作 tripwire。
     Ok(())
 }
 
@@ -112,11 +128,18 @@ pub fn gen_token() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// n 位数字验证码(Telegram 二次确认)。
+/// n 位数字验证码(Telegram 二次确认)。用拒绝采样消除 `% 10` 的模偏(0..255 里 0-5 会略多)。
 pub fn gen_numeric_code(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut b);
-    b.iter().map(|x| char::from(b'0' + (x % 10))).collect()
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(n);
+    let mut buf = [0u8; 1];
+    while out.len() < n {
+        rng.fill_bytes(&mut buf);
+        if buf[0] < 250 { // 250 = 25*10,拒绝 250..=255 使每位数字等概率
+            out.push(char::from(b'0' + (buf[0] % 10)));
+        }
+    }
+    out
 }
 
 /// 常量时间字符串比较(防会话/CSRF/2FA token 的时序侧信道)。

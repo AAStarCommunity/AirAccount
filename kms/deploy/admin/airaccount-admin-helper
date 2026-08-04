@@ -19,20 +19,26 @@ set -euo pipefail
 UPDATER="/opt/airaccount/updater/aastar-node-updater.sh"
 STATE_DIR="/var/lib/airaccount/updater"
 ENV_FILE="/etc/airaccount/updater.env"
+PUBKEY="/etc/airaccount/updater-pubkey.pub"
 
-# 部署完整性自检(tripwire):自身与将要 exec 的 updater 必须 root 拥有且 group/other 不可写,
-# 否则等于把 root 交给了能写这些文件的用户 —— 直接拒绝,别执行。
-assert_secure() {  # assert_secure <path>
+# 部署完整性自检(tripwire):凡是会被 root updater **source(env)/ 信任(pubkey)/ 执行(脚本)**
+# 的东西,以及承载它们的**目录**,都必须 root 拥有且 group/other 不可写。否则能写这些文件/目录
+# 的用户 = 拿到 root(env 被 `. $AU_ENV_FILE` 以 root 执行;pubkey 被替换即伪造验签)。
+assert_secure() {  # assert_secure <path>(文件或目录)
   local f="$1"
-  [ -e "$f" ] || { echo "helper: 缺文件 $f" >&2; exit 3; }
+  [ -e "$f" ] || { echo "helper: 缺文件/目录 $f" >&2; exit 3; }
   local owner; owner="$(stat -c '%u' "$f" 2>/dev/null)" || { echo "helper: stat 失败 $f" >&2; exit 3; }
   [ "$owner" = "0" ] || { echo "helper: $f 非 root 拥有(uid=$owner),拒绝" >&2; exit 3; }
   if find "$f" -maxdepth 0 -perm /022 -print -quit 2>/dev/null | grep -q .; then
     echo "helper: $f 可被 group/other 写,拒绝(修 chmod go-w)" >&2; exit 3
   fi
 }
+# 承载 trust root 的目录也查(防目录可写→绕过文件权限替换里面的 env/pubkey/updater)。
+for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater; do assert_secure "$d"; done
 assert_secure "$0"
 assert_secure "$UPDATER"
+assert_secure "$PUBKEY"                         # updater 必须有它来验签
+[ -e "$ENV_FILE" ] && assert_secure "$ENV_FILE" # updater.env 可选;存在则必须安全(会被 source)
 
 verb="${1:-}"; shift || true
 
@@ -43,11 +49,13 @@ run_updater() {  # run_updater <updater-args...>
     AU_ROOT="/opt/airaccount" \
     AU_STATE_DIR="$STATE_DIR" \
     AU_ENV_FILE="$ENV_FILE" \
-    AU_PUBKEY="/etc/airaccount/updater-pubkey.pub" \
+    AU_PUBKEY="$PUBKEY" \
     bash "$UPDATER" "$@"
 }
 
-is_semver() { printf '%s' "$1" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$'; }
+# 用 bash 整串正则匹配(`[[ =~ ]]`),**不**用 `grep`——管道 grep 是**逐行**匹配,
+# 版本参数里若含内嵌换行 `$'1.2.3\n<payload>'`,只要有一行像 semver 就通过,绕过校验。
+is_semver() { [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
 case "$verb" in
   status)

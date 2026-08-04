@@ -31,8 +31,12 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-# 只读根 + 显式放行读 admin 目录;写盘全部委托 helper(它以 root 单独运行)。
-ReadOnlyPaths=/opt/airaccount /etc/airaccount
+# 只读根;trust root 目录保持只读(env/pubkey 不可被本服务改)。
+ReadOnlyPaths=/etc/airaccount
+# ⚠️ sudo **不**建新 mount namespace,故 helper→updater(root)子进程继承本单元的
+#    ProtectSystem=strict 视图。apply/rollback 要写 /opt/airaccount(releases/current 软链)
+#    与 /var/lib/airaccount/updater(state.json),必须显式放行,否则生产上写盘 EROFS 失败。
+ReadWritePaths=/opt/airaccount /var/lib/airaccount
 # 网络:只允许本机 + Tailscale/私网(不放行公网出站也可,但 Telegram 需出站 443)。
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 

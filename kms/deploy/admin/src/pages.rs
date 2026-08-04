@@ -106,6 +106,9 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 </form></dialog>
 <script>
 const csrf=()=>sessionStorage.getItem('csrf')||'';
+// 统一 HTML 转义:凡是把后端字段插进 innerHTML 都过它(node/version/log/note 皆来自
+// state.json/AU_NODE_ID,今天可信,但仍是活的注入 sink;CSP 有 'unsafe-inline' 挡不住内联脚本)。
+const esc=s=>String(s==null?'':s).replace(/[<&>"]/g,c=>({'<':'&lt;','&':'&amp;','>':'&gt;','"':'&quot;'}[c]));
 function j(url,opt){opt=opt||{};opt.headers=Object.assign({'Content-Type':'application/json','X-CSRF-Token':csrf()},opt.headers||{});return fetch(url,opt).then(async r=>{const b=await r.json().catch(()=>({}));if(r.status===401){location.href='/';}return {ok:r.ok,b};});}
 function pill(ok){return ok?'<span class="pill ok">正常</span>':'<span class="pill err">异常</span>';}
 async function loadStatus(){
@@ -113,15 +116,15 @@ async function loadStatus(){
  const el=document.getElementById('status');
  if(!ok){el.innerHTML='<span class="pill err">读取失败</span>';return;}
  const s=b.state||{};
- el.innerHTML=`<div class="row"><span>节点</span><b>${b.node||'-'}</b></div>`+
-  `<div class="row"><span>当前版本</span><b>${s.version||s.current||'-'}</b></div>`+
+ el.innerHTML=`<div class="row"><span>节点</span><b>${esc(b.node||'-')}</b></div>`+
+  `<div class="row"><span>当前版本</span><b>${esc(s.version||s.current||'-')}</b></div>`+
   `<div class="row"><span>updater 状态</span>${pill(b.ok)}</div>`;
 }
 async function check(){
  document.getElementById('cands').innerHTML='<span class="muted">检查中…</span>';
  const {ok,b}=await j('/api/candidates');
  document.getElementById('cands').innerHTML=ok
-  ?`<pre>${(b.log||'(无输出)').replace(/[<&]/g,c=>c==='<'?'&lt;':'&amp;')}</pre><p class="muted">${b.note||''}</p>`
+  ?`<pre>${esc(b.log||'(无输出)')}</pre><p class="muted">${esc(b.note||'')}</p>`
   :'<span class="pill err">检查失败</span>';
  loadStatus();
 }

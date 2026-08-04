@@ -103,6 +103,8 @@ struct AppState {
     sessions: HashMap<String, Session>, // token -> Session
     twofa: HashMap<String, TwoFa>,      // session token -> pending 2FA
     csrf: HashMap<String, String>,      // session token -> csrf token
+    login_fails: u32,                   // 连续登录失败计数(暴力/DoS 限速)
+    login_locked_until: Option<Instant>,// 达阈值后锁定登录到此刻
 }
 impl AppState {
     /// 清掉过期会话,并连带清掉其 csrf / 2FA(否则永不回访的会话会内存泄漏)。
@@ -111,6 +113,10 @@ impl AppState {
         let live: std::collections::HashSet<String> = self.sessions.keys().cloned().collect();
         self.csrf.retain(|k, _| live.contains(k));
         self.twofa.retain(|k, t| t.expires > now && live.contains(k));
+    }
+    /// 登录是否处于锁定期(连续失败过多)。
+    fn login_locked(&self, now: Instant) -> bool {
+        matches!(self.login_locked_until, Some(t) if t > now)
     }
 }
 type Shared = Arc<Mutex<AppState>>;
@@ -141,7 +147,9 @@ async fn main() {
     eprintln!("[admin] 绑定 {} (仅本机/Tailscale);helper={}", cfg.bind, cfg.helper);
 
     let state: Shared = Arc::new(Mutex::new(AppState::default()));
-    let routes = routes(cfg.clone(), state).recover(handle_rejection);
+    // 安全头在 recover 之后加 → OK 与错误(401/403/400)响应都带 CSP/X-Frame-Options。
+    let routes = routes(cfg.clone(), state).recover(handle_rejection)
+        .with(warp::reply::with::headers(security_headers()));
     warp::serve(routes).run(cfg.bind).await;
 }
 
@@ -181,11 +189,13 @@ fn routes(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Err
     let rollback = warp::post().and(warp::path!("api" / "rollback"))
         .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
         .and(c.clone()).and(s.clone()).and(warp::body::content_length_limit(max_body)).and(warp::body::json()).and_then(api_rollback_begin);
+    // logout 也是 POST 写操作:一致地加 Origin/CSRF 门(SameSite=Strict 已挡跨站,这里补全纵深)。
     let logout = warp::post().and(warp::path!("api" / "logout"))
-        .and(auth(st.clone())).and(s.clone()).and_then(api_logout);
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
+        .and(s.clone()).and_then(api_logout);
 
+    // 注:安全头在 main/app 里于 `.recover()` **之后**统一加,确保 401/403/400 错误响应也带 CSP/XFO。
     pages.or(login).or(status).or(candidates).or(apply).or(apply_confirm).or(rollback).or(logout)
-        .with(warp::reply::with::headers(security_headers()))
 }
 
 // ── 安全头(全响应)──────────────────────────────────────────────────
@@ -257,16 +267,46 @@ fn csrf_guard(st: Shared) -> impl Filter<Extract = (), Error = Rejection> + Clon
 #[derive(Deserialize)] struct LoginReq { password: String }
 #[derive(Serialize)] struct LoginResp { csrf: String }
 
+/// 限制并发 argon2 校验:argon2id 默认 ~19MiB/次,若不限并发 spawn_blocking 会被登录洪泛
+/// 撑爆内存(板子内存小)。permit 少量即可,兼作登录节流。本服务拒绝任何反代,故**没有**
+/// 外部限速可依赖,限速必须在进程内做。
+fn login_sem() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(2))
+}
+const LOGIN_MAX_FAILS: u32 = 8;                 // 连续失败达此数即锁定
+const LOGIN_LOCK: Duration = Duration::from_secs(60);
+
 async fn api_login(cfg: Arc<Config>, st: Shared, req: LoginReq) -> Result<impl Reply, Rejection> {
-    // argon2id 校验(hash 存 /etc/airaccount/admin.hash,PHC 串)。失败限速由前置 fail2ban/nginx 兜。
-    let ok = security::verify_password(&cfg.admin_hash_file, &req.password).unwrap_or(false);
+    // 锁定期内直接拒(连续失败过多)——防本机/Tailscale 暴力枚举。
+    {
+        let mut g = st.lock().await;
+        if g.login_locked(Instant::now()) {
+            return Ok(reply_status(StatusCode::TOO_MANY_REQUESTS, "登录失败过多,已临时锁定,请稍后再试"));
+        }
+        g.purge(Instant::now());
+    }
+    // argon2 校验:放 spawn_blocking(~19MiB/50ms,别阻塞 async worker),并用信号量限并发(限内存/节流)。
+    let ok = {
+        let _permit = login_sem().acquire().await.map_err(|_| warp::reject::reject())?;
+        let hash_file = cfg.admin_hash_file.clone();
+        let pw = req.password.clone();
+        tokio::task::spawn_blocking(move || security::verify_password(&hash_file, &pw).unwrap_or(false))
+            .await.unwrap_or(false)
+    };
     if !ok {
-        return Ok(warp::reply::with_status(warp::reply::json(&err("密码错误")), StatusCode::UNAUTHORIZED).into_response());
+        let mut g = st.lock().await;
+        g.login_fails = g.login_fails.saturating_add(1);
+        if g.login_fails >= LOGIN_MAX_FAILS {
+            g.login_locked_until = Some(Instant::now() + LOGIN_LOCK);
+            g.login_fails = 0;
+        }
+        return Ok(reply_status(StatusCode::UNAUTHORIZED, "密码错误"));
     }
     let sid = gen_token(); let csrf = gen_token();
     {
         let mut g = st.lock().await;
-        g.purge(Instant::now()); // 登录时顺手清过期态,防泄漏
+        g.login_fails = 0; g.login_locked_until = None; // 成功即清失败计数
         g.sessions.insert(sid.clone(), Session { expires: Instant::now() + cfg.session_ttl });
         g.csrf.insert(sid.clone(), csrf.clone());
     }
@@ -434,6 +474,7 @@ mod http_tests {
     // 与 main() 一致:带上 recover,让自定义 rejection 映射成 401/403/400 而非默认 500。
     fn app(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Error = std::convert::Infallible> + Clone {
         routes(cfg, st).recover(handle_rejection)
+            .with(warp::reply::with::headers(security_headers()))
     }
     async fn seed(st: &Shared) -> (String, String) {
         let sid = gen_token(); let csrf = gen_token();
@@ -573,6 +614,33 @@ mod http_tests {
             .json(&serde_json::json!({"password":"whatever"}))
             .reply(&r).await;
         assert_eq!(resp.status(), 401, "hash 文件不存在/密码错 → 401(fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn login_lockout_after_repeated_fails() {
+        let st = fresh_state();
+        let r = app(test_cfg(), st.clone()); // hash 文件不存在 → 每次都失败
+        for _ in 0..LOGIN_MAX_FAILS {
+            let resp = warp::test::request().method("POST").path("/api/login")
+                .header("host", "127.0.0.1:8788")
+                .json(&serde_json::json!({"password":"x"})).reply(&r).await;
+            assert_eq!(resp.status(), 401, "失败登录应 401");
+        }
+        // 达阈值后锁定 → 429
+        let resp = warp::test::request().method("POST").path("/api/login")
+            .header("host", "127.0.0.1:8788")
+            .json(&serde_json::json!({"password":"x"})).reply(&r).await;
+        assert_eq!(resp.status(), 429, "连续失败达阈值后必须锁定(429)");
+    }
+
+    #[tokio::test]
+    async fn error_responses_carry_security_headers() {
+        // 401 错误响应也必须带 CSP/XFO(headers 在 recover 之后加)。
+        let r = app(test_cfg(), fresh_state());
+        let resp = warp::test::request().path("/api/status").reply(&r).await; // 无会话 → 401
+        assert_eq!(resp.status(), 401);
+        assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+        assert!(resp.headers().get("content-security-policy").is_some(), "错误响应也要带 CSP");
     }
 
     #[tokio::test]
