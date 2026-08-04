@@ -1,0 +1,10 @@
+# pilot 仓库配置(github.com/AAStarCommunity/AirAccount)
+# 本仓工作流:feature 分支 → PR → main。main 受 GitHub 分支保护(需非作者 approve + enforce_admins),
+# 无独立 staging 分支,故集成分支即 main(pilot 的 PR 合并目标)。
+base_branch: main
+integration_branch: main
+protect_patterns: [release, hotfix]
+remote: origin
+allow_remote_cleanup: false
+docs_dir: docs/agent
+pr_daemon_root: ~/Dev/tools/PR-Daemon
