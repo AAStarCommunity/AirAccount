@@ -3,8 +3,9 @@
 #
 # 发版链路:
 #   1) 构建节点 tarball  airaccount-node-v<ver>.tar.gz(含 kms-api-server + TA + unit + manifest)
-#   2) 【本脚本】算 sha256 → 写入/更新 channels/<channel>.json 的 releases[] → bump
-#      metadata_version → 刷新 generated_at/expires → jq 校验 schema → minisign 私钥签名
+#   2) 【本脚本】算 sha256 → 读回已发布 manifest 取 metadata_version 基线 → 组装/累积 releases[]
+#      → **单调** bump metadata_version → 刷新 generated_at/expires → schema 自检(镜像节点
+#      load_manifest)→ 写临时文件 → minisign 签 → 用仓库公钥自验 → **原子替换** 正文+签名
 #   3) 把 tarball 传到 GitHub release;把 <channel>.json + <channel>.json.minisig 传到
 #      节点会拉的稳定 URL(updater 的 AU_MANIFEST_BASE)
 #
@@ -14,7 +15,9 @@
 #
 # 关键选项(其余见下方 usage):
 #   --ta-changed     标记本次含 TA 变更 —— 节点会**拒绝在线 apply**(决策 D),只能 OOB 刷。
-#   --dry-run        只组装 + jq 校验,不签名(CI/测试用;不需要私钥)。
+#   --dry-run        只组装 + schema 自检,打到 stdout,**绝不触碰 $OUT / 不签名**(不需私钥)。
+#   --base-url URL   读回已发布 manifest 求 metadata_version 基线(默认 AU_MANIFEST_BASE)。
+#   --no-baseline    跳过读回(离线/首发;此时 metadata_version 仅从本地 $OUT 取,慎用)。
 #
 # 私钥默认 ~/.ssh/aastar-updater.key(密码加密;minisign 会交互提示输密码)。绝不入库。
 set -euo pipefail
@@ -38,10 +41,15 @@ PROTO_VERSION=3
 EXPIRES_DAYS=7
 ROLLBACK_FLOOR=""
 SECKEY="${MINISIGN_SECKEY:-$HOME/.ssh/aastar-updater.key}"
+PUBKEY_FILE=""   # 默认 $HERE/updater-pubkey.pub;--pubkey 覆盖(测试/换轮公钥用)
 OUT=""
 DRY_RUN=0
+BASE_URL="${AU_MANIFEST_BASE:-https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/updater/channels}"
+NO_BASELINE=0
 REPO="AAStarCommunity/AirAccount"
+NOTES_MAX=280   # 节点 load_manifest 对 notes 的硬上限(与之保持一致)
 
+die() { echo "release-sign: $*" >&2; exit 1; }
 usage() { sed -n '2,30p' "$0"; exit "${1:-0}"; }
 
 while [ "$#" -gt 0 ]; do
@@ -62,45 +70,93 @@ while [ "$#" -gt 0 ]; do
     --expires-days)   EXPIRES_DAYS="$2"; shift 2 ;;
     --rollback-floor) ROLLBACK_FLOOR="$2"; shift 2 ;;
     --seckey)         SECKEY="$2"; shift 2 ;;
+    --pubkey)         PUBKEY_FILE="$2"; shift 2 ;;
     --out)            OUT="$2"; shift 2 ;;
+    --base-url)       BASE_URL="$2"; shift 2 ;;
+    --no-baseline)    NO_BASELINE=1; shift ;;
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        usage 0 ;;
     *) echo "未知参数: $1" >&2; usage 1 ;;
   esac
 done
 
-command -v jq >/dev/null || { echo "缺 jq" >&2; exit 1; }
+# ── 前置校验(全部在**触碰 $OUT 之前**做;非 dry-run 连工具/私钥/公钥都先查齐)──────
+command -v jq >/dev/null || die "缺 jq"
 [ -n "$VERSION" ] || { echo "必须 --version x.y.z" >&2; usage 1; }
-echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "版本号需 x.y.z(不带 v 前缀)" >&2; exit 1; }
-echo "$SEVERITY" | grep -qE '^(none|low|medium|high|critical)$' || { echo "severity 非法" >&2; exit 1; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本号需 x.y.z(不带 v 前缀): $VERSION"
+[[ "$SEVERITY" =~ ^(none|low|medium|high|critical)$ ]] || die "severity 非法: $SEVERITY"
+# --channel:只允许字母数字/点/横杠/下划线,防越目录写(../../tmp/pwn)。
+[[ "$CHANNEL" =~ ^[A-Za-z0-9._-]+$ ]] || die "channel 名非法(只允许 [A-Za-z0-9._-]): $CHANNEL"
+[[ "$EXPIRES_DAYS" =~ ^[0-9]+$ ]] && [ "$EXPIRES_DAYS" -ge 1 ] || die "--expires-days 需正整数: $EXPIRES_DAYS"
+[[ "$PROTO_VERSION" =~ ^[0-9]+$ ]] || die "--proto-version 需整数: $PROTO_VERSION"
+[ -z "$MIN_VERSION" ] || [[ "$MIN_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--min-version 非法: $MIN_VERSION"
+[ -z "$REQUIRES_TA" ] || [[ "$REQUIRES_TA" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--requires-ta 非法: $REQUIRES_TA"
+[ -z "$ROLLBACK_FLOOR" ] || [[ "$ROLLBACK_FLOOR" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--rollback-floor 非法: $ROLLBACK_FLOOR"
+# --notes:节点要求无控制字符且 ≤NOTES_MAX;违反会被**每个节点** fail-closed 拒绝 → 在此就拒。
+if [ -n "$NOTES" ]; then
+  # -z:把整个 NOTES 当**一条** NUL 记录扫,否则 grep 会把换行当行分隔符、扫不到内嵌换行。
+  printf '%s' "$NOTES" | LC_ALL=C grep -zq '[[:cntrl:]]' && die "--notes 含控制字符(换行/制表等),节点会拒绝该 manifest"
+  [ "${#NOTES}" -le "$NOTES_MAX" ] || die "--notes 超 $NOTES_MAX 字符(${#NOTES}),节点会拒绝"
+fi
 
 OUT="${OUT:-$HERE/channels/$CHANNEL.json}"
 TARBALL_URL="${TARBALL_URL:-https://github.com/$REPO/releases/download/airaccount-node-v$VERSION/airaccount-node-v$VERSION.tar.gz}"
 NOTES_URL="${NOTES_URL:-https://github.com/$REPO/releases/tag/airaccount-node-v$VERSION}"
 
-# ── sha256(需 tarball 或显式传 --sha256 未来可加)────────────────────
-[ -n "$TARBALL" ] || { echo "必须 --tarball <path>(用于算 sha256)" >&2; exit 1; }
-[ -f "$TARBALL" ] || { echo "找不到 tarball: $TARBALL" >&2; exit 1; }
+# 非 dry-run:签名工具链 + 私钥 + 自验公钥必须**先**齐备(否则别动 $OUT)。
+if [ "$DRY_RUN" != 1 ]; then
+  command -v minisign >/dev/null || die "缺 minisign"
+  [ -f "$SECKEY" ] || die "找不到私钥 $SECKEY(--seckey 指定,或放 ~/.ssh/aastar-updater.key)"
+  PUB="${PUBKEY_FILE:-$HERE/updater-pubkey.pub}"
+  [ -f "$PUB" ] || die "缺自验公钥 $PUB —— 签发环节必须能自验,拒绝跳过"
+fi
+
+# ── sha256 ────────────────────────────────────────────────────────────
+[ -n "$TARBALL" ] || die "必须 --tarball <path>(用于算 sha256)"
+[ -f "$TARBALL" ] || die "找不到 tarball: $TARBALL"
 if command -v sha256sum >/dev/null 2>&1; then SHA="$(sha256sum "$TARBALL" | awk '{print $1}')";
 else SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
-echo "$SHA" | grep -qE '^[0-9a-fA-F]{64}$' || { echo "sha256 计算异常" >&2; exit 1; }
+[[ "$SHA" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 计算异常"
 
-# ── 继承旧 manifest(metadata_version 单调、releases 累积)──────────────
-PREV_META=0
+# ── metadata_version 基线:防回滚计数器不能只靠本地未入库文件 ───────────
+# 换机器/新 clone/误删本地 $OUT → 本地 PREV_META 会从 0 重来,而节点持久化的 seen_metadata_version
+# 不降 → 永久拒绝该 channel 所有更新。故**读回已发布 manifest** 取其 metadata_version 作基线,
+# 取 max(本地, 已发布)+1,保证跨机器单调。--no-baseline 仅离线/首发用。
+LOCAL_META=0
 PREV_RELEASES='[]'
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
-  PREV_META="$(jq -r '.metadata_version // 0' "$OUT")"
+  LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
   PREV_RELEASES="$(jq -c '.releases // []' "$OUT")"
 fi
+PUBLISHED_META=0
+if [ "$NO_BASELINE" != 1 ]; then
+  if command -v curl >/dev/null 2>&1; then
+    pub_json="$(curl -fsSL --max-time 20 "$BASE_URL/$CHANNEL.json" 2>/dev/null || true)"
+    if [ -n "$pub_json" ] && printf '%s' "$pub_json" | jq empty 2>/dev/null; then
+      PUBLISHED_META="$(printf '%s' "$pub_json" | jq -r '(.metadata_version // 0) | floor')"
+      echo "读回已发布 manifest($BASE_URL/$CHANNEL.json):metadata_version=$PUBLISHED_META"
+    else
+      echo "⚠️ 读回已发布 manifest 失败/不存在(首发?)—— 仅用本地基线 $LOCAL_META" >&2
+    fi
+  else
+    echo "⚠️ 无 curl,跳过读回;仅用本地基线 $LOCAL_META" >&2
+  fi
+fi
+PREV_META=$LOCAL_META
+[ "$PUBLISHED_META" -gt "$PREV_META" ] && PREV_META=$PUBLISHED_META
 NEW_META=$((PREV_META + 1))
 
-# 缺省 min_version / requires_ta / rollback_floor:尽量从上一条最高 release 继承,否则用保守值。
-if [ -z "$MIN_VERSION" ]; then
-  MIN_VERSION="$(echo "$PREV_RELEASES" | jq -r 'map(.min_version) | (.[0] // "0.28.0")')"
-fi
-if [ -z "$REQUIRES_TA" ]; then
-  REQUIRES_TA="$(echo "$PREV_RELEASES" | jq -r 'map(.requires_ta_version) | (.[0] // "0.28.0")')"
-fi
+# 缺省 min_version / requires_ta:从 prev releases 里**按 semver 取最高版本**那条继承
+# (不是最近签发的 [0] —— 否则先签 0.30 再签热修 0.29.1 会让后续 0.31 静默继承 0.29.1 的
+# 宽松 min_version,放宽升级闸门,让本该分步升级的节点跳级)。用 jq 数字化三段排序。
+_highest_field() { # <field-name> <fallback>
+  echo "$PREV_RELEASES" | jq -r --arg f "$1" --arg fb "$2" '
+    def key: (.version|ltrimstr("v")|split(".")|map(tonumber? // 0));
+    if length==0 then $fb
+    else (sort_by(key) | last | .[$f]) as $v | ($v // $fb) end'
+}
+[ -n "$MIN_VERSION" ] || MIN_VERSION="$(_highest_field min_version 0.28.0)"
+[ -n "$REQUIRES_TA" ] || REQUIRES_TA="$(_highest_field requires_ta_version 0.28.0)"
 if [ -z "$ROLLBACK_FLOOR" ]; then
   ROLLBACK_FLOOR="$(jq -r '.rollback_floor // "0.28.0"' "$OUT" 2>/dev/null || echo "0.28.0")"
 fi
@@ -129,10 +185,14 @@ MANIFEST="$(jq -n \
   {metadata_version:$meta, generated_at:$gen, expires:$exp, channel:$channel, rollback_floor:$floor,
    releases: ([$new] + ($prev | map(select(.version != $new.version))))}')"
 
-# ── schema 自检(对齐 updater load_manifest 的关键校验,fail-closed)────
-echo "$MANIFEST" | jq -e '
-  (.metadata_version|type=="number")
-  and (.expires|type=="string")
+# ── schema 自检:**逐字段镜像**节点 aastar-node-updater.sh 的 load_manifest(fail-closed)。
+# ⚠️ 这两处 schema 是手写双份,必须同步改;下面的 test-release-sign.sh 会真跑节点 load_manifest
+# 校验本脚本产物,防二者漂移(daemon #5 根因)。
+NOTES_MAX_JQ="$NOTES_MAX"
+echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
+  (.metadata_version|type=="number" and .==floor)                       # 整数(非小数)
+  and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+  and (.rollback_floor|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
   and (.releases|type=="array" and length>0)
   and (all(.releases[];
         (.version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
@@ -141,35 +201,46 @@ echo "$MANIFEST" | jq -e '
         and (.severity|test("^(none|low|medium|high|critical)$"))
         and (.min_version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
         and (.requires_ta_version==null or (.requires_ta_version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
+        and (.tarball|type=="string" and length>0)
+        and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=$nmax)))
       ))
 ' >/dev/null || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
 
-mkdir -p "$(dirname "$OUT")"
-echo "$MANIFEST" | jq . > "$OUT"
-echo "✅ manifest 已写: $OUT"
-echo "   version=$VERSION  metadata_version=${PREV_META}->${NEW_META}  sha256=$SHA"
-echo "   severity=$SEVERITY security=$SECURITY ta_changed=$TA_CHANGED expires=$EXPIRES"
-[ "$TA_CHANGED" = "true" ] && echo "   ⚠️ ta_changed=true:节点将拒绝在线 apply,只能 OOB 刷 TA。"
+# 进度/摘要一律 → stderr,让 dry-run 的 **stdout 是干净的 manifest JSON**(可直接 `| jq`)。
+{
+  echo "   version=$VERSION  metadata_version=${PREV_META}->${NEW_META}  sha256=$SHA"
+  echo "   severity=$SEVERITY security=$SECURITY ta_changed=$TA_CHANGED expires=$EXPIRES"
+  echo "   min_version=$MIN_VERSION requires_ta=$REQUIRES_TA rollback_floor=$ROLLBACK_FLOOR"
+  [ "$TA_CHANGED" = "true" ] && echo "   ⚠️ ta_changed=true:节点将拒绝在线 apply,只能 OOB 刷 TA。"
+} >&2
 
 if [ "$DRY_RUN" = 1 ]; then
-  echo "（--dry-run:跳过签名。校验签发结果:上传 $OUT + .minisig 到 AU_MANIFEST_BASE，tarball 到 release）"
+  echo "── dry-run:以下为组装结果(**未写 $OUT、未签名**)──" >&2
+  echo "$MANIFEST" | jq .   # stdout:纯 manifest JSON
+  echo "（dry-run 结束:不产生任何副作用。去掉 --dry-run 才会签名 + 原子写 $OUT/.minisig）" >&2
   exit 0
 fi
 
-# ── 签名(minisign;私钥密码交互输入)──────────────────────────────────
-command -v minisign >/dev/null || { echo "缺 minisign" >&2; exit 1; }
-[ -f "$SECKEY" ] || { echo "找不到私钥 $SECKEY(--seckey 指定,或放 ~/.ssh/aastar-updater.key)" >&2; exit 1; }
-echo "→ 用 $SECKEY 签名(将提示输入私钥密码)…"
-minisign -S -s "$SECKEY" -m "$OUT" -x "$OUT.minisig" -c "aastar node channel manifest ($CHANNEL v$VERSION)"
-echo "✅ 签名已写: $OUT.minisig"
+# ── 写临时文件 → 签名 → 自验 → 原子替换(签名成功前绝不动 $OUT/.minisig)───────
+mkdir -p "$(dirname "$OUT")"
+TMP_JSON="$(mktemp "${OUT}.tmp.XXXXXX")"
+TMP_SIG="$TMP_JSON.minisig"
+trap 'rm -f "$TMP_JSON" "$TMP_SIG"' EXIT
+echo "$MANIFEST" | jq . > "$TMP_JSON"
 
-# ── 立即自验(用仓库内公钥)──────────────────────────────────────────
-PUB="$HERE/updater-pubkey.pub"
-if [ -f "$PUB" ]; then
-  minisign -V -p "$PUB" -m "$OUT" -x "$OUT.minisig" >/dev/null \
-    && echo "✅ 用 $PUB 自验通过" \
-    || { echo "❌ 自验失败!签名与仓库公钥不匹配 —— 私钥是否用错?" >&2; exit 1; }
-fi
+echo "→ 用 $SECKEY 签名(将提示输入私钥密码)…"
+minisign -S -s "$SECKEY" -m "$TMP_JSON" -x "$TMP_SIG" -c "aastar node channel manifest ($CHANNEL v$VERSION)"
+# 自验(仓库公钥;缺公钥在前置已 die,这里必存在)——不匹配即私钥用错,别落盘。
+minisign -V -p "$PUB" -m "$TMP_JSON" -x "$TMP_SIG" >/dev/null \
+  || die "自验失败!签名与仓库公钥不匹配 —— 私钥是否用错?(未触碰 $OUT)"
+
+# 原子替换:正文与签名一起就位(避免正文换了、旧签名还在的窗口)。
+mv -f "$TMP_JSON" "$OUT"
+mv -f "$TMP_SIG"  "$OUT.minisig"
+trap - EXIT
+echo "✅ 已签发并原子写入:"
+echo "   $OUT"
+echo "   $OUT.minisig(仓库公钥自验通过)"
 
 cat <<EOF
 
@@ -177,7 +248,8 @@ cat <<EOF
   1. 把 tarball 传到 release:
        gh release create airaccount-node-v$VERSION "$TARBALL" -t "airaccount-node v$VERSION" -n "$NOTES"
      (或 gh release upload airaccount-node-v$VERSION "$TARBALL")
-  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE):
+  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE = $BASE_URL):
        $OUT
        $OUT.minisig
+  ⚠️ metadata_version 是防回滚单点状态:$OUT 建议入库 / 或每次发版靠 --base-url 读回基线。
 EOF

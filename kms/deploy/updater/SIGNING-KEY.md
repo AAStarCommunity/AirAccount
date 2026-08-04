@@ -20,6 +20,11 @@ RWSynqFGJezUtHE8RGgt/hza4GLIjbaivYjnBKwuQ+liM52mXNbgVzAo
 - 用途:发版时给 `channels/<channel>.json` 签名(见 [`release-sign.sh`](./release-sign.sh))
 - 备份:密码管理器 + 离线介质各一份。**丢失=无法再发版**(需换密钥并刷新所有节点公钥);
   **泄露=攻击者可伪造更新**(需立即轮换 + 通过 OOB 给所有节点换公钥)。
+- ⚠️ **manifest 状态也是无备份的单点信任根**:`channels/<channel>.json` 的 `metadata_version`(防回滚
+  单调计数)+ 累积的 `releases[]` 丢了,同样发不出能被节点接受的新版(计数倒退 → 节点持久化的
+  `seen_metadata_version` 永久拒绝)。缓解:把签名后的 `channels/<channel>.json`(+ `.minisig`)入库/
+  备份,且 `release-sign.sh` 默认会从已发布 URL **读回** `metadata_version` 作基线(`--base-url`),
+  跨机器/新 clone 也单调。发版机与私钥一起纳入备份预案。
 - 生成方式(已完成,记录备查):
   ```bash
   minisign -G -p ~/.ssh/aastar-updater.pub -s ~/.ssh/aastar-updater.key
