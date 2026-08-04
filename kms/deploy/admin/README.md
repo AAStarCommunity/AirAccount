@@ -66,7 +66,13 @@ chmod 0640 /etc/airaccount/admin.env; chown root:airaccount-admin /etc/airaccoun
 install -m0440 sudoers.d-airaccount-admin /etc/sudoers.d/airaccount-admin
 visudo -cf /etc/sudoers.d/airaccount-admin
 
-# 6) systemd
+# 6) 状态目录必须**先建**(root 拥有)—— service 的 ReadWritePaths 会绑定它;不存在则
+#    systemctl start 直接 226/NAMESPACE 失败。**不要**用 StateDirectory=(那会把目录 chown 给
+#    服务用户 airaccount-admin,又变成「Web 用户拥有 trust 相关目录」的那类问题)。
+install -d -m0755 -o root -g root /var/lib/airaccount/updater
+install -d -m0755 -o root -g root /opt/airaccount   # 一般已由步骤 2 建;确保存在
+
+# 7) systemd
 install -m0644 airaccount-admin.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now airaccount-admin
 ```

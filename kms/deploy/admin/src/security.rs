@@ -83,23 +83,33 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
             }
         }
     }
-    // Tailscale serve/funnel:ADMIN_BIND_TAILSCALE=1 模式下最可能的「误发公网」路径 ——
-    // `tailscale funnel` 会把本端口发布成公开 *.ts.net HTTPS。best-effort(取不到状态就跳过)。
-    for sub in [["funnel", "status"], ["serve", "status"]] {
-        if let Ok(out) = std::process::Command::new("tailscale").args(sub).output() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            // funnel status 会列出被发布的端口;本端口出现即视为暴露。
-            if out.status.success()
-                && (s.contains(&format!(":{needle_port}")) || s.contains(&format!("127.0.0.1:{needle_port}")))
-                && (sub[0] == "funnel" || s.to_lowercase().contains("funnel"))
-            {
-                return Err(format!("端口 {port} 疑似被 tailscale {} 发布到公网 —— 拒绝启动(tailscale funnel off)", sub[0]));
-            }
+    // Tailscale **funnel**(不是 serve):funnel 才会把本端口发布成公开 *.ts.net HTTPS;
+    // serve 只在 tailnet 内(非公网),不查以免误报。带 3s 超时:tailscaled 无响应也不卡启动。
+    // best-effort —— 非 root 大概率取不到状态而静默跳过(下面注释说明权威防线)。
+    if let Some(s) = run_with_timeout("tailscale", &["funnel", "status"], std::time::Duration::from_secs(3)) {
+        if s.contains(&format!(":{needle_port}")) {
+            return Err(format!("端口 {port} 疑似被 tailscale funnel 发布到公网 —— 拒绝启动(tailscale funnel off)"));
         }
     }
     // 注:本进程以非 root 运行,root-only 的 /root/.cloudflared/config.yml 读不到会被静默跳过;
     // 隧道/反代的**权威**防线是绑定回环 + 上面的启动自检 + 部署侧 nftables/防火墙,配置扫描仅作 tripwire。
     Ok(())
+}
+
+/// 跑一条命令、最多等 timeout;成功返回 stdout,超时/失败/命令不存在返回 None(best-effort)。
+/// 用独立线程 + recv_timeout,避免 tailscaled 卡死时挂住同步的启动自检。
+fn run_with_timeout(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    let cmd = cmd.to_string();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&cmd).args(&args).output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        _ => None,
+    }
 }
 
 /// argon2id 校验:读 hash 文件(PHC 串),与明文密码比对。

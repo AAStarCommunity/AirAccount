@@ -267,18 +267,20 @@ fn csrf_guard(st: Shared) -> impl Filter<Extract = (), Error = Rejection> + Clon
 #[derive(Deserialize)] struct LoginReq { password: String }
 #[derive(Serialize)] struct LoginResp { csrf: String }
 
-/// 限制并发 argon2 校验:argon2id 默认 ~19MiB/次,若不限并发 spawn_blocking 会被登录洪泛
-/// 撑爆内存(板子内存小)。permit 少量即可,兼作登录节流。本服务拒绝任何反代,故**没有**
-/// 外部限速可依赖,限速必须在进程内做。
+/// 串行化 argon2 校验(permit=1):argon2id 默认 ~19MiB/次,不限并发会被登录洪泛撑爆内存;
+/// 且**串行**是让失败计数真正生效的关键 —— 并发时一批请求会在计数递增前都通过「未锁定」检查,
+/// 锁形同虚设。本服务拒绝任何反代,没有外部限速可依赖,限速必须在进程内做。
 fn login_sem() -> &'static tokio::sync::Semaphore {
     static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    SEM.get_or_init(|| tokio::sync::Semaphore::new(2))
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(1))
 }
 const LOGIN_MAX_FAILS: u32 = 8;                 // 连续失败达此数即锁定
 const LOGIN_LOCK: Duration = Duration::from_secs(60);
 
 async fn api_login(cfg: Arc<Config>, st: Shared, req: LoginReq) -> Result<impl Reply, Rejection> {
-    // 锁定期内直接拒(连续失败过多)——防本机/Tailscale 暴力枚举。
+    // 先拿 login permit(串行),**再**查锁定 —— 复查在拿锁之后,避免一批并发请求在计数递增前
+    // 全部通过「未锁定」检查(check-before-await 竞争,与 helper STUCK 同类)。
+    let _permit = login_sem().acquire().await.map_err(|_| warp::reject::reject())?;
     {
         let mut g = st.lock().await;
         if g.login_locked(Instant::now()) {
@@ -286,9 +288,8 @@ async fn api_login(cfg: Arc<Config>, st: Shared, req: LoginReq) -> Result<impl R
         }
         g.purge(Instant::now());
     }
-    // argon2 校验:放 spawn_blocking(~19MiB/50ms,别阻塞 async worker),并用信号量限并发(限内存/节流)。
+    // argon2 校验:放 spawn_blocking(~19MiB/50ms,别阻塞 async worker)。
     let ok = {
-        let _permit = login_sem().acquire().await.map_err(|_| warp::reject::reject())?;
         let hash_file = cfg.admin_hash_file.clone();
         let pw = req.password.clone();
         tokio::task::spawn_blocking(move || security::verify_password(&hash_file, &pw).unwrap_or(false))

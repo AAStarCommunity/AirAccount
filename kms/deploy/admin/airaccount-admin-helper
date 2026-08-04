@@ -33,14 +33,19 @@ assert_secure() {  # assert_secure <path>(文件或目录)
     echo "helper: $f 可被 group/other 写,拒绝(修 chmod go-w)" >&2; exit 3
   fi
 }
-# 承载 trust root 的目录也查(防目录可写→绕过文件权限替换里面的 env/pubkey/updater)。
-for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater; do assert_secure "$d"; done
+verb="${1:-}"   # 先取动词(下面 pubkey 断言按动词区分);实参在断言后再 shift。
+
+# 承载 trust root 的目录也查(防目录可写→绕过文件权限替换里面的 env/pubkey/updater/release)。
+# STATE_DIR/releases 存在才查(fresh box 首次 apply 前 releases 尚不存在)。
+for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater "$STATE_DIR"; do assert_secure "$d"; done
+[ -e /opt/airaccount/releases ] && assert_secure /opt/airaccount/releases
 assert_secure "$0"
 assert_secure "$UPDATER"
-assert_secure "$PUBKEY"                         # updater 必须有它来验签
-[ -e "$ENV_FILE" ] && assert_secure "$ENV_FILE" # updater.env 可选;存在则必须安全(会被 source)
+[ -e "$ENV_FILE" ] && assert_secure "$ENV_FILE" # updater.env 可选;每个动词都 source,存在则必须安全
+# pubkey 仅 check/apply 需要(要验签);status/rollback 不验签,别因缺 pubkey 让整个面板挂。
+case "$verb" in check|apply) assert_secure "$PUBKEY" ;; esac
 
-verb="${1:-}"; shift || true
+shift || true
 
 # updater 以固定、干净的环境运行(env -i);只显式传它必须的几个,绝不继承 Web 的环境。
 run_updater() {  # run_updater <updater-args...>

@@ -15,13 +15,16 @@ use tokio::sync::Semaphore;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(180); // updater apply/check 的上限
 const OUTPUT_CAP: usize = 64 * 1024;                       // 截断 helper 输出,防内存膨胀
 
-/// 全局串行化 **所有** helper 调用(permit=1)。原来 permit=2 会放两个并发变更动词
-/// (apply/rollback)同时进 —— 而超时时 kill_on_drop 发的 SIGKILL 打不动**已 exec 进 root
-/// updater 的 sudo 子进程**(Linux 按当前 uid 判权,非 root 父进程杀不了 root 子进程),
-/// 释放的 permit 会让重试再起一个并发 apply。串行到 1 + 下面的 STUCK 闩一起堵死这条路。
-fn helper_sem() -> &'static Semaphore {
+/// 变更动词(apply/rollback)串行化到 **1** —— 超时 kill_on_drop 的 SIGKILL 打不动已 exec 进
+/// root updater 的 sudo 子进程(Linux 按当前 uid 判权),放两个并发会起第二个 apply。
+fn mut_sem() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| Semaphore::new(1))
+}
+/// 读动词(status/check)单独限流,**不**排在 apply 后面(否则一次 apply 能让面板 hang 满 180s)。
+fn read_sem() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(3))
 }
 
 /// 变更动词一旦超时(root updater 可能还活着、杀不掉),置此闩 → 拒绝后续变更动词自动重试,
@@ -44,11 +47,18 @@ fn cap(mut s: String) -> String {
 pub async fn run(helper: &str, args: &[&str]) -> Result<String, String> {
     use std::sync::atomic::Ordering;
     let mutating = is_mutating(args);
-    // 上次变更超时未回收 → 拒绝新的变更动词(读动词 status/check 仍放行,便于诊断)。
-    if mutating && helper_stuck().load(Ordering::SeqCst) {
-        return Err("上一次变更操作超时且可能仍在后台运行,已拒绝新的变更(需人工检查 updater/flock 后重启 admin 服务)".into());
-    }
-    let _permit = helper_sem().acquire().await.map_err(|_| "并发信号量关闭".to_string())?;
+    let stuck_err = || "上一次变更操作超时且可能仍在后台运行,已拒绝新的变更(需人工检查 updater/flock 后重启 admin 服务)".to_string();
+    // 先 acquire 对应信号量,**再**(对变更动词)复查 STUCK 闩 —— 复查必须在拿到 permit 之后:
+    // 否则 B 在闩置位前通过检查、随后阻塞等 permit,A 超时置闩并释放 permit,B 会带着过期的
+    // 「未 stuck」判断继续起第二个 apply(正是本闩要堵的竞争)。读动词不看闩。
+    let _permit = if mutating {
+        if helper_stuck().load(Ordering::SeqCst) { return Err(stuck_err()); }
+        let p = mut_sem().acquire().await.map_err(|_| "并发信号量关闭".to_string())?;
+        if helper_stuck().load(Ordering::SeqCst) { return Err(stuck_err()); } // 拿锁后再查一次
+        p
+    } else {
+        read_sem().acquire().await.map_err(|_| "并发信号量关闭".to_string())?
+    };
     let child = Command::new("sudo")
         .arg("-n")
         .arg(helper)
@@ -67,7 +77,11 @@ pub async fn run(helper: &str, args: &[&str]) -> Result<String, String> {
         Ok(Err(e)) => return Err(format!("helper 执行错误: {e}")),
         Err(_) => {
             // 变更动词超时:root updater 可能仍在跑(杀不掉)→ 置闩,拒绝后续变更自动重试。
-            if mutating { helper_stuck().store(true, Ordering::SeqCst); }
+            if mutating {
+                helper_stuck().store(true, Ordering::SeqCst);
+                eprintln!("[admin] 变更 helper 超时(>{}s),置 STUCK 闩:root updater 可能仍在后台运行,\
+                           已锁定不再自动重试变更,需人工检查 updater/flock 后重启 admin 服务", HELPER_TIMEOUT.as_secs());
+            }
             return Err(format!("helper 超时(>{}s);若为 apply/rollback,updater 可能仍在后台运行,已锁定不再自动重试", HELPER_TIMEOUT.as_secs()));
         }
     };
