@@ -1,0 +1,5 @@
+{
+  "repoId": "kms",
+  "coordProjectId": "03253073-c822-4a5a-b169-cb39976200c3",
+  "note": "本仓库(AirAccount KMS 后端)在协同中枢 Cooperation-Center 里的 label 是 repo:kms —— 工兵匹配任务只用这一个 repoId(labelName=repo:kms)。给本仓派活请打 repo:kms 标签。repo:airaccount-contract 是另一个独立的合约仓库,不是本仓。"
+}
