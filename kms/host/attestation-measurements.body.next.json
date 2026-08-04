@@ -1,0 +1,56 @@
+{
+ "schema": "airaccount.attestation-measurements.v1",
+ "sequence": 3,
+ "updated": "2026-07-07",
+ "ta_uuid": "4319f3510b244097b65980ee4f824cdd",
+ "measurements": [
+  {
+   "version": "v0.28.0-strict",
+   "ta_measurement": "3e2651ef12f0190b42ff570185073d2f4ce7c81f138245edb6061b87247f6675",
+   "status": "current",
+   "build": {
+    "features": "ree-fs-only,strict-challenge",
+    "toolchain": "nightly-2024-05-15",
+    "note": "Variant B + T3; PR #152/#153/#154"
+   }
+  },
+  {
+   "version": "v0.28.0-dev-strict",
+   "ta_measurement": "222fbd4dba9bffe8e3533f0c50bc5523990f1a65681d4cf88f8c9b23366d81cf",
+   "status": "current",
+   "build": {
+    "features": "ree-fs-only,strict-challenge,dev-rpid",
+    "toolchain": "nightly-2024-05-15",
+    "note": "dev-rpid \u5b9e\u4f8b(kms.aastar.io,\u989d\u5916\u63a5\u53d7 localhost rpId);prod \u677f\u7528 v0.28.0-strict"
+   }
+  },
+  {
+   "version": "v0.21.0-strict",
+   "ta_measurement": "188359595eab3c9e25dbd6126f11898a5b8e3fbf8d3a303a1be2676cca6071a1",
+   "status": "previous",
+   "build": {
+    "features": "ree-fs-only,strict-challenge",
+    "toolchain": "nightly-2024-05-15",
+    "note": "#37 attestation + #63 strict challenge build; deployed on FRDM-IMX93"
+   }
+  },
+  {
+   "version": "v0.21.0-transition",
+   "ta_measurement": "3b9435d635ce2d3730fd203b22c9e30659cf8414feb08a5a149258465706bd6b",
+   "status": "previous",
+   "build": {
+    "features": "ree-fs-only",
+    "toolchain": "nightly-2024-05-15",
+    "note": "#37 attestation only (transition challenge mode)"
+   }
+  },
+  {
+   "version": "v0.20.x-example-revoked",
+   "ta_measurement": "00000000000000000000000000000000000000000000000000000000deadbeef",
+   "status": "revoked",
+   "build": {
+    "note": "example of a revoked build \u2014 verifiers MUST NOT accept this measurement"
+   }
+  }
+ ]
+}
