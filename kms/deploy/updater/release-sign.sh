@@ -51,6 +51,10 @@ NOTES_MAX=280   # 节点 load_manifest 对 notes 的硬上限(与之保持一致
 
 die() { echo "release-sign: $*" >&2; exit 1; }
 usage() { sed -n '2,30p' "$0"; exit "${1:-0}"; }
+# 统一清理:所有临时路径(读回目录 + 签名临时文件)进此数组,一个 trap 收。
+CLEANUP_PATHS=()
+cleanup() { [ "${#CLEANUP_PATHS[@]}" -gt 0 ] && rm -rf "${CLEANUP_PATHS[@]}" 2>/dev/null || true; }
+trap cleanup EXIT
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -118,32 +122,41 @@ if command -v sha256sum >/dev/null 2>&1; then SHA="$(sha256sum "$TARBALL" | awk 
 else SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
 [[ "$SHA" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 计算异常"
 
-# ── metadata_version 基线:防回滚计数器不能只靠本地未入库文件 ───────────
-# 换机器/新 clone/误删本地 $OUT → 本地 PREV_META 会从 0 重来,而节点持久化的 seen_metadata_version
-# 不降 → 永久拒绝该 channel 所有更新。故**读回已发布 manifest** 取其 metadata_version 作基线,
-# 取 max(本地, 已发布)+1,保证跨机器单调。--no-baseline 仅离线/首发用。
-LOCAL_META=0
-PREV_RELEASES='[]'
+# ── 基线:counter + releases[] + rollback_floor 都从**已验签的已发布 manifest** 继承 ──────
+# 防回滚计数器不能只靠本地未入库文件(换机/新 clone → 本地 0 重来 → 节点 seen_metadata_version
+# 不降 → 永久拒绝)。但读回的 manifest 是**不可信输入**:若只读它的 metadata_version 而不验签,
+# 攻击者能喂一个 metadata_version=9e9 的假 manifest,让本脚本用**真私钥签**出一个天文计数 →
+# 节点 ratchet 后永久拒绝一切后续版本(把本工具要防的砖化搬到了上游)。故:**先验签,后继承**,
+# 且 counter/releases/floor **全部**从验签副本取(只取 counter 会在新 clone 上丢掉所有旧 release +
+# 把 rollback_floor 悄悄降回 0.28.0)。读回失败(网络/端点)一律 fail-closed,首发须显式 --no-baseline。
+LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
-  PREV_RELEASES="$(jq -c '.releases // []' "$OUT")"
+  LOCAL_RELEASES="$(jq -c '.releases // []' "$OUT")"
+  LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
 fi
-PUBLISHED_META=0
+PREV_META="$LOCAL_META"; PREV_RELEASES="$LOCAL_RELEASES"; BASE_FLOOR="$LOCAL_FLOOR"
 if [ "$NO_BASELINE" != 1 ]; then
-  if command -v curl >/dev/null 2>&1; then
-    pub_json="$(curl -fsSL --max-time 20 "$BASE_URL/$CHANNEL.json" 2>/dev/null || true)"
-    if [ -n "$pub_json" ] && printf '%s' "$pub_json" | jq empty 2>/dev/null; then
-      PUBLISHED_META="$(printf '%s' "$pub_json" | jq -r '(.metadata_version // 0) | floor')"
-      echo "读回已发布 manifest($BASE_URL/$CHANNEL.json):metadata_version=$PUBLISHED_META"
-    else
-      echo "⚠️ 读回已发布 manifest 失败/不存在(首发?)—— 仅用本地基线 $LOCAL_META" >&2
-    fi
-  else
-    echo "⚠️ 无 curl,跳过读回;仅用本地基线 $LOCAL_META" >&2
-  fi
+  command -v curl >/dev/null || die "读回基线需 curl(离线/首发请显式 --no-baseline)"
+  command -v minisign >/dev/null || die "读回基线要验签,需 minisign(或 --no-baseline)"
+  PUB_RB="${PUBKEY_FILE:-$HERE/updater-pubkey.pub}"
+  [ -f "$PUB_RB" ] || die "读回基线要验签,缺公钥 $PUB_RB(或 --no-baseline)"
+  RB_DIR="$(mktemp -d)"; CLEANUP_PATHS+=("$RB_DIR")
+  rc=0; curl -fsSL --max-time 20 "$BASE_URL/$CHANNEL.json" -o "$RB_DIR/m.json" || rc=$?
+  [ "$rc" = 0 ] || die "读回已发布 manifest 失败(rc=$rc,网络/端点/首发?)—— 拒绝(首发请显式 --no-baseline,不让瞬时网络错静默回退成计数倒退)"
+  curl -fsSL --max-time 20 "$BASE_URL/$CHANNEL.json.minisig" -o "$RB_DIR/m.sig" \
+    || die "已发布 manifest 有正文却拉不到 .minisig —— 拒绝采信未签名的基线"
+  minisign -V -p "$PUB_RB" -m "$RB_DIR/m.json" -x "$RB_DIR/m.sig" >/dev/null 2>&1 \
+    || die "已发布 manifest 验签失败 —— 拒绝把未经验证的输入洗进签名产物(疑投毒)"
+  jq empty "$RB_DIR/m.json" 2>/dev/null || die "已发布 manifest 非合法 JSON"
+  # 已验签 = 可信 → 作权威基线:counter/releases/floor 全从这里来。
+  PREV_META="$(jq -r '(.metadata_version // 0) | floor' "$RB_DIR/m.json")"
+  PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
+  BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
+  # 本地 $OUT counter 若更高(operator 本地签了没上传)→ 取 max 保单调。
+  [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
+  echo "读回并**验签**已发布 manifest:metadata_version=$PREV_META releases=$(printf '%s' "$PREV_RELEASES" | jq length)" >&2
 fi
-PREV_META=$LOCAL_META
-[ "$PUBLISHED_META" -gt "$PREV_META" ] && PREV_META=$PUBLISHED_META
 NEW_META=$((PREV_META + 1))
 
 # 缺省 min_version / requires_ta:从 prev releases 里**按 semver 取最高版本**那条继承
@@ -157,9 +170,8 @@ _highest_field() { # <field-name> <fallback>
 }
 [ -n "$MIN_VERSION" ] || MIN_VERSION="$(_highest_field min_version 0.28.0)"
 [ -n "$REQUIRES_TA" ] || REQUIRES_TA="$(_highest_field requires_ta_version 0.28.0)"
-if [ -z "$ROLLBACK_FLOOR" ]; then
-  ROLLBACK_FLOOR="$(jq -r '.rollback_floor // "0.28.0"' "$OUT" 2>/dev/null || echo "0.28.0")"
-fi
+# rollback_floor 从验签基线继承(不再无脑降回 0.28.0 弱化已知漏洞地板)。
+[ -n "$ROLLBACK_FLOOR" ] || ROLLBACK_FLOOR="${BASE_FLOOR:-0.28.0}"
 
 # 跨 mac/linux 的 UTC 时间戳
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -203,6 +215,9 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
         and (.requires_ta_version==null or (.requires_ta_version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
         and (.tarball|type=="string" and length>0)
         and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=$nmax)))
+        and ((.security // false)|type=="boolean")               # 继承的旧条目也查(节点强制这三个类型)
+        and ((.auto_apply_allowed // false)|type=="boolean")
+        and ((.canary_ring // [])|type=="array")
       ))
 ' >/dev/null || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
 
@@ -215,9 +230,11 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
 } >&2
 
 if [ "$DRY_RUN" = 1 ]; then
-  echo "── dry-run:以下为组装结果(**未写 $OUT、未签名**)──" >&2
+  # ⚠️ 变量后紧跟多字节字符(如 、)必须 ${VAR} 括起 —— macOS 自带 bash 3.2 的变量名扫描器
+  # 非多字节感知,`$OUT、` 会把 、 吞进变量名,set -u 下直接 abort(签名机正是 Mac,dry-run 全废)。
+  echo "── dry-run:以下为组装结果(**未写 ${OUT}、未签名**)──" >&2
   echo "$MANIFEST" | jq .   # stdout:纯 manifest JSON
-  echo "（dry-run 结束:不产生任何副作用。去掉 --dry-run 才会签名 + 原子写 $OUT/.minisig）" >&2
+  echo "（dry-run 结束:不产生任何副作用。去掉 --dry-run 才会签名 + 原子写 ${OUT}/.minisig)" >&2
   exit 0
 fi
 
@@ -225,19 +242,20 @@ fi
 mkdir -p "$(dirname "$OUT")"
 TMP_JSON="$(mktemp "${OUT}.tmp.XXXXXX")"
 TMP_SIG="$TMP_JSON.minisig"
-trap 'rm -f "$TMP_JSON" "$TMP_SIG"' EXIT
+CLEANUP_PATHS+=("$TMP_JSON" "$TMP_SIG")   # 走统一 cleanup trap(失败也清,且不丢 RB_DIR 清理)
 echo "$MANIFEST" | jq . > "$TMP_JSON"
 
-echo "→ 用 $SECKEY 签名(将提示输入私钥密码)…"
+echo "→ 用 $SECKEY 签名(将提示输入私钥密码)…" >&2
 minisign -S -s "$SECKEY" -m "$TMP_JSON" -x "$TMP_SIG" -c "aastar node channel manifest ($CHANNEL v$VERSION)"
 # 自验(仓库公钥;缺公钥在前置已 die,这里必存在)——不匹配即私钥用错,别落盘。
 minisign -V -p "$PUB" -m "$TMP_JSON" -x "$TMP_SIG" >/dev/null \
-  || die "自验失败!签名与仓库公钥不匹配 —— 私钥是否用错?(未触碰 $OUT)"
+  || die "自验失败!签名与仓库公钥不匹配 —— 私钥是否用错?(未触碰 ${OUT})"
 
-# 原子替换:正文与签名一起就位(避免正文换了、旧签名还在的窗口)。
-mv -f "$TMP_JSON" "$OUT"
+# 原子替换:先落 .minisig 再落正文 —— 两个 mv 无法**联合**原子,但这个顺序下,任一时刻能被读到的
+# 组合都不会是「新正文 + 旧签名」(节点先取 json 再验 sig,失败即 fail-closed 重试,不砖)。
+# 上传步骤同理:先传 .minisig 再传 .json。
 mv -f "$TMP_SIG"  "$OUT.minisig"
-trap - EXIT
+mv -f "$TMP_JSON" "$OUT"
 echo "✅ 已签发并原子写入:"
 echo "   $OUT"
 echo "   $OUT.minisig(仓库公钥自验通过)"
