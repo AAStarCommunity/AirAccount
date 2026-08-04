@@ -52,21 +52,6 @@ macOS 上每块板的调试适配器是一个独立 USB serial,如 `/dev/cu.usbm
 **守卫中止怎么办**:说明串口没拿到活的 root shell(板子还在刷启动日志 / 未登录 / 串口被别的会话占用),
 这时**绝不会盲发关机**。先解决登录/占用,或确认设备选对(`--list` / `--print-dev`)。
 
-## serial-selfupdate.sh —— 带外一键自拉 release 升级
-
-自动 updater(`kms/deploy/updater/`)的**手动带外对应物**:板子上电但 SSH/Tailscale 不通时,
-从 Mac 端驱动板子从 GitHub Release 自拉指定版本 → 验签 → 换 CA → 烟测 → 失败自动回滚。
-
-```bash
-./serial-selfupdate.sh /dev/cu.usbmodem…831 airaccount-node-v0.29.1
-ENSURE_NET=1 ./serial-selfupdate.sh …    # 先串口切 WiFi 救网再升级
-```
-
-两段验证:① Mac 端 `gh` 下载 + `minisign` **pin 死可信公钥**验签(key ID `B4D4EC2546A19EB2`,
-= `kms/deploy/updater/updater-pubkey.pub` 生产发布链公钥,**绝不信 release 自带的 updater.pub** 避免循环信任)
-+ sha256;② 板端 `curl` 拉同一 tarball → `sha256sum` == Mac 已验哈希 + tar 加固。**换轮公钥时
-`TRUSTED_PUBKEY_LINE` 与 updater-pubkey.pub 同步改。** 板上无 minisign 时只做 sha256 二次校验。
-
 ## 测试
 
 ```bash

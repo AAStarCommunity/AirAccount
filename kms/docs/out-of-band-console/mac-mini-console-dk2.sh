@@ -59,16 +59,20 @@ esac
 # 串口自动 root 登录,pipe-pane 明文落盘 → 目录 700 / 文件 600 / >5MB 轮转。别在串口敲密钥。
 LOG="$LOG_DIR/$BOARD.log"
 mkdir -p "$LOG_DIR"; chmod 700 "$LOG_DIR"
+
+# 先查常驻会话:已在跑就直接退出,**不碰日志** —— 否则会把正在写的 pipe-pane
+# 日志从 fd 底下 rename 走,之后输出全落进 .1、$LOG 永久空掉。
+if "$TMUX_BIN" has-session -t "$BOARD" 2>/dev/null; then
+  echo "✅ $BOARD 控制台已在运行。远程 attach: ssh mac-mini -t '$TMUX_BIN attach -t $BOARD'"
+  exit 0
+fi
+
+# 仅在确认没有常驻会话(即将新建)时才轮转日志,不会影响正在写的 fd。
 if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
   [ -f "$LOG.1" ] && mv -f "$LOG.1" "$LOG.2"
   mv -f "$LOG" "$LOG.1"
 fi
 touch "$LOG"; chmod 600 "$LOG" "$LOG.1" "$LOG.2" 2>/dev/null || true
-
-if "$TMUX_BIN" has-session -t "$BOARD" 2>/dev/null; then
-  echo "✅ $BOARD 控制台已在运行。远程 attach: ssh mac-mini -t '$TMUX_BIN attach -t $BOARD'"
-  exit 0
-fi
 
 # 监督循环:串口没出现就等它,出现就 screen 连;断开(板重启/拔插)后自动重连。
 # 内层用 pick_dev(排除 5B6D);EXCLUDE/BAUD 生成时展开,运行时变量 \$ 转义。

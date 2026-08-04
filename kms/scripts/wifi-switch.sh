@@ -16,7 +16,9 @@ status() {
 
 select_network() {
     TARGET_SSID="$1"
-    NETID=$(wpa_cli -i $IFACE list_networks 2>/dev/null | awk -v s="$TARGET_SSID" '$0 ~ s {print $1}' | head -1)
+    # 精确匹配 ssid 字段(第 2 列,tab 分隔),不用 `$0 ~ s` 整行子串/正则 —— 否则
+    # SSID 与别的行前缀重叠(如 @JumboPlusIoT vs @JumboPlusIoT5GHz)会连错网。
+    NETID=$(wpa_cli -i $IFACE list_networks 2>/dev/null | awk -F'\t' -v s="$TARGET_SSID" '$2==s {print $1}' | head -1)
     if [ -z "$NETID" ]; then
         echo "[ERROR] 未找到网络: $TARGET_SSID（检查 /etc/wpa_supplicant.conf）"
         exit 1
