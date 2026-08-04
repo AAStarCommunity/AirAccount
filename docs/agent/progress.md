@@ -5,6 +5,9 @@
 ## 2026-08-04 — pilot 接管 + 仓库整理
 
 - **pilot 初始化**:建 `.pilot.yml`(base=main / integration=main,匹配现有 PR→main 流)+ `docs/agent/`。
+  - ⚠️ **合并终点**:本仓 integration=main 是受保护 trunk,`git-guard.sh merge-pr` 硬拒直合主干,
+    且主干需**非作者** approve —— 故 `pilot run` 在**「PR 已开、等外部 approve」即终止**,
+    合并由 pr-daemon/人工在 GitHub 上完成,pilot 不代劳自动合并。这是刻意设计,非缺陷。
 - **分支审核**:12 → 4。删 8 个(1 个 -d 干净合并 + 7 个 squash 合并/评审快照,逐个核过内容在 main)。
   保留:main、feat/updater-phase2-web-admin(#195)、feat/updater-release-signing(#196)、docs/oob-serial-rescue(有未合并 serial-selfupdate.sh,待 PR-A 后删)。
 - **仓库卫生**:73MB NXP PDF(`imx93-docs/`)+ WiFi PSK 明文密钥(`kms/docs/dk2-school-wifi/`)加 .gitignore,挡在 git 外。

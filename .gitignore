@@ -179,3 +179,6 @@ imx93-docs/
 
 # 板级 WiFi provisioning(含 wpa_supplicant PSK 明文密钥,绝不入库;本地/带外用)
 kms/docs/dk2-school-wifi/
+
+# 本地运维探针(含生产节点 Tailscale IP/角色/2-of-3 阈值拓扑,不发公开仓库)
+kms/deploy/selfcheck.sh

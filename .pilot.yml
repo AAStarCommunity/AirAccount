@@ -1,10 +1,17 @@
 # pilot 仓库配置(github.com/AAStarCommunity/AirAccount)
-# 本仓工作流:feature 分支 → PR → main。main 受 GitHub 分支保护(需非作者 approve + enforce_admins),
-# 无独立 staging 分支,故集成分支即 main(pilot 的 PR 合并目标)。
+#
+# 本仓工作流:feature 分支 → PR → main。main 受 GitHub 分支保护(需**非作者** approve +
+# enforce_admins),无独立 staging 分支。
+#
+# ⚠️ 合并是**手动/受控**的,不走 pilot 自动合并:integration_branch=main 是 trunk,
+# git-guard.sh merge-pr 会硬拒(防直合主干)。因此本仓的 `pilot run` 到「PR 已开、等外部
+# approve」即终止 —— 合并由 pr-daemon/人工 approve 后在 GitHub 上完成,不由 pilot 代劳。
+# (这是刻意的:主干保护 + 需他人 approve 本就不允许作者自动合并。)
 base_branch: main
 integration_branch: main
 protect_patterns: [release, hotfix]
 remote: origin
 allow_remote_cleanup: false
 docs_dir: docs/agent
-pr_daemon_root: ~/Dev/tools/PR-Daemon
+# pr_daemon_root 用 pilot 内置默认(~/Dev/tools/PR-Daemon),可用 $PILOT_PR_DAEMON_ROOT 覆盖;
+# 不写死在此处(避免把某台机器的目录布局钉进公开仓库)。
