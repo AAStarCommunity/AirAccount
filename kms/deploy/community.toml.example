@@ -21,11 +21,22 @@ profile = "prod"                        # prod=只认本域名 rpId;dev=额外�
 
 # ── DVT(aNode / YetAnotherAA-Validator)──
 [dvt]
-version       = "1.9.0"
+version       = "1.13.0"                 # CC-89 stage-2 guardian-slash;全 opt-in 默认关,升级零 breaking
 port          = 8080                    # 独立端口,不碰 KMS
 node_name     = "example-dvt-1"
 policy_enabled = false                  # layer-2 策略门;开启需 contracts.*.policy_registry
 kdf           = "pbkdf2"                # A55 上 DVT 官方建议 pbkdf2(scrypt 内存/CPU 偏重;解密是启动一次性)
+
+# ── guardian-slash watcher(CC-89 stage-2,opt-in,默认关)────────────────────
+# 仅 guardian 节点需要;不启用则 signer 行为与旧版完全一致。fail-closed:启用但缺
+# bls_aggregator_address / ETH_RPC_URL → watcher 自动禁用。这几项由 deploy-dvt.sh 落进
+# DVT 服务 dvt.env(仅当 guardian_watch_enabled=true 才写)。生产 arm slash 是 Phase-3
+# 产品决策,默认不激活。
+# guardian_watch_enabled   = false
+# bls_aggregator_address   = "0xf44E7E51EFFa867114BE48fA92411fE216b1A285"  # Sepolia SP BLSAggregator(以 SP 实际部署为准)
+# guardian_watch_from_block = 0          # aggregator 部署块;0=genesis(慢)
+# guardian_watch_dir       = "/opt/aastar/dvt/guardian-signer-records"      # 每节点独立,不含私钥
+# guardian_watch_interval_ms = 60000     # 可选,默认 60000
 # build = bare-node(DVT `scripts/build-bare-node.sh`,受限板官方姿势);gen 密钥用 DVT `scripts/gen-node-state.mjs`
 # BLS 私钥:生成后 EIP-2335 加密(NODE_KEY_PASSPHRASE 手动输入 → tmpfs,见 [secrets])
 # 链上注册:配好 [secrets].ETH_PRIVATE_KEY 后 POST /node/register(registerPublicKey)—— E2E 前置

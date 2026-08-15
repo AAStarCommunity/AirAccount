@@ -1,6 +1,16 @@
 # KMS Changelog
 
-> Updated: 2026-07-13
+> Updated: 2026-08-15
+
+## 0.30.0-beta.1 (组装中 · Beta7) — KMS+node+DVT 协调预发布
+
+> ⚠️ **未发布,release 分支组装中**。GitHub 标 pre-release。内容闸门见 `docs/agent/release-0.30.0-beta.1.md`(#195/#196/serial PR/DVT/安全检查)。
+
+### aastar-node 打包 — DVT 升 v1.13.0(CC-90 / DVT CC-89 stage-2 guardian-slash)
+- **DVT pin `v1.10.0 → v1.13.0`**:`aastar-node-installer.sh`(`git clone --branch` 唯一真源)+ `community.toml.example` + `community-profiles/{profile-combined,profile-dvt-only}.toml`。topology-3node 实跑节点配置不随发布强升,由部署时点定。
+- **guardian-slash watcher(opt-in,默认关,零 breaking)**:`community.toml.example [dvt]` 新增注释 opt-in 块;`deploy-dvt.sh` 仅当 `guardian_watch_enabled=true` 才把 `AUDIT_GUARDIAN_WATCH_*` 追加进 DVT `dvt.env`(fail-closed:缺 aggregator 拒部署)。默认关时 dvt.env 与旧版逐字节一致。
+- **镜像私钥安全(DVT #228)本仓结构上已安全**:installer 干净 tag `git clone` → gitignore 的 `node_dev_*.json` 不在 clone 内;运行时 BLS 私钥仍 `node_state.json`,`deploy-dvt.sh` 板上生成进 tmpfs → 加密 → `shred -u` → chmod 600,不提交、不进公开层。DVT v1.13.0 未改运行时密钥文件名,`deploy-dvt.sh` 零改动。
+- 链上合约(OverIssueFraudProofVerifier 等)单独部署,不进 aastar-node 运行时。
 
 ## 0.29.0 (2026-07-13) — Beta6 — CC-37 BLS PoP /pop（KMS-TEE key-less DVT 注册）+ self-init de-root
 

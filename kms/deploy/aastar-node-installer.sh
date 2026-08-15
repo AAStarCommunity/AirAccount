@@ -18,7 +18,7 @@ set -euo pipefail
 REPO="AAStarCommunity/AirAccount"
 VERSION="${VERSION:-latest}"
 DVT_REPO="AAStarCommunity/YetAnotherAA-Validator"
-DVT_TAG="${DVT_TAG:-v1.10.0}"
+DVT_TAG="${DVT_TAG:-v1.13.0}"   # CC-89 stage-2 guardian-slash(全 opt-in 默认关,零 breaking);可 env 覆盖
 TA_DIR="/lib/optee_armtz"
 CA_DIR="/root/AirAccount/target/release"
 NODE_SETUP_DIR="/opt/aastar/node-setup"
