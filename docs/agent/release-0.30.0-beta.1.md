@@ -33,7 +33,7 @@
 | G1 | **#195** Web 管理台增量1(feat/updater-phase2-web-admin @ `8eaf9d6`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 代码已全绿,不能自合(main 保护+需非作者 approve) | 重启 pr-daemon 复评 `8eaf9d6` **或** 人工 approve → auto-merge |
 | G2 | **#196** 发版签名(feat/updater-release-signing @ `05251c2`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 同上,已全绿 | 重启 pr-daemon 复评 `05251c2` **或** 人工 approve → auto-merge |
 | G3 | **serial-selfupdate.sh PR**(docs/oob-serial-rescue,唯一副本,#198 时移出) | 🟡 待起 PR | ✅ **可直接推**(见 §5) | 重新 push 分支 + 起 PR + 走评审 |
-| G4 | **DVT fixes + 定版** | 🟢 **已解除** | ✅ 已做 | DVT v1.13.0 已发布(CC-89);CC-90 请求已履行:pin 升 + guardian watcher opt-in env 落地(release `27676d3`);运行时密钥名未变→deploy-dvt.sh 零改动。待 G5 前**真机验证 guardian watcher 通路**(opt-in 路径未上板测) |
+| G4 | **DVT fixes + 定版** | 🟢 **已闭环** | ✅ 已做 | DVT v1.13.0 发布(CC-89);CC-90 履行:pin 升(`27676d3`)+ guardian watcher opt-in env + aggregator 修正(`afcf2aa`)。DVT 已确认交付无误。运行时密钥名未变→deploy-dvt.sh 零改动。**生产 aggregator = `0x174b60bB462b00550F0EC7Bc35Fe39dDB6310158`**(SP A' BLSAggregator 4.3.0,**SP 24h timelock apply 后生效**)。待 G5 前**真机验证 guardian watcher 通路**(opt-in 路径未上板测,须 aggregator apply 后) |
 | G5 | **release 分支安全检查** | ⬜ 待做(内容齐后) | ✅ 可发起 | 内容合齐后跑;查出问题 → 打 security patch 折入本 beta |
 
 ## 4. 发布执行步骤(闸门全绿后)
