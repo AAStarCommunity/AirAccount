@@ -22,7 +22,7 @@
 |---|---|---|---|---|
 | **node 整包** | 本仓 | `airaccount-node-v0.29.1`(pre) | **`v0.30.0-beta.1`** | 社区节点整包,统一入口 tag |
 | **KMS 二进制** | 本仓 `kms/` | `airaccount-kms-v0.29.0` / code `0.29.0` | **待定**:若含 KMS API/TA 变更 → `v0.30.0-beta.1`;若仅 updater/脚本 → 复用 `0.29.x` | `#195/#196` 是 updater/admin 工具,**非** KMS API;是否 bump 待安全门+最终内容定 |
-| **DVT** | `YetAnotherAA-Validator`(repo:dvt) | pin `v1.10.0` | **待 DVT 定版**:可能带额外 fix,版本另行对齐,非本仓当前 pin | 跨仓协调,DVT 稳定发版后回填;届时同步 KMS `DVT pin` |
+| **DVT** | `YetAnotherAA-Validator`(repo:dvt) | pin `v1.10.0` | **`v1.13.0`✅ 已定版并 pin** | GitHub release v1.13.0(非 prerelease,2026-08-15);CC-89 stage-2 guardian-slash;本仓 pin 已升(release 分支 `27676d3`) |
 
 > ⚠️ 版本对齐原则:node 是统一入口号;KMS/DVT 各自的 tag 按**是否有本体变更**决定 bump 与否,不为对齐而空转版本号。
 
@@ -33,7 +33,7 @@
 | G1 | **#195** Web 管理台增量1(feat/updater-phase2-web-admin @ `8eaf9d6`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 代码已全绿,不能自合(main 保护+需非作者 approve) | 重启 pr-daemon 复评 `8eaf9d6` **或** 人工 approve → auto-merge |
 | G2 | **#196** 发版签名(feat/updater-release-signing @ `05251c2`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 同上,已全绿 | 重启 pr-daemon 复评 `05251c2` **或** 人工 approve → auto-merge |
 | G3 | **serial-selfupdate.sh PR**(docs/oob-serial-rescue,唯一副本,#198 时移出) | 🟡 待起 PR | ✅ **可直接推**(见 §5) | 重新 push 分支 + 起 PR + 走评审 |
-| G4 | **DVT fixes + 定版** | 🟡 跨仓,待 DVT | ❌ 别仓 | DVT 侧完成 fix + 发稳定 tag,回填 §2 并升 KMS `DVT pin` |
+| G4 | **DVT fixes + 定版** | 🟢 **已解除** | ✅ 已做 | DVT v1.13.0 已发布(CC-89);CC-90 请求已履行:pin 升 + guardian watcher opt-in env 落地(release `27676d3`);运行时密钥名未变→deploy-dvt.sh 零改动。待 G5 前**真机验证 guardian watcher 通路**(opt-in 路径未上板测) |
 | G5 | **release 分支安全检查** | ⬜ 待做(内容齐后) | ✅ 可发起 | 内容合齐后跑;查出问题 → 打 security patch 折入本 beta |
 
 ## 4. 发布执行步骤(闸门全绿后)
