@@ -19,7 +19,7 @@ profile = "prod"
 db_path = "/var/lib/kms/kms.db"
 
 [dvt]                                    # DVT 节点(可 TEE 托管或本地 keystore)
-version        = "1.13.0"
+version        = "1.13.1"
 port           = 8080
 node_name      = "REPLACE_ME-dvt"
 policy_enabled = false

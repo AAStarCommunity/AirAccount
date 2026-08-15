@@ -21,7 +21,7 @@ profile = "prod"                        # prod=只认本域名 rpId;dev=额外�
 
 # ── DVT(aNode / YetAnotherAA-Validator)──
 [dvt]
-version       = "1.13.0"                 # CC-89 stage-2 guardian-slash;全 opt-in 默认关,升级零 breaking
+version       = "1.13.1"                 # CC-89 guardian-slash + fail-closed 硬化;全 opt-in 默认关,升级零 breaking
 port          = 8080                    # 独立端口,不碰 KMS
 node_name     = "example-dvt-1"
 policy_enabled = false                  # layer-2 策略门;开启需 contracts.*.policy_registry
@@ -32,6 +32,9 @@ kdf           = "pbkdf2"                # A55 上 DVT 官方建议 pbkdf2(scrypt
 # bls_aggregator_address / ETH_RPC_URL → watcher 自动禁用。这几项由 deploy-dvt.sh 落进
 # DVT 服务 dvt.env(仅当 guardian_watch_enabled=true 才写)。生产 arm slash 是 Phase-3
 # 产品决策,默认不激活。
+# v1.13.1 起:Sepolia 代码默认已指向生产 aggregator(即使不显式设也对);但**非 Sepolia 链
+# 必须显式设 bls_aggregator_address**,否则 v1.13.1 fail-closed 拒启。无需加新 env key(explicit
+# 标志代码内部派生)。
 # guardian_watch_enabled   = false
 # bls_aggregator_address   = "0x174b60bB462b00550F0EC7Bc35Fe39dDB6310158"  # SP 生产 A' BLSAggregator 4.3.0(以 SP 实际部署为准;SP 24h timelock apply 后才生效,beta 真机验证以 apply 后为准)
 # guardian_watch_from_block = 0          # aggregator 部署块;0=genesis(慢)
