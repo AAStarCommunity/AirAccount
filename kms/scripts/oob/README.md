@@ -52,6 +52,31 @@ macOS 上每块板的调试适配器是一个独立 USB serial,如 `/dev/cu.usbm
 **守卫中止怎么办**:说明串口没拿到活的 root shell(板子还在刷启动日志 / 未登录 / 串口被别的会话占用),
 这时**绝不会盲发关机**。先解决登录/占用,或确认设备选对(`--list` / `--print-dev`)。
 
+## serial-selfupdate.sh —— 带外一键自拉 release 升级
+
+板子够不到(SSH/tailscale 全挂)但**上电、串口可达**时,从 Mac 端驱动板子:从 GitHub Release
+自拉指定版本 → 验签 → 换 CA → 烟测 → 失败自动回滚。是自动 updater(`kms/deploy/updater/`)的
+**手动带外对应物**(updater 管日常自动,本脚本管"够不到、要手动救+升")。
+
+```bash
+./serial-selfupdate.sh /dev/cu.usbmodem…831 airaccount-node-v0.29.1
+ENSURE_NET=1 ./serial-selfupdate.sh /dev/cu.usbmodem…831 airaccount-node-v0.29.1   # 升级前先 WiFi 救网
+```
+
+两段验证(信任模型):
+- **Mac 端**:`gh` 下载 release → `minisign` 验签(**pin 死可信公钥**,不信 release 自带的 `updater.pub`,避免循环信任)+ sha256 声明==实际。
+- **板子端**:`curl` 同一 tarball → sha256==Mac 已验证哈希 + tar 加固(拒绝绝对路径/../解压越界)。板上无 minisign,故 authenticity 在 Mac 端完成。
+
+实测坑(已在脚本内处理):
+- 板子 restart 时会往串口**异步打 TA 生命周期噪声**(`[+] TA close/create/open session`),会混进命令 out
+  → 所有关键值用 `TAG<value>` 包裹再正则取,躲开噪声(否则 `is-active` 被打成 `[+]TAcreate…active` 触发假回滚)。
+- 板上 userland **无 `jq`** → 一律 grep 解析,不依赖板上 jq。
+- restart 后 systemd 虽 `active`,HTTP `/health` 要等 TA session 重建数秒才 ready → 健康门**轮询等就绪**。
+- 只换 **CA**;bundle 若含 TA(`*.ta`)只告警不处理(TA 牵动 secure storage,走专门流程)。
+
+选项(env):`ENSURE_NET`(救网)、`WIFI_IFACE`(默 `mlan0`)、`WIFI_SELECT_ID`(默 0=@JumboPlusIoT5GHz)、
+`PORTAL_MARKER`(默 `data-lang=.th.` 三语门,设空跳过)、`EXPECT_VERSION`、`REMOTE_BIN`、`KMS_SERVICE`。
+
 ## 测试
 
 ```bash
