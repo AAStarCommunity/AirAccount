@@ -46,7 +46,8 @@ WIFI_IFACE="${WIFI_IFACE:-mlan0}"
 WIFI_SELECT_ID="${WIFI_SELECT_ID:-0}"
 
 # ── pin 死可信 minisign 公钥(信任锚;绝不用 release 自带的 updater.pub)──────
-# key ID 8A54AF6372050E86(与 kms/deploy/updater 发布链一致;换轮公钥时改这里)。
+# key ID 8A54AF6372050E86。对照源 = kms/deploy/updater 发布链(sign-channel.sh)。
+# ⚠️ 全仓仅此一处 pin,换轮公钥时须与发布链那份一起改(单点,别漏)。
 TRUSTED_PUBKEY_LINE='RWSGDgVyY69Uiu/bMZEByvUwgcXk5XzidQC/CCMHoXiahZkipYMZOhO0'
 
 # ── 前置检查 ─────────────────────────────────────────────────────────
@@ -88,7 +89,7 @@ echo "  ✓ sha256 一致: $ACTUAL_SHA"
 
 # release 资产下载 URL(板子端用)
 TARBALL_URL="$(gh release view "$TAG" -R "$REPO" --json assets \
-  -q ".assets[] | select(.name==\"$BASENAME\") | .url" 2>/dev/null | grep -E '^https' | head -1)"
+  -q ".assets[] | select(.name==\"$BASENAME\") | .url" 2>/dev/null | grep -E '^https' | head -1 || true)"
 [ -n "$TARBALL_URL" ] || fail "拿不到 tarball 下载 URL"
 
 # ── 2) 板子端:guard(root shell + hostname,防升错板)───────────────────
@@ -128,6 +129,9 @@ fi
 # ── 4) 板子端:下载 + sha256 + tar 加固 + 解压 ─────────────────────────
 # 说明:tarball 的 authenticity+integrity 已在 Mac 端用 pin 公钥 minisign 验过,
 # 且下面板上 sha256 == 那份已验证哈希 —— 信任已建立。板上 tar 检查=纵深防御。
+# 注:路径 check 只拦绝对路径/..,拦不住符号链接条目;但真正压掉风险的是下面只
+# `install` 写死的已知路径(airaccount-node-*/kms/kms-api-server),不是整树落地。
+# 加之能往包里塞 symlink 的人已握签名私钥(可直接换二进制),故此洞不扩大信任边界。
 # 捕获一律 `|| true`:serial-run.py 若非零退出,不能让 set -e 静默杀掉本脚本
 # 的诊断分支(否则看不到到底哪步坏)。
 echo "── [板] 下载 + 校验 + 解压 ──"
@@ -138,7 +142,7 @@ dl="$(python3 "$SR" --dev "$DEV" --timeout 90 --json \
   "cd /tmp/su && tar xzf node.tgz 2>/dev/null && test -f airaccount-node-*/kms/kms-api-server && echo EXTRACT_OK" \
   || true)"
 [ -n "$dl" ] || fail "串口下载阶段无返回(超时/串口占用?)"
-dl_http=$(printf '%s' "$dl" | jq -r '.[0].out' | grep -oE 'http=[0-9]+' | head -1 | cut -d= -f2)
+dl_http=$(printf '%s' "$dl" | jq -r '.[0].out' | grep -oE 'http=[0-9]+' | head -1 | cut -d= -f2 || true)
 sha_out=$(printf '%s' "$dl" | jq -r '.[1].out'); path_out=$(printf '%s' "$dl" | jq -r '.[2].out')
 ext_out=$(printf '%s' "$dl" | jq -r '.[3].out')
 [ "${dl_http:-0}" = 200 ] || fail "板子下载失败(http=${dl_http:-?})"
@@ -160,7 +164,19 @@ fi
 # ([+] TA close/create/open session),会混进命令 out。故所有关键值都用唯一
 # 标记包裹再取,正则容忍周围噪声(否则 systemctl is-active 会被打成
 # '[+]TAcreate…active' != 'active' 触发假回滚)。
-tagval() { printf '%s' "$1" | grep -oE "$2<[^>]*>" | head -1 | sed -E "s/.*<([^>]*)>.*/\1/"; }
+tagval() { printf '%s' "$1" | grep -oE "$2<[^>]*>" | head -1 | sed -E "s/.*<([^>]*)>.*/\1/" || true; }
+# ⚠️ 末尾 `|| true` 不可删:grep 无命中会非零 → pipefail 让整条管道非零 → `x=$(tagval …)`
+#    赋值在 `set -e` 下当场静默杀脚本,其后的 fail/rollback 判据全成死代码。而"标记被 TA
+#    噪声打散/超时截断"正是 tagval 要对付的事 —— 那时必须返回空串让判据落地,不能打死脚本。
+#    (#201 review Blocker:同根因 8 处,含最严重的 health/rollback 分支)
+
+# rollback 定义提前到 swap 之前 —— install 失败分支也要能调它($BAK 在调用时才求值,先定义无妨)。
+rollback() {
+  echo "  ↩ 回滚到 $BAK …" >&2
+  python3 "$SR" --dev "$DEV" --timeout 30 --json \
+    "systemctl stop $KMS_SERVICE; cp -a '$BAK' '$REMOTE_BIN' && systemctl start $KMS_SERVICE; sleep 5; systemctl is-active $KMS_SERVICE" >/dev/null 2>&1 || true
+  fail "已尝试回滚(备份 $BAK 保留)。$1"
+}
 
 # ── 5) 备份 + 停 + 换 + 启 ────────────────────────────────────────────
 echo "── [板] 备份 → 替换 → 重启 ──"
@@ -174,17 +190,12 @@ bak_rc=$(printf '%s'  "$swap" | jq -r '.[0].rc'); bak_sz=$(tagval "$(printf '%s'
 ins_rc=$(printf '%s'  "$swap" | jq -r '.[1].rc'); ins_sz=$(tagval "$(printf '%s' "$swap" | jq -r '.[1].out')" INS)
 act=$(tagval "$(printf '%s' "$swap" | jq -r '.[2].out')" ACT)
 [ "$bak_rc" = 0 ] && [ -n "$bak_sz" ] || fail "备份失败 —— 中止(未动原文件)"
-[ "$ins_rc" = 0 ] && [ -n "$ins_sz" ] || fail "替换失败 —— 中止(备份在 $BAK,服务可能已停,请人工检查)"
+# install 走到这里 = stop 成功但 install 没成功 → 服务确定停着、二进制确定无效 → 自动回滚
+[ "$ins_rc" = 0 ] && [ -n "$ins_sz" ] || rollback "替换失败(rc=$ins_rc)—— 服务已停+二进制无效"
 echo "  ✓ 备份 $bak_sz → $BAK   新版 $ins_sz 就位   服务=$act"
 
-# ── 6) 烟测(失败自动回滚)──────────────────────────────────────────
+# ── 6) 烟测(失败自动回滚;rollback() 已在 swap 前定义)────────────────
 echo "── [板] 烟测 ──"
-rollback() {
-  echo "  ↩ 回滚到 $BAK …" >&2
-  python3 "$SR" --dev "$DEV" --timeout 30 --json \
-    "systemctl stop $KMS_SERVICE; cp -a '$BAK' '$REMOTE_BIN' && systemctl start $KMS_SERVICE; sleep 5; systemctl is-active $KMS_SERVICE" >/dev/null 2>&1 || true
-  fail "烟测未过,已尝试回滚(备份 $BAK 保留)。$1"
-}
 [ "$act" = active ] || rollback "服务未 active(实测='$act')"
 
 # health + version(值 TAG 包裹躲 TA 噪声;/health 轮询等就绪 —— restart 后

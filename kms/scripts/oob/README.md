@@ -67,6 +67,8 @@ ENSURE_NET=1 ./serial-selfupdate.sh /dev/cu.usbmodem…831 airaccount-node-v0.29
 - **Mac 端**:`gh` 下载 release → `minisign` 验签(**pin 死可信公钥**,不信 release 自带的 `updater.pub`,避免循环信任)+ sha256 声明==实际。
 - **板子端**:`curl` 同一 tarball → sha256==Mac 已验证哈希 + tar 加固(拒绝绝对路径/../解压越界)。板上无 minisign,故 authenticity 在 Mac 端完成。
 
+> ⚠️ **只能升到带签名资产的 release**(`*.tar.gz` + `.minisig` + `.sha256` 三件套)。无签名的 release 脚本会 fail-closed 拒绝(见 `:74`)——**发布流水线须把签名三件套作为必产物**,否则半夜救板时很可能发现唯一想回的版本恰好没签名。
+
 实测坑(已在脚本内处理):
 - 板子 restart 时会往串口**异步打 TA 生命周期噪声**(`[+] TA close/create/open session`),会混进命令 out
   → 所有关键值用 `TAG<value>` 包裹再正则取,躲开噪声(否则 `is-active` 被打成 `[+]TAcreate…active` 触发假回滚)。
