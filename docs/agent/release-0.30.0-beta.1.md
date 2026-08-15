@@ -32,7 +32,7 @@
 |---|---|---|---|---|
 | G1 | **#195** Web 管理台增量1(feat/updater-phase2-web-admin @ `8eaf9d6`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 代码已全绿,不能自合(main 保护+需非作者 approve) | 重启 pr-daemon 复评 `8eaf9d6` **或** 人工 approve → auto-merge |
 | G2 | **#196** 发版签名(feat/updater-release-signing @ `05251c2`) | 🔴 BLOCKED · CHANGES_REQUESTED | ❌ 同上,已全绿 | 重启 pr-daemon 复评 `05251c2` **或** 人工 approve → auto-merge |
-| G3 | **serial-selfupdate.sh PR**(docs/oob-serial-rescue,唯一副本,#198 时移出) | 🟡 待起 PR | ✅ **可直接推**(见 §5) | 重新 push 分支 + 起 PR + 走评审 |
+| G3 | **serial-selfupdate.sh PR** | 🟢 **PR 已开 #201** | ✅ 已做 | 从最新 main 干净新分支 `feat/oob-serial-selfupdate` 只提取脚本+README(老 stale 分支会回滚半个仓库,已避开)。作者 2 轮自审(改一处注释过度声称),grade=B 余下对抗 review 交 pr-daemon。合并后 `docs/oob-serial-rescue` 可清理 |
 | G4 | **DVT fixes + 定版** | 🟢 **已闭环** | ✅ 已做 | DVT **v1.13.1**(Latest)发布;CC-90 两行动项全做:①watcher env 生产 aggregator(`afcf2aa`)②pin v1.13.0→v1.13.1 fail-closed 硬化(`7ce5d75`)。DVT 确认交付无误。deploy-dvt.sh 零改动(密钥名未变)。**生产 aggregator = `0x174b60bB462b00550F0EC7Bc35Fe39dDB6310158`**(SP A' 4.3.0,**SP 24h apply 后生效**;v1.13.1 起非 Sepolia 须显式设否则拒启)。待 G5 前**真机验证 guardian watcher 通路**(opt-in,须 aggregator apply 后) |
 | G5 | **release 分支安全检查** | ⬜ 待做(内容齐后) | ✅ 可发起 | 内容合齐后跑;查出问题 → 打 security patch 折入本 beta |
 
