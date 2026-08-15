@@ -138,18 +138,19 @@ echo "── [板] 下载 + 校验 + 解压 ──"
 dl="$(python3 "$SR" --dev "$DEV" --timeout 90 --json \
   "rm -rf /tmp/su && mkdir -p /tmp/su && cd /tmp/su && curl -fL -m 75 -o node.tgz '$TARBALL_URL' -w 'http=%{http_code}\n' 2>/dev/null" \
   "cd /tmp/su && echo '$DECLARED_SHA  node.tgz' | sha256sum -c - && echo SHA_OK" \
-  "cd /tmp/su && tar -tzf node.tgz | grep -Eq '^/|(^|/)\\.\\./' && echo BADPATH || echo PATH_OK" \
-  "cd /tmp/su && tar xzf node.tgz 2>/dev/null && test -f airaccount-node-*/kms/kms-api-server && echo EXTRACT_OK" \
+  "cd /tmp/su && if tar -tzf node.tgz | grep -Eq '^/|(^|/)\\.\\./'; then echo BADPATH; else echo PATH_OK; tar xzf node.tgz 2>/dev/null && test -f airaccount-node-*/kms/kms-api-server && echo EXTRACT_OK; fi" \
   || true)"
 [ -n "$dl" ] || fail "串口下载阶段无返回(超时/串口占用?)"
 dl_http=$(printf '%s' "$dl" | jq -r '.[0].out' | grep -oE 'http=[0-9]+' | head -1 | cut -d= -f2 || true)
-sha_out=$(printf '%s' "$dl" | jq -r '.[1].out'); path_out=$(printf '%s' "$dl" | jq -r '.[2].out')
-ext_out=$(printf '%s' "$dl" | jq -r '.[3].out')
+sha_out=$(printf '%s' "$dl" | jq -r '.[1].out'); pe_out=$(printf '%s' "$dl" | jq -r '.[2].out')
 [ "${dl_http:-0}" = 200 ] || fail "板子下载失败(http=${dl_http:-?})"
-printf '%s' "$sha_out"  | grep -q SHA_OK     || fail "板子端 sha256 校验失败 —— 在途损坏/被篡改,拒绝"
-printf '%s' "$path_out" | grep -q PATH_OK    || fail "tar 含绝对路径或 .. —— 拒绝"
-printf '%s' "$ext_out"  | grep -q EXTRACT_OK || fail "解压失败/缺 kms/kms-api-server —— 拒绝"
-echo "  ✓ 下载 http200 · sha256 OK · 路径安全 · 解压 OK"
+printf '%s' "$sha_out" | grep -q SHA_OK || fail "板子端 sha256 校验失败 —— 在途损坏/被篡改,拒绝"
+# 路径检查与解压串在同一命令的 if/else 里:穿越条目 → 只 echo BADPATH,**绝不解压**(#201 review §四:
+# 旧写法检查与解压是两条无条件命令,穿越包会先落盘再被判 —— 跑在损害之后的防御不是防御)。
+printf '%s' "$pe_out" | grep -q BADPATH && fail "tar 含绝对路径或 .. —— 拒绝(未解压)" || true
+printf '%s' "$pe_out" | grep -q PATH_OK || fail "tar 路径检查未通过 —— 拒绝"
+printf '%s' "$pe_out" | grep -q EXTRACT_OK || fail "解压失败/缺 kms/kms-api-server —— 拒绝"
+echo "  ✓ 下载 http200 · sha256 OK · 路径安全(解压前判)· 解压 OK"
 
 # TA 警示:本手动工具只换 CA;bundle 若含 TA(*.ta)不静默处理(TA 牵动 secure storage)
 ta="$(python3 "$SR" --dev "$DEV" --json \
@@ -181,17 +182,21 @@ rollback() {
 # ── 5) 备份 + 停 + 换 + 启 ────────────────────────────────────────────
 echo "── [板] 备份 → 替换 → 重启 ──"
 BAK="$REMOTE_BIN.bak-$STAMP"
+# ⚠️ 备份+停+换 串成一条 && 链(不是 3 条独立命令):serial-run.py 批内命令是**无条件全发**的,
+#    不会因前一条非零就停 —— 靠命令先后当守卫是假的。串成 && 后任一步失败即短路,后续不跑,
+#    于是「BAK 标记缺失 = cp 没成功 = 服务没停、原文件没动」才成立(#201 review Blocker#2:
+#    否则 cp 失败时 stop+install 照跑,落到最坏态却报"未动原文件")。
 swap="$(python3 "$SR" --dev "$DEV" --timeout 40 --json \
-  "cp -a '$REMOTE_BIN' '$BAK' && printf 'BAK<%s>\\n' \"\$(stat -c%s '$BAK')\"" \
-  "systemctl stop $KMS_SERVICE && install -m755 -o root -g root /tmp/su/airaccount-node-*/kms/kms-api-server '$REMOTE_BIN' && printf 'INS<%s>\\n' \"\$(stat -c%s '$REMOTE_BIN')\"" \
+  "cp -a '$REMOTE_BIN' '$BAK' && printf 'BAK<%s>\\n' \"\$(stat -c%s '$BAK')\" && systemctl stop $KMS_SERVICE && install -m755 -o root -g root /tmp/su/airaccount-node-*/kms/kms-api-server '$REMOTE_BIN' && printf 'INS<%s>\\n' \"\$(stat -c%s '$REMOTE_BIN')\"" \
   "systemctl start $KMS_SERVICE; sleep 5; printf 'ACT<%s>\\n' \"\$(systemctl is-active $KMS_SERVICE)\"" || true)"
 [ -n "$swap" ] || fail "串口替换阶段无返回(超时/串口占用?)—— 请检查板上 $KMS_SERVICE 与 $REMOTE_BIN"
-bak_rc=$(printf '%s'  "$swap" | jq -r '.[0].rc'); bak_sz=$(tagval "$(printf '%s' "$swap" | jq -r '.[0].out')" BAK)
-ins_rc=$(printf '%s'  "$swap" | jq -r '.[1].rc'); ins_sz=$(tagval "$(printf '%s' "$swap" | jq -r '.[1].out')" INS)
-act=$(tagval "$(printf '%s' "$swap" | jq -r '.[2].out')" ACT)
-[ "$bak_rc" = 0 ] && [ -n "$bak_sz" ] || fail "备份失败 —— 中止(未动原文件)"
-# install 走到这里 = stop 成功但 install 没成功 → 服务确定停着、二进制确定无效 → 自动回滚
-[ "$ins_rc" = 0 ] && [ -n "$ins_sz" ] || rollback "替换失败(rc=$ins_rc)—— 服务已停+二进制无效"
+swap_out=$(printf '%s' "$swap" | jq -r '.[0].out')
+bak_sz=$(tagval "$swap_out" BAK); ins_sz=$(tagval "$swap_out" INS)
+act=$(tagval "$(printf '%s' "$swap" | jq -r '.[1].out')" ACT)
+# BAK 缺失 = cp 短路在第一步 → 未停服务、未动原文件(嵌入式小 rootfs 上 ENOSPC 是最可能触发)
+[ -n "$bak_sz" ] || fail "备份失败 —— 中止(cp 未成功:未停服务、未动原文件;检查磁盘空间)"
+# 有 BAK 无 INS = stop/install 中途失败 → 服务可能已停+二进制无效 → 回滚到备份
+[ -n "$ins_sz" ] || rollback "替换失败 —— 服务可能已停+二进制无效,回滚到 $BAK"
 echo "  ✓ 备份 $bak_sz → $BAK   新版 $ins_sz 就位   服务=$act"
 
 # ── 6) 烟测(失败自动回滚;rollback() 已在 swap 前定义)────────────────
