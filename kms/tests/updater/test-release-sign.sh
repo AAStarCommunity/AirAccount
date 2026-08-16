@@ -169,6 +169,37 @@ bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" -
   && bad "重签已撤销的 0.32.0 竟成功(绕过墓碑复活)" || \
   { grep -qE "revoked|撤销" "$ROOT/e14" && ok "重签已撤销版本被拒(revoked 墓碑)" || bad "错误信息不对: $(cat "$ROOT/e14")"; }
 
+echo "== T15 纯撤销:--revoke 不带 --version(事故当下无新版本可发也能撤)(#196 R7 finding3)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+sign --version 0.30.0 --no-baseline --notes a >/dev/null 2>&1
+sign --version 0.32.0 --no-baseline --notes b >/dev/null 2>&1
+bash "$SIGN" --out "$OUT" --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --no-baseline --revoke 0.32.0 --notes r >/dev/null 2>&1 && prc=0 || prc=1
+[ "$prc" = 0 ] && ok "纯撤销 rc=0(无 --version 也能跑)" || bad "纯撤销失败 rc=$prc"
+[ "$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)" = "0.30.0" ] && ok "0.32.0 剔除,releases=[0.30.0]" || bad "releases=$(jq -c '[.releases[].version]' "$OUT")"
+jq -e '.revoked|index("0.32.0")' "$OUT" >/dev/null 2>&1 && ok "0.32.0 进 revoked[]" || bad "revoked=$(jq -c .revoked "$OUT")"
+[ "$(jq -r .metadata_version "$OUT" 2>/dev/null)" = 3 ] && ok "meta 递增到 3(纯撤销也 bump counter)" || bad "meta=$(jq -r .metadata_version "$OUT")"
+
+echo "== T16 迁移安全:基线**无 revoked 字段**(墓碑前发布)→ 本地独有条目**不并入**(#196 R7 finding1)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+# 本地 $OUT:meta=2,带一条本地独有 0.31.0(可能是老式删条目撤销的,无法判定)
+jq -n --arg s "$S64" '{metadata_version:2,rollback_floor:"0.30.0",revoked:[],releases:[
+  {version:"0.31.0",security:false,severity:"none",notes:"local-only",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
+  {version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+# 基线**无 revoked 字段**(墓碑之前),0.31.0 已用老式删条目撤销(releases 只 0.30.0)
+jq -n --arg s "$S64" '{metadata_version:3,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.30.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"auth",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.34.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v9 2>"$ROOT/e16" >/dev/null
+nv16="$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)"
+echo "$nv16" | grep -q "0.31.0" && bad "本地独有 0.31.0 被静默洗入(迁移不安全)=$nv16" || ok "基线无 revoked 字段→本地独有 0.31.0 不并入($nv16)"
+grep -q "无 revoked 字段" "$ROOT/e16" && ok "迁移已披露(不静默丢/不静默洗)" || bad "无迁移披露: $(cat "$ROOT/e16")"
+
+echo "== T17 --no-baseline:revoked 仅本地、可能缩水 → 响亮告警(#196 R7 finding2)=="
+rm -f "$OUT" "$OUT.minisig"
+sign --version 0.30.0 --no-baseline --notes a >/dev/null 2>&1
+sign --version 0.31.0 --no-baseline --notes b 2>"$ROOT/e17" >/dev/null
+grep -q "no-baseline.*revoked 仅来自本地" "$ROOT/e17" && ok "--no-baseline 缩 revoked 有响亮告警" || bad "无 --no-baseline 告警: $(cat "$ROOT/e17")"
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

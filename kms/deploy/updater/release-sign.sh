@@ -90,8 +90,8 @@ done
 
 # ── 前置校验(全部在**触碰 $OUT 之前**做;非 dry-run 连工具/私钥/公钥都先查齐)──────
 command -v jq >/dev/null || die "缺 jq"
-[ -n "$VERSION" ] || { echo "必须 --version x.y.z" >&2; usage 1; }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本号需 x.y.z(不带 v 前缀): $VERSION"
+[ -n "$VERSION" ] || [ -n "$REVOKE_LIST" ] || { echo "必须 --version x.y.z(或仅 --revoke 做**纯撤销**:不发新版本,只把版本写进 revoked 并从 releases 剔除)" >&2; usage 1; }
+[ -z "$VERSION" ] || [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本号需 x.y.z(不带 v 前缀): $VERSION"
 [[ "$SEVERITY" =~ ^(none|low|medium|high|critical)$ ]] || die "severity 非法: $SEVERITY"
 # --channel:只允许字母数字/点/横杠/下划线,防越目录写(../../tmp/pwn)。
 [[ "$CHANNEL" =~ ^[A-Za-z0-9._-]+$ ]] || die "channel 名非法(只允许 [A-Za-z0-9._-]): $CHANNEL"
@@ -125,11 +125,14 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 
 # ── sha256 ────────────────────────────────────────────────────────────
-[ -n "$TARBALL" ] || die "必须 --tarball <path>(用于算 sha256)"
-[ -f "$TARBALL" ] || die "找不到 tarball: $TARBALL"
-if command -v sha256sum >/dev/null 2>&1; then SHA="$(sha256sum "$TARBALL" | awk '{print $1}')";
-else SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
-[[ "$SHA" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 计算异常"
+SHA=""   # 纯撤销(仅 --revoke,无 --version)不发新版本 → 不算 sha;显式初始化免 set -u
+if [ -n "$VERSION" ]; then
+  [ -n "$TARBALL" ] || die "必须 --tarball <path>(用于算 sha256)"
+  [ -f "$TARBALL" ] || die "找不到 tarball: $TARBALL"
+  if command -v sha256sum >/dev/null 2>&1; then SHA="$(sha256sum "$TARBALL" | awk '{print $1}')";
+  else SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
+  [[ "$SHA" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 计算异常"
+fi
 
 # semver_max a b → 打印较大者(去 v 前缀,3 段数字比较;空/缺参当 0.0.0)。用于 floor 反回退。
 semver_max() {
@@ -153,6 +156,7 @@ if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   LOCAL_REVOKED="$(jq -c '.revoked // []' "$OUT")"
 fi
 PREV_META="$LOCAL_META"; PREV_RELEASES="$LOCAL_RELEASES"; BASE_FLOOR="$LOCAL_FLOOR"; BASE_REVOKED="$LOCAL_REVOKED"
+BASE_HAS_REVOKED=false   # 已验签基线**是否有** revoked 字段(缺字段=墓碑之前发布,迁移判别用)
 if [ "$NO_BASELINE" != 1 ]; then
   command -v curl >/dev/null || die "读回基线需 curl(离线/首发请显式 --no-baseline)"
   command -v minisign >/dev/null || die "读回基线要验签,需 minisign(或 --no-baseline)"
@@ -171,6 +175,7 @@ if [ "$NO_BASELINE" != 1 ]; then
   PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
   BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
   BASE_REVOKED="$(jq -c '.revoked // []' "$RB_DIR/m.json")"
+  BASE_HAS_REVOKED="$(jq -r 'has("revoked")' "$RB_DIR/m.json")"   # 缺字段 ≠ 空数组(迁移窗口判别)
   # (finding2) .channel 必须匹配 —— minisign 只签**字节**不签来源:一份合法签名的 beta.json 被
   # (误)放到 stable.json 的 URL,会被整份继承进 stable(beta 的低 floor / 预发布 releases 污染 stable)。
   BASE_CHANNEL="$(jq -r '.channel // empty' "$RB_DIR/m.json")"
@@ -196,20 +201,45 @@ if [ "$NO_BASELINE" != 1 ]; then
   [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
 fi
 
-# ── revoked:[] 墓碑:撤销/合并可判定的唯一机制(#196 R6)──────────────────────
+# ── revoked:[] 墓碑:撤销/合并可判定的唯一机制(#196 R6/R7)────────────────────
 # revoked = 单调 union(基线 + 本地 + --revoke),**永不缩小** —— 一份陈旧基线不能 un-revoke。
 REVOKED="$(jq -cn --argjson base "$BASE_REVOKED" --argjson local "$LOCAL_REVOKED" --arg add "$REVOKE_LIST" '
   ($add | split(",") | map(select(length>0) | ltrimstr("v"))) as $a
   | (($base + $local | map(ltrimstr("v"))) + $a) | unique')"
-# releases = 基线 ∪ 本地(自由并集,按 version 去重、基线优先),再**滤掉 revoked 里的版本**。
-# 一次堵死三条复活路:carry-forward(本地有基线无)、基线自己仍列着的被撤销版本、下面 --version 直接重签。
-# 撤销的唯一机制 = revoked[](脚本不再靠"删 releases 条目",那条无法与"基线未收到"区分)。
-PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" --argjson rev "$REVOKED" '
-  ($base | map(.version)) as $bv
-  | ($base + ($local | map(select((.version as $v|$bv|index($v))|not))))
-  | map(select(((.version|ltrimstr("v")) as $vv | $rev|index($vv))|not))')"
-# --version 撞 revoked → 拒:不能重签一个已撤销的版本(否则就是绕过墓碑复活)。
-if printf '%s' "$REVOKED" | jq -e --arg v "${VERSION#v}" 'index($v) != null' >/dev/null 2>&1; then
+
+# 本地独有 release 条目(基线无、本地有)——来自**未签名**的本地 $OUT,合并需披露 + 视迁移状态决定。
+LOCAL_ONLY="$(jq -rn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" \
+  '($base|map(.version)) as $bv | [$local[]|select((.version as $v|$bv|index($v))|not)|.version]|join(",")')"
+
+# 迁移安全(#196 R7 finding1):已验签基线**缺 revoked 字段**(墓碑之前发布)时,老式"删条目"撤销
+# 可能仍在生效且不可探测 → **不把本地独有条目并入**(它可能正是被老式撤销的),要求 --version/--revoke
+# 重新声明。has("revoked")==false 与空数组区分开。
+MERGE_LOCAL=1
+if [ "$NO_BASELINE" != 1 ] && [ "$BASE_HAS_REVOKED" != true ] && [ -n "$LOCAL_ONLY" ]; then
+  MERGE_LOCAL=0
+  echo "⚠️ 迁移:已验签基线**无 revoked 字段**(墓碑之前发布)→ 本地独有条目**不并入**产物:$LOCAL_ONLY" >&2
+  echo "   (可能是老式『删条目』撤销的;确为有效版本请 --version 重签,确为撤销请 --revoke 声明)" >&2
+fi
+# releases = 基线(+ 视 MERGE_LOCAL 并本地独有),再**滤掉 revoked**。堵死三条复活路 + 未签名条目不静默洗入。
+if [ "$MERGE_LOCAL" = 1 ]; then
+  [ -n "$LOCAL_ONLY" ] && echo "并入本地独有(未签名 \$OUT)条目:$LOCAL_ONLY(基线为墓碑纪元,可判定)" >&2
+  PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" --argjson rev "$REVOKED" '
+    ($base | map(.version)) as $bv
+    | ($base + ($local | map(select((.version as $v|$bv|index($v))|not))))
+    | map(select(((.version|ltrimstr("v")) as $vv | $rev|index($vv))|not))')"
+else
+  PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson rev "$REVOKED" \
+    '$base | map(select(((.version|ltrimstr("v")) as $vv | $rev|index($vv))|not))')"
+fi
+
+# --no-baseline 安全(#196 R7 finding2):没读基线 → REVOKED 只来自本地 $OUT,若线上已撤销更多而本地
+# $OUT 陈旧,这些撤销会丢失、并可能在更高 counter 上复活。响亮告警 + 打印将发出的 revoked。
+if [ "$NO_BASELINE" = 1 ]; then
+  echo "⚠️ --no-baseline:revoked 仅来自本地 \$OUT(未与线上比对)=$(printf '%s' "$REVOKED" | jq -c .) —— 若线上已撤销更多版本而本地 \$OUT 陈旧,那些撤销会丢失;确认 \$OUT 最新,或 --revoke 重述已发布的撤销集。" >&2
+fi
+
+# --version 撞 revoked → 拒(不能重签一个已撤销的版本)。纯撤销(无 VERSION)跳过本检查。
+if [ -n "$VERSION" ] && printf '%s' "$REVOKED" | jq -e --arg v "${VERSION#v}" 'index($v) != null' >/dev/null 2>&1; then
   die "版本 $VERSION 在 revoked 墓碑里(已被撤销)—— 不能重新签发。要恢复需人工从 channel 的 revoked[] 移除(慎重)。"
 fi
 NEW_META=$((PREV_META + 1))
@@ -246,14 +276,18 @@ else
 fi
 
 # ── 组装 release 条目 + 合并(同版本则替换,否则前插)+ 顶层字段 ─────────
-NEW_RELEASE="$(jq -n \
-  --arg version "$VERSION" --argjson security "$SECURITY" --arg severity "$SEVERITY" \
-  --arg notes "$NOTES" --arg notes_url "$NOTES_URL" --argjson auto "$AUTO_APPLY" \
-  --argjson ta_changed "$TA_CHANGED" --arg min "$MIN_VERSION" --arg reqta "$REQUIRES_TA" \
-  --argjson proto "$PROTO_VERSION" --arg tarball "$TARBALL_URL" --arg sha "$SHA" '
-  {version:$version, security:$security, severity:$severity, notes:$notes, notes_url:$notes_url,
-   auto_apply_allowed:$auto, ta_changed:$ta_changed, min_version:$min,
-   requires_ta_version:$reqta, proto_version:$proto, tarball:$tarball, sha256:$sha, canary_ring:[]}')"
+if [ -n "$VERSION" ]; then
+  NEW_RELEASE="$(jq -n \
+    --arg version "$VERSION" --argjson security "$SECURITY" --arg severity "$SEVERITY" \
+    --arg notes "$NOTES" --arg notes_url "$NOTES_URL" --argjson auto "$AUTO_APPLY" \
+    --argjson ta_changed "$TA_CHANGED" --arg min "$MIN_VERSION" --arg reqta "$REQUIRES_TA" \
+    --argjson proto "$PROTO_VERSION" --arg tarball "$TARBALL_URL" --arg sha "$SHA" '
+    {version:$version, security:$security, severity:$severity, notes:$notes, notes_url:$notes_url,
+     auto_apply_allowed:$auto, ta_changed:$ta_changed, min_version:$min,
+     requires_ta_version:$reqta, proto_version:$proto, tarball:$tarball, sha256:$sha, canary_ring:[]}')"
+else
+  NEW_RELEASE=null   # 纯撤销:不发新版本(#196 R7 finding3),releases 就是基线滤 revoked 后的
+fi
 
 MANIFEST="$(jq -n \
   --argjson meta "$NEW_META" --arg gen "$NOW" --arg exp "$EXPIRES" --arg channel "$CHANNEL" \
@@ -261,7 +295,7 @@ MANIFEST="$(jq -n \
   --argjson revoked "$REVOKED" '
   {metadata_version:$meta, generated_at:$gen, expires:$exp, channel:$channel, rollback_floor:$floor,
    revoked:$revoked,
-   releases: ([$new] + ($prev | map(select(.version != $new.version))))}')"
+   releases: (if $new == null then $prev else [$new] + ($prev | map(select(.version != $new.version))) end)}')"
 
 # ── schema 自检:**逐字段镜像**节点 aastar-node-updater.sh 的 load_manifest(fail-closed)。
 # ⚠️ 这两处 schema 是手写双份,必须同步改;下面的 test-release-sign.sh 会真跑节点 load_manifest
