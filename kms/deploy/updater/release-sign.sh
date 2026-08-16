@@ -122,6 +122,13 @@ if command -v sha256sum >/dev/null 2>&1; then SHA="$(sha256sum "$TARBALL" | awk 
 else SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
 [[ "$SHA" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 计算异常"
 
+# semver_max a b → 打印较大者(去 v 前缀,3 段数字比较;空/缺参当 0.0.0)。用于 floor 反回退。
+semver_max() {
+  jq -rn --arg a "${1:-0.0.0}" --arg b "${2:-0.0.0}" '
+    def key: (ltrimstr("v")|split(".")|map(tonumber? // 0));
+    if ($a|key) >= ($b|key) then $a else $b end'
+}
+
 # ── 基线:counter + releases[] + rollback_floor 都从**已验签的已发布 manifest** 继承 ──────
 # 防回滚计数器不能只靠本地未入库文件(换机/新 clone → 本地 0 重来 → 节点 seen_metadata_version
 # 不降 → 永久拒绝)。但读回的 manifest 是**不可信输入**:若只读它的 metadata_version 而不验签,
@@ -153,6 +160,24 @@ if [ "$NO_BASELINE" != 1 ]; then
   PREV_META="$(jq -r '(.metadata_version // 0) | floor' "$RB_DIR/m.json")"
   PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
   BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
+  # (finding2) .channel 必须匹配 —— minisign 只签**字节**不签来源:一份合法签名的 beta.json 被
+  # (误)放到 stable.json 的 URL,会被整份继承进 stable(beta 的低 floor / 预发布 releases 污染 stable)。
+  BASE_CHANNEL="$(jq -r '.channel // empty' "$RB_DIR/m.json")"
+  [ -z "$BASE_CHANNEL" ] || [ "$BASE_CHANNEL" = "$CHANNEL" ] \
+    || die "读回基线 channel=$BASE_CHANNEL != 目标 $CHANNEL —— 拒绝(签名保真不保来源;疑 $BASE_CHANNEL 被喂到 $CHANNEL 的 URL)"
+  # (finding1a) 拒绝**已过期**的基线 —— 验签只证真实性、不证新鲜度。重放一份旧的但签名合法的
+  # manifest 能"撤销撤销"(把 rollback_floor/releases 退回旧值);过期检查把重放窗口从「永远」压到
+  # EXPIRES_DAYS。缺 expires 也 fail-closed(无法验新鲜度)。跨 mac/linux 解析,镜像节点 :521-527。
+  BASE_EXP="$(jq -r '.expires // empty' "$RB_DIR/m.json")"
+  [ -n "$BASE_EXP" ] || die "读回基线缺 expires —— 无法验证新鲜度,拒绝(fail-closed)"
+  base_exp_epoch="$(date -u -d "$BASE_EXP" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$BASE_EXP" +%s 2>/dev/null || echo 0)"
+  [ "$base_exp_epoch" -gt 0 ] || die "读回基线 expires 无法解析($BASE_EXP)—— 拒绝(fail-closed)"
+  [ "$(date -u +%s)" -gt "$base_exp_epoch" ] && die "读回基线已过期($BASE_EXP)—— 疑重放旧签名 manifest 撤销撤销,拒绝(首发/离线用 --no-baseline)"
+  # (finding1c) 把**本地** releases 并集进来 —— 一份陈旧基线可能缺本地已签发的版本(如撤销后新增的
+  # 修复版),不能因采信基线就把它丢了。按 version 去重,基线条目优先(它是权威已发布副本)。
+  PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
+    ($base | map(.version)) as $bv
+    | $base + ($local | map(select((.version as $v | $bv | index($v)) | not)))')"
   # 本地 $OUT counter 若更高(operator 本地签了没上传)→ 取 max 保单调。
   [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
   echo "读回并**验签**已发布 manifest:metadata_version=$PREV_META releases=$(printf '%s' "$PREV_RELEASES" | jq length)" >&2
@@ -170,8 +195,11 @@ _highest_field() { # <field-name> <fallback>
 }
 [ -n "$MIN_VERSION" ] || MIN_VERSION="$(_highest_field min_version 0.28.0)"
 [ -n "$REQUIRES_TA" ] || REQUIRES_TA="$(_highest_field requires_ta_version 0.28.0)"
-# rollback_floor 从验签基线继承(不再无脑降回 0.28.0 弱化已知漏洞地板)。
+# rollback_floor:显式 --rollback-floor > 验签基线 > 默认 0.28.0;再对**本地** floor 取 semver_max
+# **反回退**(finding1b:同 :157 计数器那条单调原则 —— 一份陈旧网络基线不能把已知漏洞地板悄悄
+# 降回去)。本地 floor 是 operator 自己上次签的、可信的反回退参照;要真降 floor 须先清本地 $OUT。
 [ -n "$ROLLBACK_FLOOR" ] || ROLLBACK_FLOOR="${BASE_FLOOR:-0.28.0}"
+ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
 
 # 跨 mac/linux 的 UTC 时间戳
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

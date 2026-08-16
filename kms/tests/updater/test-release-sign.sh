@@ -95,6 +95,38 @@ bash "$SIGN" --version 0.33.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" -
   && bad "读回失败竟静默成功(计数可能倒退→砖化)" || \
   { grep -qE "读回已发布 manifest 失败|--no-baseline" "$ROOT/e7" && ok "读回失败 fail-closed,提示 --no-baseline" || bad "读回失败信息不对"; }
 
+echo "== T8 读回基线**已过期** → 拒绝(finding1a:验签≠新鲜,防重放旧签名撤销撤销)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+jq -n '{metadata_version:5,generated_at:"2020-01-01T00:00:00Z",expires:"2020-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.31.0",releases:[{version:"0.31.0",security:true,severity:"high",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:"s",canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" 2>"$ROOT/e8" >/dev/null \
+  && bad "过期基线竟被采信(重放撤销撤销)" || \
+  { grep -q "已过期" "$ROOT/e8" && ok "过期基线被拒(报『已过期』)" || bad "过期基线错误信息不对: $(cat "$ROOT/e8")"; }
+
+echo "== T9 读回基线 channel 不符(beta 放到 stable URL)→ 拒绝(finding2:签名保真不保来源)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+jq -n '{metadata_version:5,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"beta",rollback_floor:"0.20.0",releases:[{version:"0.40.0",security:false,severity:"none",notes:"beta",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:"s",canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.32.0 --channel stable --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" 2>"$ROOT/e9" >/dev/null \
+  && bad "channel 不符竟被继承(beta 污染 stable)" || \
+  { grep -q "channel" "$ROOT/e9" && ok "channel 不符被拒(beta≠stable)" || bad "channel 错误信息不对: $(cat "$ROOT/e9")"; }
+
+echo "== T10 陈旧网络基线不能降 floor / 丢本地 release(finding1b floor 反回退 + 1c releases 并集)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+# 本地 $OUT:floor=0.31.0 + release 0.31.0(operator 上次签的,可信反回退参照;保留不删)
+sign --version 0.31.0 --no-baseline --rollback-floor 0.31.0 --notes local >/dev/null 2>&1
+# 网络基线(陈旧):floor 降回 0.28.0、releases 缺 0.31.0,但签名合法、未过期、channel 对
+jq -n '{metadata_version:1,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.28.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"stale",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:"s",canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v3 >/dev/null 2>"$ROOT/e10"
+nf="$(jq -r .rollback_floor "$OUT" 2>/dev/null)"
+nv="$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)"
+[ "$nf" = "0.31.0" ] && ok "floor 反回退:陈旧基线 0.28.0 未压过本地 0.31.0(结果 $nf)" || bad "floor 被降=$nf(应 0.31.0)"
+echo "$nv" | grep -q "0.31.0" && ok "releases 并集:本地 0.31.0 未被陈旧基线丢($nv)" || bad "0.31.0 丢失=$nv"
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]
