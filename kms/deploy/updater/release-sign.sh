@@ -143,6 +143,7 @@ if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
 fi
 PREV_META="$LOCAL_META"; PREV_RELEASES="$LOCAL_RELEASES"; BASE_FLOOR="$LOCAL_FLOOR"
+LOCAL_AHEAD=0   # 本地 $OUT 是否领先于已验签基线(LOCAL_META > 基线 meta):决定用不用本地做反回退锚点
 if [ "$NO_BASELINE" != 1 ]; then
   command -v curl >/dev/null || die "读回基线需 curl(离线/首发请显式 --no-baseline)"
   command -v minisign >/dev/null || die "读回基线要验签,需 minisign(或 --no-baseline)"
@@ -170,16 +171,26 @@ if [ "$NO_BASELINE" != 1 ]; then
   # EXPIRES_DAYS。缺 expires 也 fail-closed(无法验新鲜度)。跨 mac/linux 解析,镜像节点 :521-527。
   BASE_EXP="$(jq -r '.expires // empty' "$RB_DIR/m.json")"
   [ -n "$BASE_EXP" ] || die "读回基线缺 expires —— 无法验证新鲜度,拒绝(fail-closed)"
+  # 先过严格 ISO-8601 正则(镜像节点 :504),再交给 date —— 否则 GNU date -d 会吃 `next year`
+  # 这类相对表达式,给 readback 留一条解析歧义(Low)。
+  [[ "$BASE_EXP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || die "读回基线 expires 格式非法($BASE_EXP)—— 拒绝(需严格 ISO-8601 UTC)"
   base_exp_epoch="$(date -u -d "$BASE_EXP" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$BASE_EXP" +%s 2>/dev/null || echo 0)"
   [ "$base_exp_epoch" -gt 0 ] || die "读回基线 expires 无法解析($BASE_EXP)—— 拒绝(fail-closed)"
   [ "$(date -u +%s)" -gt "$base_exp_epoch" ] && die "读回基线已过期($BASE_EXP)—— 疑重放旧签名 manifest 撤销撤销,拒绝(首发/离线用 --no-baseline)"
-  # (finding1c) 把**本地** releases 并集进来 —— 一份陈旧基线可能缺本地已签发的版本(如撤销后新增的
-  # 修复版),不能因采信基线就把它丢了。按 version 去重,基线条目优先(它是权威已发布副本)。
-  PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
-    ($base | map(.version)) as $bv
-    | $base + ($local | map(select((.version as $v | $bv | index($v)) | not)))')"
-  # 本地 $OUT counter 若更高(operator 本地签了没上传)→ 取 max 保单调。
-  [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
+  # (finding1b/1c 门控)只有**本地领先于已验签基线**(LOCAL_META > 基线 meta)时,才用本地做反回退
+  # 锚点:并集本地 releases + floor 取 max。否则(本地落后/相等)**基线权威** —— 它的删除就是撤销
+  # (删 releases 条目是本体系唯一的撤销机制),无门控地并集会把被撤销的坏 release **复活**
+  # (#196 R4 Blocking1:同签名合法产物里 auto_apply=true)。metadata_version 是现成的来源信号,
+  # 同时门控并集与 floor 棘轮。此处 PREV_META 仍是基线 meta(下一行才 max)。
+  if [ "$LOCAL_META" -gt "$PREV_META" ]; then
+    LOCAL_AHEAD=1
+    # 并集:基线缺、本地有的补回(按 version 去重、基线优先)。
+    PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
+      ($base | map(.version)) as $bv
+      | $base + ($local | map(select((.version as $v | $bv | index($v)) | not)))')"
+    PREV_META="$LOCAL_META"   # counter 推到本地(保单调)
+  fi
   echo "读回并**验签**已发布 manifest:metadata_version=$PREV_META releases=$(printf '%s' "$PREV_RELEASES" | jq length)" >&2
 fi
 NEW_META=$((PREV_META + 1))
@@ -195,11 +206,11 @@ _highest_field() { # <field-name> <fallback>
 }
 [ -n "$MIN_VERSION" ] || MIN_VERSION="$(_highest_field min_version 0.28.0)"
 [ -n "$REQUIRES_TA" ] || REQUIRES_TA="$(_highest_field requires_ta_version 0.28.0)"
-# rollback_floor:显式 --rollback-floor > 验签基线 > 默认 0.28.0;再对**本地** floor 取 semver_max
-# **反回退**(finding1b:同 :157 计数器那条单调原则 —— 一份陈旧网络基线不能把已知漏洞地板悄悄
-# 降回去)。本地 floor 是 operator 自己上次签的、可信的反回退参照;要真降 floor 须先清本地 $OUT。
+# rollback_floor:显式 --rollback-floor > 验签基线 > 默认 0.28.0。仅当**本地领先基线**(LOCAL_AHEAD)
+# 时才对本地 floor 取 semver_max 反回退(与并集同门控:本地落后/相等时基线权威,不用本地覆盖 ——
+# 否则新 clone 无 $OUT 会误判、或让陈旧本地压过权威基线)。要真降 floor 须先清本地 $OUT。
 [ -n "$ROLLBACK_FLOOR" ] || ROLLBACK_FLOOR="${BASE_FLOOR:-0.28.0}"
-ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
+[ "${LOCAL_AHEAD:-0}" = 1 ] && ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
 
 # 跨 mac/linux 的 UTC 时间戳
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -245,7 +256,9 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
         and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=$nmax)))
         and ((.security // false)|type=="boolean")               # 继承的旧条目也查(节点强制这三个类型)
         and ((.auto_apply_allowed // false)|type=="boolean")
-        and ((.canary_ring // [])|type=="array")
+        # canary_ring 逐字镜像节点 :518(元素必须是**字符串** node id)——旧版只查 type==array,
+        # 一份继承的 canary_ring:[1,2](数值)signer 会签发、节点却整份拒 → fail-closed 全网更新冻结。
+        and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))
       ))
 ' >/dev/null || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
 
@@ -294,8 +307,11 @@ cat <<EOF
   1. 把 tarball 传到 release:
        gh release create airaccount-node-v$VERSION "$TARBALL" -t "airaccount-node v$VERSION" -n "$NOTES"
      (或 gh release upload airaccount-node-v$VERSION "$TARBALL")
-  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE = $BASE_URL):
-       $OUT
-       $OUT.minisig
-  ⚠️ metadata_version 是防回滚单点状态:$OUT 建议入库 / 或每次发版靠 --base-url 读回基线。
+  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE = $BASE_URL)——**先传签名再传正文**,
+     与上面原子写入同序,避免出现「新正文 + 旧签名」窗口(期间节点 fail-closed 拒绝):
+       $OUT.minisig   ← 先
+       $OUT           ← 后
+  ⚠️ metadata_version / rollback_floor / releases 是防回滚的**权威来源**:反回退锚点靠本地 $OUT,
+     而它未入库时新 clone/换签名机上不存在(见 R4 Blocking2)——强烈建议把 $OUT + .minisig **入库**,
+     并让 --base-url 默认指向该仓库路径;仅靠 readback 的那一路在新机器上无本地锚点。
 EOF
