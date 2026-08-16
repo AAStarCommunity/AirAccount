@@ -18,6 +18,8 @@
 #   --dry-run        只组装 + schema 自检,打到 stdout,**绝不触碰 $OUT / 不签名**(不需私钥)。
 #   --base-url URL   读回已发布 manifest 求 metadata_version 基线(默认 AU_MANIFEST_BASE)。
 #   --no-baseline    跳过读回(离线/首发;此时 metadata_version 仅从本地 $OUT 取,慎用)。
+#   --revoke VER[,VER…]  撤销版本:写进单调 revoked[] 墓碑,并从 releases 剔除。撤销的唯一机制
+#                    (不是"删 releases 条目")。被撤销的版本不能再 --version 重签。可重复/逗号列表。
 #
 # 私钥默认 ~/.ssh/aastar-updater.key(密码加密;minisign 会交互提示输密码)。绝不入库。
 set -euo pipefail
@@ -46,7 +48,7 @@ OUT=""
 DRY_RUN=0
 BASE_URL="${AU_MANIFEST_BASE:-https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/updater/channels}"
 NO_BASELINE=0
-ALLOW_CARRY_FORWARD=0   # 允许把「基线没有、本地有」的版本补回(默认拒:无法与被撤销区分,#196 R5)
+REVOKE_LIST=""          # --revoke <ver>[,...] 累积:写进 revoked[] 墓碑,从 releases 剔除(#196 R6 撤销机制)
 REPO="AAStarCommunity/AirAccount"
 NOTES_MAX=280   # 节点 load_manifest 对 notes 的硬上限(与之保持一致)
 
@@ -79,7 +81,7 @@ while [ "$#" -gt 0 ]; do
     --out)            OUT="$2"; shift 2 ;;
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --no-baseline)    NO_BASELINE=1; shift ;;
-    --allow-carry-forward) ALLOW_CARRY_FORWARD=1; shift ;;   # 担保补回的版本非被撤销(否则默认拒)
+    --revoke)         REVOKE_LIST="${REVOKE_LIST:+$REVOKE_LIST,}$2"; shift 2 ;;   # 撤销版本 → revoked[] 墓碑
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        usage 0 ;;
     *) echo "未知参数: $1" >&2; usage 1 ;;
@@ -98,6 +100,11 @@ command -v jq >/dev/null || die "缺 jq"
 [ -z "$MIN_VERSION" ] || [[ "$MIN_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--min-version 非法: $MIN_VERSION"
 [ -z "$REQUIRES_TA" ] || [[ "$REQUIRES_TA" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--requires-ta 非法: $REQUIRES_TA"
 [ -z "$ROLLBACK_FLOOR" ] || [[ "$ROLLBACK_FLOOR" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--rollback-floor 非法: $ROLLBACK_FLOOR"
+# --revoke 每个值都要是合法 semver(逗号分隔)
+if [ -n "$REVOKE_LIST" ]; then
+  IFS=',' read -ra _rv <<< "$REVOKE_LIST"
+  for _v in "${_rv[@]}"; do [[ "$_v" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--revoke 版本非法(需 x.y.z): $_v"; done
+fi
 # --notes:节点要求无控制字符且 ≤NOTES_MAX;违反会被**每个节点** fail-closed 拒绝 → 在此就拒。
 if [ -n "$NOTES" ]; then
   # -z:把整个 NOTES 当**一条** NUL 记录扫,否则 grep 会把换行当行分隔符、扫不到内嵌换行。
@@ -138,14 +145,14 @@ semver_max() {
 # 节点 ratchet 后永久拒绝一切后续版本(把本工具要防的砖化搬到了上游)。故:**先验签,后继承**,
 # 且 counter/releases/floor **全部**从验签副本取(只取 counter 会在新 clone 上丢掉所有旧 release +
 # 把 rollback_floor 悄悄降回 0.28.0)。读回失败(网络/端点)一律 fail-closed,首发须显式 --no-baseline。
-LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""
+LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""; LOCAL_REVOKED='[]'
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
   LOCAL_RELEASES="$(jq -c '.releases // []' "$OUT")"
   LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
+  LOCAL_REVOKED="$(jq -c '.revoked // []' "$OUT")"
 fi
-PREV_META="$LOCAL_META"; PREV_RELEASES="$LOCAL_RELEASES"; BASE_FLOOR="$LOCAL_FLOOR"
-LOCAL_AHEAD=0   # 本地 $OUT 是否领先于已验签基线(LOCAL_META > 基线 meta):决定用不用本地做反回退锚点
+PREV_META="$LOCAL_META"; PREV_RELEASES="$LOCAL_RELEASES"; BASE_FLOOR="$LOCAL_FLOOR"; BASE_REVOKED="$LOCAL_REVOKED"
 if [ "$NO_BASELINE" != 1 ]; then
   command -v curl >/dev/null || die "读回基线需 curl(离线/首发请显式 --no-baseline)"
   command -v minisign >/dev/null || die "读回基线要验签,需 minisign(或 --no-baseline)"
@@ -163,6 +170,7 @@ if [ "$NO_BASELINE" != 1 ]; then
   PREV_META="$(jq -r '(.metadata_version // 0) | floor' "$RB_DIR/m.json")"
   PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
   BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
+  BASE_REVOKED="$(jq -c '.revoked // []' "$RB_DIR/m.json")"
   # (finding2) .channel 必须匹配 —— minisign 只签**字节**不签来源:一份合法签名的 beta.json 被
   # (误)放到 stable.json 的 URL,会被整份继承进 stable(beta 的低 floor / 预发布 releases 污染 stable)。
   BASE_CHANNEL="$(jq -r '.channel // empty' "$RB_DIR/m.json")"
@@ -183,33 +191,26 @@ if [ "$NO_BASELINE" != 1 ]; then
   # 存基线**原值**(门控/并集前)—— 日志与告警必须按**已验签基线**的真实值打,不能打并集后的
   # (#196 R5 Blocking2:旧日志打并集后 meta/releases 却标"已验签基线",正是复活没被发现的直接原因)。
   BASE_META="$PREV_META"; BASE_COUNT="$(printf '%s' "$PREV_RELEASES" | jq length)"
-  echo "读回并**验签**已发布基线:metadata_version=$BASE_META releases=$BASE_COUNT rollback_floor=${BASE_FLOOR:-<none>}" >&2
+  echo "读回并**验签**已发布基线:metadata_version=$BASE_META releases=$BASE_COUNT rollback_floor=${BASE_FLOOR:-<none>} revoked=$(printf '%s' "$BASE_REVOKED" | jq length)" >&2
+  # counter 单调:max(本地,基线)。releases/revoked 的合并在 fi 之后统一做(墓碑方案 #196 R6,下方)。
+  [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
+fi
 
-  # 门控:仅**本地 counter 领先基线**(LOCAL_META > BASE_META)才考虑用本地做反回退锚点。⚠️但
-  # metadata_version 只是**计数器不是内容新鲜度**:离线 --no-baseline 连签能把本地 counter 灌过基线、
-  # 内容却停在撤销前(#196 R5 Blocking1)。故"补回基线没有的版本"**无法**与"复活被撤销的版本"区分
-  # —— 默认 refuse 并逐条列出,除非显式 --allow-carry-forward(operator 担保非撤销)。彻底解需
-  # revoked:[] 墓碑字段(signer+node,另开 PR)。此处 PREV_META 仍是基线 meta。
-  if [ "$LOCAL_META" -gt "$BASE_META" ]; then
-    LOCAL_AHEAD=1
-    CARRY="$(jq -rn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
-      ($base|map(.version)) as $bv | [ $local[] | select((.version as $v|$bv|index($v))|not) | .version ] | join(",")')"
-    if [ -n "$CARRY" ]; then
-      [ "$ALLOW_CARRY_FORWARD" = 1 ] || die "本地领先基线(meta $LOCAL_META > $BASE_META),要把基线**没有**的版本补回:$CARRY —— 这些可能是基线**刻意撤销**的(删 releases 条目=唯一撤销机制),补回=复活。确认非撤销 → 显式加 --allow-carry-forward;否则先对齐基线。彻底解见 revoked:[] 墓碑方案。"
-      PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
-        ($base|map(.version)) as $bv | $base + ($local | map(select((.version as $v|$bv|index($v))|not)))')"
-      echo "⚠️ --allow-carry-forward:并集补回基线没有的版本:$CARRY(operator 担保非撤销)" >&2
-    fi
-    PREV_META="$LOCAL_META"   # counter 推到本地(保单调)
-  else
-    # (#196 R5 Blocking3)本地未领先 → 基线权威。若本地有条目将被丢弃 / meta 相等 split-brain,**告警**
-    # 后再覆写 $OUT —— 否则本地锚点无痕消失(节点 floor 无高水位,签出即全网即刻生效)。floor 覆盖告警在下方。
-    DROP="$(jq -rn --argjson local "$LOCAL_RELEASES" --argjson base "$PREV_RELEASES" '
-      ($base|map(.version)) as $bv | [ $local[] | select((.version as $v|$bv|index($v))|not) | .version ] | join(",")')"
-    [ -z "$DROP" ] || echo "⚠️ 本地 release 未进产物(基线权威,LOCAL_AHEAD=0):$DROP —— 若非预期请核对基线新鲜度" >&2
-    { [ "$LOCAL_META" = "$BASE_META" ] && [ -n "$LOCAL_RELEASES" ] && [ "$LOCAL_RELEASES" != "[]" ]; } \
-      && echo "⚠️ 本地与基线 meta 相等($LOCAL_META):split-brain 无法仲裁,已倒向基线" >&2
-  fi
+# ── revoked:[] 墓碑:撤销/合并可判定的唯一机制(#196 R6)──────────────────────
+# revoked = 单调 union(基线 + 本地 + --revoke),**永不缩小** —— 一份陈旧基线不能 un-revoke。
+REVOKED="$(jq -cn --argjson base "$BASE_REVOKED" --argjson local "$LOCAL_REVOKED" --arg add "$REVOKE_LIST" '
+  ($add | split(",") | map(select(length>0) | ltrimstr("v"))) as $a
+  | (($base + $local | map(ltrimstr("v"))) + $a) | unique')"
+# releases = 基线 ∪ 本地(自由并集,按 version 去重、基线优先),再**滤掉 revoked 里的版本**。
+# 一次堵死三条复活路:carry-forward(本地有基线无)、基线自己仍列着的被撤销版本、下面 --version 直接重签。
+# 撤销的唯一机制 = revoked[](脚本不再靠"删 releases 条目",那条无法与"基线未收到"区分)。
+PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" --argjson rev "$REVOKED" '
+  ($base | map(.version)) as $bv
+  | ($base + ($local | map(select((.version as $v|$bv|index($v))|not))))
+  | map(select(((.version|ltrimstr("v")) as $vv | $rev|index($vv))|not))')"
+# --version 撞 revoked → 拒:不能重签一个已撤销的版本(否则就是绕过墓碑复活)。
+if printf '%s' "$REVOKED" | jq -e --arg v "${VERSION#v}" 'index($v) != null' >/dev/null 2>&1; then
+  die "版本 $VERSION 在 revoked 墓碑里(已被撤销)—— 不能重新签发。要恢复需人工从 channel 的 revoked[] 移除(慎重)。"
 fi
 NEW_META=$((PREV_META + 1))
 
@@ -224,17 +225,16 @@ _highest_field() { # <field-name> <fallback>
 }
 [ -n "$MIN_VERSION" ] || MIN_VERSION="$(_highest_field min_version 0.28.0)"
 [ -n "$REQUIRES_TA" ] || REQUIRES_TA="$(_highest_field requires_ta_version 0.28.0)"
-# rollback_floor:显式 --rollback-floor > 验签基线 > 默认 0.28.0。仅当**本地领先基线**(LOCAL_AHEAD)
-# 时才对本地 floor 取 semver_max 反回退(与并集同门控:本地落后/相等时基线权威,不用本地覆盖 ——
-# 否则新 clone 无 $OUT 会误判、或让陈旧本地压过权威基线)。要真降 floor 须先清本地 $OUT。
+# rollback_floor:反回退**单调** —— 取 max(显式 --rollback-floor 或基线默认, 本地 floor, 基线 floor)。
+# floor 是安全地板(围栏低于它的已知漏洞版本),只升不降;陈旧基线/本地都压不低它。撤销具体版本走
+# revoked[] 墓碑、不动 floor。要真降 floor(un-fence)须人工:清本地 $OUT 且基线本身也低。
+EXPLICIT_FLOOR="$ROLLBACK_FLOOR"
 [ -n "$ROLLBACK_FLOOR" ] || ROLLBACK_FLOOR="${BASE_FLOOR:-0.28.0}"
-if [ "${LOCAL_AHEAD:-0}" = 1 ]; then
-  ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
-elif [ "$NO_BASELINE" != 1 ] && [ -n "${LOCAL_FLOOR:-}" ] \
-     && [ "$(semver_max "$LOCAL_FLOOR" "$ROLLBACK_FLOOR")" = "$LOCAL_FLOOR" ] && [ "$LOCAL_FLOOR" != "$ROLLBACK_FLOOR" ]; then
-  # LOCAL_AHEAD=0 且读了基线:本地 floor 更高被基线覆盖 → 告警(#196 R5 Blocking3;顺带把旧的裸尾
-  # `&&` 改成 if/fi,免日后加 set -e 时 LOCAL_AHEAD=0 让脚本静默 exit 1 —— nit :213)。
-  echo "⚠️ 本地 floor $LOCAL_FLOOR > 将签发 $ROLLBACK_FLOOR,本地未领先基线(LOCAL_AHEAD=0)→ 采基线 floor,本地更高 floor 被覆盖。请核对基线新鲜度。" >&2
+ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
+ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${BASE_FLOOR:-0.0.0}")"
+# 显式 --rollback-floor 被反回退抬高 → 提示(不静默;#196 R6 Low)。sed 去 v 前缀免 v0.31.0 假告警。
+if [ -n "$EXPLICIT_FLOOR" ] && [ "$(printf '%s' "$EXPLICIT_FLOOR" | sed 's/^v//')" != "$(printf '%s' "$ROLLBACK_FLOOR" | sed 's/^v//')" ]; then
+  echo "⚠️ 显式 --rollback-floor $EXPLICIT_FLOOR 低于本地/基线 floor,已反回退抬到 $ROLLBACK_FLOOR(floor 只升不降)。" >&2
 fi
 
 # 跨 mac/linux 的 UTC 时间戳
@@ -257,8 +257,10 @@ NEW_RELEASE="$(jq -n \
 
 MANIFEST="$(jq -n \
   --argjson meta "$NEW_META" --arg gen "$NOW" --arg exp "$EXPIRES" --arg channel "$CHANNEL" \
-  --arg floor "$ROLLBACK_FLOOR" --argjson prev "$PREV_RELEASES" --argjson new "$NEW_RELEASE" '
+  --arg floor "$ROLLBACK_FLOOR" --argjson prev "$PREV_RELEASES" --argjson new "$NEW_RELEASE" \
+  --argjson revoked "$REVOKED" '
   {metadata_version:$meta, generated_at:$gen, expires:$exp, channel:$channel, rollback_floor:$floor,
+   revoked:$revoked,
    releases: ([$new] + ($prev | map(select(.version != $new.version))))}')"
 
 # ── schema 自检:**逐字段镜像**节点 aastar-node-updater.sh 的 load_manifest(fail-closed)。
@@ -269,6 +271,10 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
   (.metadata_version|type=="number" and .==floor)                       # 整数(非小数)
   and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
   and (.rollback_floor|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
+  and ((.revoked // []) | type=="array" and (all(.[]; type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))))
+  # 撤销执行的强不变量:releases 里**不得**含 revoked 里的版本(墓碑 = 唯一撤销机制,#196 R6)
+  and (((.revoked // []) | map(ltrimstr("v"))) as $rv
+       | (.releases | all((.version|ltrimstr("v")) as $vv | ($rv | index($vv)) == null)))
   and (.releases|type=="array" and length>0)
   and (all(.releases[];
         (.version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))

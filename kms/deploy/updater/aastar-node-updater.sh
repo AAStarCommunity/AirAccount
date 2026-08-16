@@ -487,7 +487,9 @@ cmd_recovery() {
 cmd_status() { state_init; cat "$STATE_FILE"; }
 
 # ── 拉取 + 验签 + schema + 新鲜度 + 防回滚:成功后 $WORK/channel.json 可信 ──
-# check 与 apply 共用(单一可信实现)。设全局 MANIFEST / FLOOR / CUR / MVER。
+# check 与 apply 共用(单一可信实现)。设全局 MANIFEST / FLOOR / CUR / MVER / MANIFEST_REVOKED。
+# manifest 撤销墓碑判定(MANIFEST_REVOKED 由 load_manifest 设);rc=0 表示该版本已被撤销。
+is_revoked() { printf '%s' "${MANIFEST_REVOKED:-[]}" | jq -e --arg v "${1#v}" 'index($v) != null' >/dev/null 2>&1; }
 load_manifest() {
   local murl="$AU_MANIFEST_BASE/$CHANNEL.json"
   log "拉 manifest: $murl"
@@ -503,6 +505,7 @@ load_manifest() {
     (.metadata_version|type=="number" and .==floor)
     and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
     and (.rollback_floor==null or (.rollback_floor|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
+    and ((.revoked // []) | type=="array" and (all(.[]; type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))))
     and (.releases|type=="array")
     and (all(.releases[];
           (.version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
@@ -534,6 +537,7 @@ load_manifest() {
   [ "$mver" -gt "$seen" ] && state_set_num seen_metadata_version "$mver"
   # rollback_floor + 当前版本(fail-safe 归一非法 semver 到 0.0.0)
   FLOOR="$(jq -r '.rollback_floor // "0.0.0"' "$WORK/channel.json")"
+  MANIFEST_REVOKED="$(jq -c '(.revoked // []) | map(ltrimstr("v"))' "$WORK/channel.json")"   # 撤销墓碑(#196)
   CUR="$(state_get current)"; [ -z "$CUR" ] && CUR="0.0.0"
   ver_valid "$CUR" || { warn "state.current '$CUR' 非法 semver → 按 0.0.0 处理"; CUR="0.0.0"; }
   MANIFEST="$WORK/channel.json"; MVER="$mver"
@@ -670,6 +674,7 @@ cmd_check() {
     [ -z "$r_ver" ] && continue
     ver_gt "$r_ver" "$CUR" || continue
     ver_ge "$r_ver" "$FLOOR" || continue
+    if is_revoked "$r_ver"; then continue; fi     # manifest 撤销墓碑里的版本:绝不安装/通知(#196)
     ver_ge "$CUR" "$r_min" || continue           # 上升路径:当前须 >= 该版本要求的 min
     if [ -z "$nc_ver" ] || ver_gt "$r_ver" "$nc_ver"; then
       nc_ver="$r_ver"; nc_sev="$r_sev"; nc_notes="$r_notes"; nc_ta="$r_ta"; nc_hash="$r_sha"; nc_reqta="$r_reqta"
@@ -737,6 +742,7 @@ EOF
   # 安全门(显式 apply 越过 policy,但这些都不越过):
   ver_gt "$r_ver" "$CUR"   || die "$want 不高于当前 $CUR —— 拒绝(降级请走 OOB break-glass)"
   ver_ge "$r_ver" "$FLOOR" || die "$want 低于 rollback_floor $FLOOR(有已知漏洞)—— 拒绝"
+  if is_revoked "$want"; then die "$want 已被 channel 撤销(revoked 墓碑)—— 拒绝安装(即便显式 apply)"; fi
   ver_ge "$CUR" "$r_min"   || die "当前 $CUR 不满足 $want 要求的 min_version $r_min —— 需先升级中间版本"
   if [ "$r_ta" = "true" ]; then
     die "$want 含 TA 变更(ta_changed=true)。TA 更新不走在线一键(RSA-4096 签名 + secure storage 迁移;apply_version 也不装 TA 到 OP-TEE 路径,会 CA/TA 不一致)——请走 OOB / 专门流程(决策 D)。"
