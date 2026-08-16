@@ -53,23 +53,34 @@ pub fn preflight_bind_check(bind: &SocketAddr, allow_tailscale: bool) -> Result<
 }
 
 /// 文本里是否提到 `:PORT` 作为**完整端口字段**(后面不接数字)—— 避免查端口 80 时命中 8080。
-fn mentions_port(text: &str, port: u16) -> bool {
-    let needle = format!(":{port}");
+/// 文本里是否出现「<prefix><port>」且 port 后**不接数字**(=完整端口号)——避免 `= 8080` 误命中
+/// `= 80`。prefix 如 ":" / "= " / "localPort = "。
+fn token_is_port(text: &str, prefix: &str, port: u16) -> bool {
+    let needle = format!("{prefix}{port}");
     let bytes = text.as_bytes();
     let mut from = 0;
     while let Some(rel) = text[from..].find(&needle) {
-        let start = from + rel;
-        let after = start + needle.len();
+        let after = from + rel + needle.len();
         if after >= bytes.len() || !bytes[after].is_ascii_digit() { return true; }
-        from = start + 1;
+        from = from + rel + 1;
         if from >= text.len() { break; }
     }
     false
 }
+fn mentions_port(text: &str, port: u16) -> bool { token_is_port(text, ":", port) }
+
+/// 一份隧道/反代配置内容是否把 `port` 暴露出去(cloudflared `:port` / frp `= port` / `localPort = port`)。
+/// 纯函数 → 可对**调用层**单测(pr-daemon #195 Low:旧实现 sibling 用裸 `contains("= 80")` /
+/// `contains("localPort = 80")`,查端口 80 会被 `= 8080` / `localPort = 8080` 误命中而错误拒绝启动;
+/// 且旧单测只测私有 mentions_port、测不到这个真实调用路径)。三处匹配统一走全数字边界的 token_is_port。
+fn content_exposes_port(content: &str, port: u16) -> bool {
+    token_is_port(content, ":", port)
+        || token_is_port(content, "= ", port)
+        || token_is_port(content, "localPort = ", port)
+}
 
 /// 扫常见隧道/反代配置,发现本端口被暴露就拒绝启动。best-effort(文件不存在=没配=放行)。
 fn check_not_proxied(port: u16) -> Result<(), String> {
-    let needle_port = port.to_string();
     // cloudflared ingress(yml)/ frp(toml)/ nginx 常见路径
     let files = [
         "/etc/cloudflared/config.yml",
@@ -80,10 +91,8 @@ fn check_not_proxied(port: u16) -> Result<(), String> {
     ];
     for f in files {
         if let Ok(content) = std::fs::read_to_string(f) {
-            // 端口出现 + 该文件本就是隧道/反代 → 强烈信号
-            if mentions_port(&content, port) || content.contains(&format!("= {needle_port}"))
-                || content.contains(&format!("localPort = {needle_port}"))
-            {
+            // 端口出现(全数字边界)+ 该文件本就是隧道/反代 → 强烈信号
+            if content_exposes_port(&content, port) {
                 return Err(format!("端口 {port} 疑似被 {f} 暴露到隧道/公网 —— 拒绝启动(移除该 ingress)"));
             }
         }
@@ -289,6 +298,17 @@ mod tests {
         assert!(!mentions_port("localPort = 8080", 80)); // 80 不该命中 8080
         assert!(mentions_port("a :80\nb :8080", 80));    // 有真正的 :80 字段
         assert!(!mentions_port("only :8080 here", 80));
+    }
+    #[test]
+    fn content_exposes_port_caller_whole_field() {
+        // 测**调用层**决策函数(不只私有 helper):frp `= port` / `localPort = port` 全数字边界。
+        // 旧实现这两支是裸 contains,查端口 80 会被 8080 误命中 → 错误拒绝启动(pr-daemon #195 Low)。
+        assert!(content_exposes_port("localPort = 80\n", 80));
+        assert!(!content_exposes_port("localPort = 8080\n", 80));   // 旧 contains("localPort = 80") 误命中
+        assert!(!content_exposes_port("remotePort = 8080\n", 80));  // 旧 contains("= 80") 误命中
+        assert!(content_exposes_port("localPort = 8080\n", 8080));
+        assert!(content_exposes_port("service: http://localhost:80\n", 80));   // cloudflared :port
+        assert!(!content_exposes_port("service: http://localhost:8080\n", 80));
     }
     #[test]
     fn ct_eq_works() {

@@ -122,10 +122,14 @@ async function loadStatus(){
 }
 async function check(){
  document.getElementById('cands').innerHTML='<span class="muted">检查中…</span>';
- const {ok,b}=await j('/api/candidates');
- document.getElementById('cands').innerHTML=ok
-  ?`<pre>${esc(b.log||'(无输出)')}</pre><p class="muted">${esc(b.note||'')}</p>`
-  :'<span class="pill err">检查失败</span>';
+ const {ok,b}=await j('/api/candidates');   // 只读列候选,不触发安装
+ const el=document.getElementById('cands');
+ if(!ok||!b.ok){el.innerHTML='<span class="pill err">检查失败</span>';loadStatus();return;}
+ const c=b.candidates||{};const list=c.candidates||[];
+ if(!list.length){el.innerHTML='<p class="muted">已是最新(current='+esc(c.current||'-')+',无更高候选)</p>';loadStatus();return;}
+ el.innerHTML='<p class="muted">current='+esc(c.current||'-')+' · 安装请用「应用更新」(走 2FA)</p>'+list.map(x=>
+  '<div class="row"><span>'+esc(x.version||'?')+(x.severity&&x.severity!=='none'?' <b>['+esc(x.severity)+']</b>':'')+'</span>'+
+  '<span class="muted">'+esc(x.action||'?')+(x.denied?' · 已拒':'')+'</span></div>').join('');
  loadStatus();
 }
 function dialog(html){return new Promise(res=>{const d=document.getElementById('dlg');document.getElementById('dlgbody').innerHTML=html;d.onclose=()=>res(d.returnValue);d.showModal();});}
@@ -137,7 +141,11 @@ async function askApply(){
  await confirm2fa(b.challenge_id);
 }
 async function askRollback(){
- const v=await dialog('<h3 style="margin:0 0 6px">回滚</h3><p class="muted">回滚到上一个健康版本?将发送 Telegram 确认码。</p>');
+ // 先读 status 算出回滚目标版本(pending 非空→current,否则→previous)显示在弹窗,别让运维盲点(#195 finding5)。
+ const {ok:sok,b:sb}=await j('/api/status');
+ let tgt='上一个健康版本';
+ if(sok){const s=sb.state||{};const t=(s.pending||'')?(s.current||''):(s.previous||'');if(t)tgt=esc(t);}
+ const v=await dialog('<h3 style="margin:0 0 6px">回滚</h3><p class="muted">回滚到 <b>'+tgt+'</b>?将发送 Telegram 确认码(码内含目标版本,请核对后再确认)。</p>');
  if(v!=='ok')return;
  const {ok,b}=await j('/api/rollback',{method:'POST',body:JSON.stringify({})});
  if(!ok){showLog(b.error||'发起失败');return;}

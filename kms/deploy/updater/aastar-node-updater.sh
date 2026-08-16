@@ -308,6 +308,24 @@ state_set_num() { # 单独处理数字字段(metadata_version)
   mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
 }
 
+# ── 回滚拒绝清单(.denied[])──────────────────────────────────────────
+# 面板/OOB 回滚一个坏版本后,把它记进 .denied[];cmd_check 跳过被 deny 的版本,
+# 否则 updater.timer(OnUnitActiveSec=6h)下一次 fire 会把刚回滚掉的坏版本原样重装
+# (pr-daemon #195 High:「静默空操作」换成了「6h 后被静默撤销的操作」)。版本号归一去 v 前缀。
+deny_version() { # deny_version <ver>:追加进 .denied[](去重)
+  local v="${1#v}"; [ -n "$v" ] || return 0
+  jq --arg v "$v" '.denied = (((.denied // []) + [$v]) | unique)' "$STATE_FILE" > "$STATE_FILE.tmp"
+  mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
+}
+undeny_version() { # undeny_version <ver>:显式 apply 该版本时清 deny(运维改主意,明确要装它)
+  local v="${1#v}"; [ -n "$v" ] || return 0
+  jq --arg v "$v" '.denied = ((.denied // []) | map(select(. != $v)))' "$STATE_FILE" > "$STATE_FILE.tmp"
+  mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
+}
+is_denied() { # is_denied <ver>:该版本是否在拒绝清单里(rc=0 表示被 deny)
+  jq -e --arg v "${1#v}" '((.denied // []) | index($v)) != null' "$STATE_FILE" >/dev/null 2>&1
+}
+
 # ── 下载(curl,file:// 亦可)────────────────────────────────────────
 fetch() { # fetch <url> <out>
   if [ -n "$AU_FETCH_CMD" ]; then $AU_FETCH_CMD "$1" "$2" 9>&-; return; fi
@@ -492,16 +510,63 @@ cmd_rollback() {
   LOCK_FATAL=1
   acquire_lock                       # 与 apply/check 竞争同一批 state/软链,必须持锁;竞争则硬失败可见
   state_init
-  local cur prev; cur="$(state_get current)"; prev="$(state_get previous)"
-  [ -n "$prev" ] || die "无 previous 版本可回滚(current=$cur)—— 进一步恢复走 OOB 人工救板"
-  [ -d "$AU_ROOT/releases/$prev" ] || die "回滚目标 releases/$prev 不存在 —— 走 OOB 人工救板"
-  log "面板回滚:$cur → $prev(正常重启)"
-  rollback "$prev"                   # 换软链 + 真实 restart_service + state_set current=$prev pending=""
-  state_set previous "$cur"          # 记录回滚来源(toggle 语义:再点一次可回 $cur;panel 显示 current)
+  local cur prev pending target bad
+  cur="$(state_get current)"; prev="$(state_get previous)"; pending="$(state_get pending)"
+  if [ -n "$pending" ]; then
+    # 中断的 apply(掉电/被 kill,state={current,previous,pending}):目标取 **current**(已提交的
+    # 已知良好版),丢弃 pending;坏版本=pending。pr-daemon #195 Medium:旧实现无视 pending、
+    # 取 previous → 多退一级,且 rollback() 清 pending 会毁掉 boot recovery 唯一的中断标记。
+    target="$cur"; bad="$pending"
+    [ -n "$target" ] && [ -d "$AU_ROOT/releases/$target" ] || die "回滚目标 releases/$target 不存在 —— 走 OOB 人工救板"
+    log "面板回滚(丢弃中断的 apply pending=$pending):→ $target(正常重启)"
+  else
+    # 正常撤销上次升级:目标取 previous;坏版本=current。
+    target="$prev"; bad="$cur"
+    [ -n "$prev" ] || die "无 previous 版本可回滚(current=$cur)—— 进一步恢复走 OOB 人工救板"
+    [ -d "$AU_ROOT/releases/$prev" ] || die "回滚目标 releases/$prev 不存在 —— 走 OOB 人工救板"
+    log "面板回滚:$cur → $prev(正常重启)"
+  fi
+  rollback "$target"                 # 换软链 + 真实 restart_service + state_set current=$target pending=""
+  deny_version "$bad"                # 记录被拒版本 → cmd_check 不再 6h 后自动重装(High)
+  # 去掉旧的 `state_set previous "$cur"` toggle:它把坏版本写回 previous,二次点面板回滚即重装坏
+  # 版本 + 真实重启(pr-daemon #195 R4)。正常撤销后清空 previous → 再点面板回滚会 die「无 previous」
+  # 而非 toggle 装回坏版本;进一步回退属 OOB。pending 分支不动 previous(它仍指向 current 之前的合法版)。
+  if [ -z "$pending" ]; then state_set previous ""; fi
 }
 
 # ── status ──────────────────────────────────────────────────────────
 cmd_status() { state_init; cat "$STATE_FILE"; }
+
+# ── list-candidates:只读列出候选(面板「检查更新」走它)────────────────
+# 拉取+验签+新鲜度+防回滚后,列出高于 current、过 floor/min 的候选及其分类
+# (apply=会自动装 / notify=只通知 / skip=被策略锁 / denied=被回滚拒绝),**绝不安装、绝不通知**。
+# pr-daemon #195 Medium:旧的 /api/candidates 触发真 check = 零确认真装升级;拆开 → 面板只读走本
+# verb,安装一律走 apply + 2FA。输出 JSON:{current, floor, candidates:[{version,severity,notes,ta_changed,action,denied}]}。
+cmd_list_candidates() {
+  STRICT_FETCH=0
+  # setup 的 log()(走 stdout)统一重定向到 stderr —— 本 verb 的 stdout **只**留末尾那份 JSON,
+  # 否则 `[updater] 拉 manifest…` 日志会混进 JSON,面板/调用方解析失败。持锁/state/WORK 是副作用,
+  # 重定向不影响它们。load_manifest = 拉取 + 验签 + schema + 新鲜度 + 防回滚 → MANIFEST/FLOOR/CUR。
+  { need jq; need curl; acquire_lock; state_init; WORK="$(mktemp -d)"; load_manifest; } 1>&2
+  local US=$'\037'
+  local r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes act denied
+  local items=()
+  while IFS="$US" read -r r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes; do
+    [ -z "$r_ver" ] && continue
+    ver_gt "$r_ver" "$CUR" || continue
+    ver_ge "$r_ver" "$FLOOR" || continue
+    ver_ge "$CUR" "$r_min" || continue
+    if is_denied "$r_ver"; then denied=true; act=denied
+    else denied=false; act="$(decide_action "$CUR" "$r_ver" "$r_sec" "$r_auto" "$r_ta" "$r_canary" "$r_reqta")"; fi
+    items+=("$(jq -cn --arg v "$r_ver" --arg sev "$r_sev" --arg notes "$r_notes" \
+      --argjson ta "${r_ta:-false}" --arg act "$act" --argjson denied "$denied" \
+      '{version:$v, severity:$sev, notes:$notes, ta_changed:$ta, action:$act, denied:$denied}')")
+  done <<EOF
+$(jq -r '.releases[] | [(.version),(.security//false|tostring),(.auto_apply_allowed//false|tostring),(.ta_changed//false|tostring),(.min_version//"0.0.0"),(.requires_ta_version//""),(.tarball//""),(.sha256//""),((.canary_ring//[])|join(",")),(.severity//"none"),(.notes//"")] | join("")' "$MANIFEST")
+EOF
+  { [ "${#items[@]}" -gt 0 ] && printf '%s\n' "${items[@]}"; } \
+    | jq -s --arg cur "$CUR" --arg floor "$FLOOR" '{current:$cur, floor:$floor, candidates:.}'
+}
 
 # ── 拉取 + 验签 + schema + 新鲜度 + 防回滚:成功后 $WORK/channel.json 可信 ──
 # check 与 apply 共用(单一可信实现)。设全局 MANIFEST / FLOOR / CUR / MVER。
@@ -688,6 +753,7 @@ cmd_check() {
     ver_gt "$r_ver" "$CUR" || continue
     ver_ge "$r_ver" "$FLOOR" || continue
     ver_ge "$CUR" "$r_min" || continue           # 上升路径:当前须 >= 该版本要求的 min
+    if is_denied "$r_ver"; then continue; fi      # 被面板/OOB 回滚拒绝的版本:不再自动重装/通知(High)
     if [ -z "$nc_ver" ] || ver_gt "$r_ver" "$nc_ver"; then
       nc_ver="$r_ver"; nc_sev="$r_sev"; nc_notes="$r_notes"; nc_ta="$r_ta"; nc_hash="$r_sha"; nc_reqta="$r_reqta"
     fi
@@ -768,6 +834,7 @@ EOF
     ver_ge "$cur_ta_ver" "$r_reqta" || die "$want 要求 TA ≥ $r_reqta,当前 TA $cur_ta_ver 不满足 —— 拒绝(需先升级 TA)"
   fi
   log "显式应用 $want(severity=$r_sev, ta_changed=$r_ta, current=$CUR)"
+  undeny_version "$r_ver"             # 运维显式选了这个版本 → 若曾被回滚 deny,清掉(明确改主意)
   notify info "开始应用 $CUR → $want(手动 apply,node=$AU_NODE_ID)"
   download_verify_apply "$r_ver" "$r_tarball" "$r_sha"
 }
@@ -822,13 +889,13 @@ main() {
   done
   local npos="${#POS[@]}"
   case "$cmd" in
-    check|recovery|status|rollback)
+    check|recovery|status|rollback|list-candidates)
       [ "$npos" -eq 0 ] || die "$cmd 不接受额外参数:${POS[*]}"
-      "cmd_$cmd" ;;
+      "cmd_${cmd//-/_}" ;;                        # list-candidates → cmd_list_candidates
     apply)
       [ "$npos" -eq 1 ] || die "用法: $0 apply <ver>(恰好一个版本参数)"
       cmd_apply "${POS[0]}" ;;
-    *) die "用法: $0 {check | apply <ver> | rollback | recovery | status}" ;;
+    *) die "用法: $0 {check | apply <ver> | rollback | recovery | status | list-candidates}" ;;
   esac
 }
 main "$@"

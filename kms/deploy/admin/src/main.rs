@@ -175,7 +175,7 @@ fn routes(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Err
     // GET /api/status —— 只读,会话即可
     let status = warp::get().and(warp::path!("api" / "status"))
         .and(auth(st.clone())).and(c.clone()).and_then(api_status);
-    // GET /api/candidates —— 有副作用(触发 helper check),故也加 Origin/Host 门(防跨站 GET)
+    // GET /api/candidates —— 只读(updater list-candidates:列候选不安装)。保留 Origin 门作纵深防御。
     let candidates = warp::get().and(warp::path!("api" / "candidates"))
         .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(c.clone()).and_then(api_candidates);
 
@@ -193,9 +193,13 @@ fn routes(cfg: Arc<Config>, st: Shared) -> impl Filter<Extract = impl Reply, Err
     let logout = warp::post().and(warp::path!("api" / "logout"))
         .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
         .and(s.clone()).and_then(api_logout);
+    // POST /api/clear-latch —— 人工解除 apply/check 超时置的 STUCK 闩(已认证 + CSRF + Origin 三重门)
+    let clear_latch = warp::post().and(warp::path!("api" / "clear-latch"))
+        .and(origin_guard(cfg.clone())).and(auth(st.clone())).and(csrf_guard(st.clone()))
+        .and_then(api_clear_latch);
 
     // 注:安全头在 main/app 里于 `.recover()` **之后**统一加,确保 401/403/400 错误响应也带 CSP/XFO。
-    pages.or(login).or(status).or(candidates).or(apply).or(apply_confirm).or(rollback).or(logout)
+    pages.or(login).or(status).or(candidates).or(apply).or(apply_confirm).or(rollback).or(logout).or(clear_latch)
 }
 
 // ── 安全头(全响应)──────────────────────────────────────────────────
@@ -337,14 +341,16 @@ async fn api_status(_sid: String, cfg: Arc<Config>) -> Result<impl Reply, Reject
 }
 
 async fn api_candidates(_sid: String, cfg: Arc<Config>) -> Result<impl Reply, Rejection> {
-    // 触发一次 check(拉+验签 manifest)→ 由 updater 决定候选/通知。这里只回传 helper 的原始输出摘要。
-    // 完整「结构化候选列表」增量 2(需 updater 增 `list-candidates --json`)。
-    let out = helper::run(&cfg.helper, &["check"]).await;
-    Ok(warp::reply::json(&serde_json::json!({
-        "ok": out.is_ok(),
-        "log": out.unwrap_or_else(|e| e),
-        "note": "结构化候选列表见增量 2;当前回传 check 日志"
-    })))
+    // 只读:updater `list-candidates` 拉+验签 manifest,列出候选及分类(apply/notify/skip/denied),
+    // **绝不安装**。pr-daemon #195 finding4:旧实现走 `check` = 面板「检查更新」零 2FA 触发真安装
+    // (授权自相矛盾);拆开 → 本端点只读,安装一律走 apply + 2FA。
+    // ⚠️ 部署侧:root helper(airaccount-admin-helper)的 argv 白名单须放行只读动词 `list-candidates`。
+    let out = helper::run(&cfg.helper, &["list-candidates"]).await;
+    let (ok, body) = match out {
+        Ok(s) => (true, serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)),
+        Err(e) => (false, serde_json::json!({ "error": e })),
+    };
+    Ok(warp::reply::json(&serde_json::json!({ "ok": ok, "candidates": body })))
 }
 
 // apply:发起 → 生成 2FA 码 + 推 Telegram,等 confirm(决策 C)。
@@ -360,7 +366,29 @@ async fn api_apply_begin(_sid: String, cfg: Arc<Config>, st: Shared, req: ApplyR
 async fn api_rollback_begin(sid: String, cfg: Arc<Config>, st: Shared, _body: serde_json::Value)
     -> Result<impl Reply, Rejection>
 {
-    begin_2fa(sid, cfg, st, PendingAction::Rollback, "确认回滚到上一个健康版本".into()).await
+    // 先读 status 解析回滚**目标版本**写进 2FA 摘要 —— 否则 Telegram 里只有「回滚到上一个健康版本」、
+    // 没有版本号,运维盲签,二次确认形同虚设(pr-daemon #195 finding5)。目标逻辑与 updater
+    // cmd_rollback 一致:pending 非空(中断的 apply)→ 目标=current;否则(正常撤销)→ 目标=previous。
+    let target = helper::run(&cfg.helper, &["status"]).await.ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|st| {
+            let g = |k: &str| st.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let (pending, cur, prev) = (g("pending"), g("current"), g("previous"));
+            let t = if !pending.is_empty() { cur } else { prev };
+            if t.is_empty() { None } else { Some(t) }
+        });
+    let summary = match &target {
+        Some(v) => format!("确认回滚到 {v}"),
+        None    => "确认回滚到上一个健康版本(目标版本未知:status 读取失败/无 previous;确认前请自行核对)".into(),
+    };
+    begin_2fa(sid, cfg, st, PendingAction::Rollback, summary).await
+}
+
+async fn api_clear_latch(_sid: String) -> Result<impl Reply, Rejection> {
+    // 人工确认 updater 已无后台残留后,清 STUCK 闩(apply/check 超时置的);已认证 + CSRF + Origin
+    // 三重门(pr-daemon #195 finding3「已认证 clear-latch 端点」)。rollback 本就不受闩限,不必等这个。
+    let was_stuck = helper::clear_stuck();
+    Ok(warp::reply::json(&serde_json::json!({ "ok": true, "was_stuck": was_stuck })))
 }
 
 #[derive(Deserialize)] struct ConfirmReq { challenge_id: String, code: String }
