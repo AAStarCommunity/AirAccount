@@ -1184,7 +1184,7 @@ OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"; rc=$?
 echo "$OUT" | jq -e '.candidates==[] and .current=="0.30.0"' >/dev/null 2>&1 && ok "零候选 candidates=[] + current 正确" || bad "零候选 JSON 不对: $OUT"
 
 # ═══════════════════════════════════════════════════════════════════
-echo "== T66 自动 apply 健康门失败 → deny 坏版本,下次 check 不重装(#195 R5 finding3:自动路径)=="
+echo "== T66 自动健康门失败:**连续第 2 次(阈值)才 deny**,denied 仍通知(#195 R6:一次抖动不永久拉黑)=="
 cat > "$ROOT/updater.env" <<'ENV'
 AUTO_UPDATE=on
 CHANNEL=stable
@@ -1197,13 +1197,26 @@ SHA="$(make_bundle 0.29.0 TA-0.28.0)"
 REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
   '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
 write_manifest 13 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
-echo 1 > "$ROOT/health_result"    # 健康门失败 → 自动回滚
-run_updater "$NR" "$NS" check >/dev/null 2>&1
-[ "$(cur_link "$NR")" = "0.28.0" ] && ok "健康门失败 → 自动回滚到 0.28.0" || bad "未回滚=$(cur_link "$NR")"
-[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "坏版本 0.29.0 进 denied(**自动**路径)" || bad "denied 未含 0.29.0=$(jq -c '.denied' "$NS/state.json")"
-echo 0 > "$ROOT/health_result"    # 即便健康门恢复,被 deny 的也不该重装
-run_updater "$NR" "$NS" check >/dev/null 2>&1
-[ "$(cur_link "$NR")" = "0.28.0" ] && ok "下次 check 不重装被 deny 的 0.29.0(终结 6h 循环)" || bad "坏版本被重装=$(cur_link "$NR")"
+echo 1 > "$ROOT/health_result"    # 健康门失败
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 1 次
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "第 1 次健康门失败 → 回滚 0.28.0" || bad "未回滚=$(cur_link "$NR")"
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" = "null" ] && ok "第 1 次**未** deny(一次抖动不永久拉黑好版本)" || bad "第 1 次就 deny 了"
+[ "$(jq -r '(.failures//{})["0.29.0"]' "$NS/state.json")" = "1" ] && ok "失败计数=1" || bad "计数=$(jq -r '(.failures//{})["0.29.0"]' "$NS/state.json")"
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 2 次 → 达阈值 deny
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "第 2 次失败 → 进 denied(阈值 2)" || bad "第 2 次仍未 deny=$(jq -c '.denied' "$NS/state.json")"
+echo 0 > "$ROOT/health_result"; : > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 3 次:健康恢复,但已 deny
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "denied 不重装(current 仍 0.28.0)" || bad "坏版本被重装=$(cur_link "$NR")"
+grep -q "已被本节点拉黑" "$ROOT/notify.log" && ok "denied 版本**仍通知**(不从通知静默消失)" || bad "denied 未通知: $(cat "$ROOT/notify.log")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T67 list-candidates 网络失败 → **响亮失败**(非零退出),不 fail-open 成『已是最新』(#195 R6)=="
+read NR NS < <(new_node t67 0.28.0)
+if run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-net.sh" -- list-candidates >/dev/null 2>&1; then
+  bad "网络失败竟 exit 0(fail-open,面板会误显『已是最新』而安全补丁挂着)"
+else
+  ok "网络失败 → 非零退出(STRICT_FETCH=1;面板渲染『无法检查』)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""

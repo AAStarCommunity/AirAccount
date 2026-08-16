@@ -326,6 +326,31 @@ is_denied() { # is_denied <ver>:该版本是否在拒绝清单里(rc=0 表示被
   jq -e --arg v "${1#v}" '((.denied // []) | index($v)) != null' "$STATE_FILE" >/dev/null 2>&1
 }
 
+# ── 自动路径失败计数 → 达阈值才 deny(#195 R6)──────────────────────────
+# 旧实现健康门失败一次就永久拉黑好版本:run_health 只是一次 curl,一次启动慢/StartLimitBurst 抖动
+# 就把安全补丁永久拉黑。改为**连续失败计数**,达 AU_DENY_THRESHOLD(默认 2)才进 denied;成功即清零。
+record_failure() { # record_failure <ver> → 打印新计数
+  local v="${1#v}"; [ -n "$v" ] || { echo 0; return; }
+  jq --arg v "$v" '.failures = ((.failures // {}) | .[$v] = ((.[$v] // 0) + 1))' "$STATE_FILE" > "$STATE_FILE.tmp"
+  mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
+  jq -r --arg v "$v" '(.failures // {})[$v] // 0' "$STATE_FILE"
+}
+clear_failures() { # clear_failures <ver>:成功后清该版本失败计数
+  local v="${1#v}"; [ -n "$v" ] || return 0
+  jq --arg v "$v" '.failures = ((.failures // {}) | del(.[$v]))' "$STATE_FILE" > "$STATE_FILE.tmp"
+  mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
+}
+auto_fail_deny() { # auto_fail_deny <ver>:自动路径失败 → 计数+1,达阈值才 deny;通知带次数
+  local v="$1" fc thr="${AU_DENY_THRESHOLD:-2}"
+  fc="$(record_failure "$v")"
+  if [ "$fc" -ge "$thr" ]; then
+    deny_version "$v"
+    notify warn "$v 连续第 $fc 次健康门/restart 失败 → 已拉黑不再自动重装(node=$AU_NODE_ID);确认修好后手动 apply $v 解除。"
+  else
+    notify warn "$v 第 $fc/$thr 次健康门/restart 失败,已回滚;达 $thr 次才拉黑(node=$AU_NODE_ID)。"
+  fi
+}
+
 # ── 下载(curl,file:// 亦可)────────────────────────────────────────
 fetch() { # fetch <url> <out>
   if [ -n "$AU_FETCH_CMD" ]; then $AU_FETCH_CMD "$1" "$2" 9>&-; return; fi
@@ -361,7 +386,18 @@ swap_symlink() { # swap_symlink <linkpath> <target>
 # ── 健康门(默认内置;可 hook 覆盖)─────────────────────────────────
 run_health() {
   if [ -n "$AU_HEALTH_CMD" ]; then $AU_HEALTH_CMD 9>&-; return; fi
-  # 内置默认:HTTP 层检查(真机深度门见设计文档 §3.2,后续接)
+  # 内置默认:HTTP 层检查,**轮询到 AU_HEALTH_GRACE_SECS(默认 60s)**再判失败 —— Type=simple 的
+  # restart 在 exec 之后、端口 bind **之前**就返回 active,单次 curl 会误判失败;有界重试让「启动慢」
+  # 根本不算一次失败(#195 R6:否则一次慢启动就永久拉黑好版本)。TA session 重建也要数秒才 ready。
+  local grace="${AU_HEALTH_GRACE_SECS:-60}" deadline
+  deadline=$(( $(date +%s) + grace ))
+  while :; do
+    if _health_probe; then return 0; fi
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 3
+  done
+}
+_health_probe() {  # 单次健康探测(原 run_health 主体)
   local base="http://127.0.0.1:3000"
   curl -fsS --max-time 10 "$base/health" >/dev/null || return 1
   local v; v="$(curl -fsS --max-time 10 "$base/version" 2>/dev/null || echo '{}')"
@@ -425,19 +461,20 @@ apply_version() { # apply_version <ver> <bundle_dir>
   # 切 current(生产还需切 TA 固定路径,见设计文档 §3.1;此处 hook 化留待真机)
   swap_symlink "$AU_ROOT/current" "releases/$ver"
 
-  restart_service || { warn "restart 失败,回滚"; deny_version "$ver"; rollback "$prev"; return 1; }
+  restart_service || { warn "restart 失败,回滚"; auto_fail_deny "$ver"; rollback "$prev"; return 1; }
 
   log "健康门检查…"
   export AU_EXPECT_VERSION="$(ver_norm "$ver")"   # 供内置/外部健康门核对部署后版本
   if run_health; then
+    clear_failures "$ver"    # 成功 → 清失败计数(之前的偶发失败不累积)
     state_set previous "$prev" current "$ver" pending ""
     notify info "更新成功 $prev → $ver(node=$AU_NODE_ID)"
     vacuum "${KEEP_RELEASES:-3}"
     return 0
   else
     warn "健康门未过,回滚到 $prev"
-    deny_version "$ver"      # 自动路径也要 deny 坏版本,否则 timer 6h 后原样重装(#195 R5 finding3:
-    rollback "$prev"         #   deny 之前只挂手工 cmd_rollback,自动健康门失败的回滚一条都没接)
+    auto_fail_deny "$ver"    # 自动路径:计数+1,连续达阈值才 deny(#195 R6:一次慢启动不永久拉黑好版本)
+    rollback "$prev"
     return 1
   fi
 }
@@ -544,7 +581,10 @@ cmd_status() { state_init; cat "$STATE_FILE"; }
 # pr-daemon #195 Medium:旧的 /api/candidates 触发真 check = 零确认真装升级;拆开 → 面板只读走本
 # verb,安装一律走 apply + 2FA。输出 JSON:{current, floor, candidates:[{version,severity,notes,ta_changed,action,denied}]}。
 cmd_list_candidates() {
-  STRICT_FETCH=0
+  # 交互动词(人在面板等结果)必须**响亮失败**,不能 fail-open:网络失败/锁竞争都要非零退出 →
+  # 面板渲染「无法检查」,而不是静默空候选被误读成「已是最新」(#195 R6:安全补丁挂着却显示最新)。
+  STRICT_FETCH=1        # 下载失败 → die(非零),不静默重试当无候选
+  LOCK_FATAL=1          # 锁竞争 → die,不静默 no-op
   # setup 的 log()(走 stdout)统一重定向到 stderr —— 本 verb 的 stdout **只**留末尾那份 JSON,
   # 否则 `[updater] 拉 manifest…` 日志会混进 JSON,面板/调用方解析失败。持锁/state/WORK 是副作用,
   # 重定向不影响它们。load_manifest = 拉取 + 验签 + schema + 新鲜度 + 防回滚 → MANIFEST/FLOOR/CUR。
@@ -749,14 +789,17 @@ cmd_check() {
   # 用 US(\037,非空白)作分隔符:tab 是 IFS 空白会折叠空字段,导致列错位。
   local US=$'\037'
   local ac_ver="" ac_tarball="" ac_sha=""      # apply 候选(能自动应用的最高版)
-  local nc_ver="" nc_sev="none" nc_notes="" nc_ta="false" nc_hash="" nc_reqta=""  # notify 候选
+  local nc_ver="" nc_sev="none" nc_notes="" nc_ta="false" nc_hash="" nc_reqta="" nd_ver=""  # notify 候选(nd=最高 denied)
   local r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes act
   while IFS="$US" read -r r_ver r_sec r_auto r_ta r_min r_reqta r_tarball r_sha r_canary r_sev r_notes; do
     [ -z "$r_ver" ] && continue
     ver_gt "$r_ver" "$CUR" || continue
     ver_ge "$r_ver" "$FLOOR" || continue
     ver_ge "$CUR" "$r_min" || continue           # 上升路径:当前须 >= 该版本要求的 min
-    if is_denied "$r_ver"; then continue; fi      # 被面板/OOB 回滚拒绝的版本:不再自动重装/通知(High)
+    if is_denied "$r_ver"; then                    # denied:记最高、循环后单独通知(#195 R6:好版本别从通知消失),不进 apply
+      if [ -z "$nd_ver" ] || ver_gt "$r_ver" "$nd_ver"; then nd_ver="$r_ver"; fi
+      continue
+    fi
     if [ -z "$nc_ver" ] || ver_gt "$r_ver" "$nc_ver"; then
       nc_ver="$r_ver"; nc_sev="$r_sev"; nc_notes="$r_notes"; nc_ta="$r_ta"; nc_hash="$r_sha"; nc_reqta="$r_reqta"
     fi
@@ -771,6 +814,11 @@ EOF
   # rollback_floor 越界告警(当前版本已低于 floor)
   if ! ver_ge "$CUR" "$FLOOR"; then
     notify warn "当前版本 $CUR 低于 rollback_floor $FLOOR(存在已知漏洞)—— 应尽快升级(node=$AU_NODE_ID)"
+  fi
+
+  # denied 的最高候选:单独告警「可用但已拉黑」(#195 R6:别让好版本静默从通知消失,运维要能看见它存在)。
+  if [ -n "$nd_ver" ]; then
+    notify warn "版本 $nd_ver 可用,但已被本节点拉黑(denied,曾连续健康门失败)—— 确认修好后 ssh 进板跑 aastar-node-updater apply $nd_ver 解除(node=$AU_NODE_ID)"
   fi
 
   if [ -z "$nc_ver" ]; then log "无更高候选版本(current=$CUR)"; return 0; fi

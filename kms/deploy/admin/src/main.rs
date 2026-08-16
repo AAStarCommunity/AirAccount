@@ -96,7 +96,7 @@ struct TwoFa {
     attempts_left: u32,       // 剩余错误次数,归零即作废(防本机暴力)
 }
 #[derive(Clone)]
-enum PendingAction { Apply(String), Rollback }
+enum PendingAction { Apply(String), Rollback { target: Option<String> } }
 
 #[derive(Default)]
 struct AppState {
@@ -363,25 +363,30 @@ async fn api_apply_begin(_sid: String, cfg: Arc<Config>, st: Shared, req: ApplyR
               format!("确认应用更新到 {}", req.version)).await
 }
 
-async fn api_rollback_begin(sid: String, cfg: Arc<Config>, st: Shared, _body: serde_json::Value)
-    -> Result<impl Reply, Rejection>
-{
-    // 先读 status 解析回滚**目标版本**写进 2FA 摘要 —— 否则 Telegram 里只有「回滚到上一个健康版本」、
-    // 没有版本号,运维盲签,二次确认形同虚设(pr-daemon #195 finding5)。目标逻辑与 updater
-    // cmd_rollback 一致:pending 非空(中断的 apply)→ 目标=current;否则(正常撤销)→ 目标=previous。
-    let target = helper::run(&cfg.helper, &["status"]).await.ok()
+// 解析当前回滚目标版本(与 updater cmd_rollback 逻辑一致:pending 非空→current,否则→previous)。
+// 读 helper status(= 原始 state.json)。begin 用它写 2FA 摘要,confirm 用它复查目标未变。
+async fn resolve_rollback_target(cfg: &Config) -> Option<String> {
+    helper::run(&cfg.helper, &["status"]).await.ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|st| {
             let g = |k: &str| st.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let (pending, cur, prev) = (g("pending"), g("current"), g("previous"));
             let t = if !pending.is_empty() { cur } else { prev };
             if t.is_empty() { None } else { Some(t) }
-        });
+        })
+}
+
+async fn api_rollback_begin(sid: String, cfg: Arc<Config>, st: Shared, _body: serde_json::Value)
+    -> Result<impl Reply, Rejection>
+{
+    // 先解析回滚**目标版本**写进 2FA 摘要(pr-daemon #195 finding5:否则 Telegram 里没版本号盲签),
+    // 并把目标**存进 PendingAction**(#195 R6 finding2:确认要绑到动作的目标参数,不是渲染出的字符串)。
+    let target = resolve_rollback_target(&cfg).await;
     let summary = match &target {
         Some(v) => format!("确认回滚到 {v}"),
         None    => "确认回滚到上一个健康版本(目标版本未知:status 读取失败/无 previous;确认前请自行核对)".into(),
     };
-    begin_2fa(sid, cfg, st, PendingAction::Rollback, summary).await
+    begin_2fa(sid, cfg, st, PendingAction::Rollback { target }, summary).await
 }
 
 async fn api_clear_latch(_sid: String) -> Result<impl Reply, Rejection> {
@@ -416,9 +421,24 @@ async fn api_confirm(sid: String, cfg: Arc<Config>, st: Shared, req: ConfirmReq)
         }
     };
     // 二因子通过 → 经 helper 调 updater(helper 清 env + 固定 argv;updater 全程验签)
+    // ⚠️ rollback:确认时**重新解析目标并与发起时批准的目标比对**(#195 R6 finding2)。2FA 发起到确认
+    // 有最长 300s 窗口,期间 state 可能变(另一次 rollback/apply)→ cmd_rollback 届时会推导出**不同**目标。
+    // 若目标已变即中止,让 operator 重新发起 —— 确认必须对应 operator 亲眼批准的那个目标,不是"回滚"这词。
+    if let PendingAction::Rollback { target: approved } = &action {
+        let now = resolve_rollback_target(&cfg).await;
+        match (approved, &now) {
+            (Some(a), Some(n)) if a != n =>
+                return Ok(reply_status(StatusCode::CONFLICT,
+                    &format!("回滚目标已变(确认时批准 {a},现为 {n})—— 已中止,请重新发起回滚"))),
+            (Some(_), None) =>
+                return Ok(reply_status(StatusCode::CONFLICT,
+                    "回滚目标已不可解析(state 变化/读取失败)—— 已中止,请重新发起回滚")),
+            _ => {}
+        }
+    }
     let args: Vec<&str> = match &action {
         PendingAction::Apply(v) => vec!["apply", v.as_str()],
-        PendingAction::Rollback => vec!["rollback"],
+        PendingAction::Rollback { .. } => vec!["rollback"],
     };
     let out = helper::run(&cfg.helper, &args).await;
     Ok(warp::reply::json(&serde_json::json!({ "ok": out.is_ok(), "log": out.unwrap_or_else(|e| e) })).into_response())
@@ -612,7 +632,7 @@ mod http_tests {
             let mut g = st.lock().await;
             g.twofa.insert(sid.clone(), TwoFa {
                 id: "chal-xyz".into(), code: "12345678".into(),
-                action: PendingAction::Rollback,
+                action: PendingAction::Rollback { target: None },
                 expires: Instant::now() + Duration::from_secs(60),
                 attempts_left: 5,
             });
