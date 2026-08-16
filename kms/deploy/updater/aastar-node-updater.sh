@@ -425,7 +425,7 @@ apply_version() { # apply_version <ver> <bundle_dir>
   # 切 current(生产还需切 TA 固定路径,见设计文档 §3.1;此处 hook 化留待真机)
   swap_symlink "$AU_ROOT/current" "releases/$ver"
 
-  restart_service || { warn "restart 失败,回滚"; rollback "$prev"; return 1; }
+  restart_service || { warn "restart 失败,回滚"; deny_version "$ver"; rollback "$prev"; return 1; }
 
   log "健康门检查…"
   export AU_EXPECT_VERSION="$(ver_norm "$ver")"   # 供内置/外部健康门核对部署后版本
@@ -436,7 +436,8 @@ apply_version() { # apply_version <ver> <bundle_dir>
     return 0
   else
     warn "健康门未过,回滚到 $prev"
-    rollback "$prev"
+    deny_version "$ver"      # 自动路径也要 deny 坏版本,否则 timer 6h 后原样重装(#195 R5 finding3:
+    rollback "$prev"         #   deny 之前只挂手工 cmd_rollback,自动健康门失败的回滚一条都没接)
     return 1
   fi
 }
@@ -564,7 +565,9 @@ cmd_list_candidates() {
   done <<EOF
 $(jq -r '.releases[] | [(.version),(.security//false|tostring),(.auto_apply_allowed//false|tostring),(.ta_changed//false|tostring),(.min_version//"0.0.0"),(.requires_ta_version//""),(.tarball//""),(.sha256//""),((.canary_ring//[])|join(",")),(.severity//"none"),(.notes//"")] | join("")' "$MANIFEST")
 EOF
-  { [ "${#items[@]}" -gt 0 ] && printf '%s\n' "${items[@]}"; } \
+  # 末尾 `true` 关键:空数组时 `[ 0 -gt 0 ]` 为假、是组内最后一条 → 组 rc=1,`set -o pipefail`
+  # 下整条管道 rc=1,即「已是最新」这个最常见状态下 verb 非零退出 → helper 判失败(#195 R5 finding2)。
+  { [ "${#items[@]}" -gt 0 ] && printf '%s\n' "${items[@]}"; true; } \
     | jq -s --arg cur "$CUR" --arg floor "$FLOOR" '{current:$cur, floor:$floor, candidates:.}'
 }
 

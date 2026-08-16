@@ -1166,13 +1166,44 @@ REL="$(jq -n --arg s1 "$S1" --arg s2 "$S2" --arg u1 "file://$SERVER/airaccount-n
     {version:"0.30.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u2,sha256:$s2}]')"
 write_manifest 11 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
 jq '.denied=["0.30.0"]' "$NS/state.json" > "$NS/state.json.t" && mv "$NS/state.json.t" "$NS/state.json"   # 预先 deny 0.30.0
-OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"
+OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && ok "list-candidates rc=0(helper 靠退出码判成功/失败,不能吃掉)" || bad "list-candidates rc=$rc(应 0)"
 echo "$OUT" | jq -e . >/dev/null 2>&1 && ok "list-candidates 输出合法 JSON(stdout 干净)" || bad "非法 JSON: $OUT"
 [ "$(echo "$OUT" | jq -r '.current')" = "0.28.0" ] && ok "current=0.28.0" || bad "current=$(echo "$OUT" | jq -r '.current')"
 [ "$(echo "$OUT" | jq -r '.candidates|length')" = "2" ] && ok "列出 2 个候选" || bad "候选数=$(echo "$OUT" | jq -r '.candidates|length')"
 [ "$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.30.0").action')" = "denied" ] && ok "0.30.0 标 action=denied" || bad "0.30.0 action=$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.30.0").action')"
 [ "$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.29.0").action')" = "apply" ] && ok "0.29.0 标 action=apply(policy=all)" || bad "0.29.0 action=$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.29.0").action')"
 [ "$(cur_link "$NR")" = "0.28.0" ] && ok "list-candidates 未安装(current 软链仍 0.28.0)" || bad "竟安装了=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T65 list-candidates **零候选** → 仍 rc=0 + 合法 JSON(#195 R5 finding2:『已是最新』最常见)=="
+read NR NS < <(new_node t65 0.30.0)
+write_manifest 12 "2035-01-01T00:00:00Z" "0.0.0" "[]"   # 无 release → 零候选
+OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && ok "零候选 rc=0(不是 exit1)" || bad "零候选 rc=$rc(应 0)"
+echo "$OUT" | jq -e '.candidates==[] and .current=="0.30.0"' >/dev/null 2>&1 && ok "零候选 candidates=[] + current 正确" || bad "零候选 JSON 不对: $OUT"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T66 自动 apply 健康门失败 → deny 坏版本,下次 check 不重装(#195 R5 finding3:自动路径)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node t66 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 13 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 1 > "$ROOT/health_result"    # 健康门失败 → 自动回滚
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "健康门失败 → 自动回滚到 0.28.0" || bad "未回滚=$(cur_link "$NR")"
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "坏版本 0.29.0 进 denied(**自动**路径)" || bad "denied 未含 0.29.0=$(jq -c '.denied' "$NS/state.json")"
+echo 0 > "$ROOT/health_result"    # 即便健康门恢复,被 deny 的也不该重装
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "下次 check 不重装被 deny 的 0.29.0(终结 6h 循环)" || bad "坏版本被重装=$(cur_link "$NR")"
 
 # ═══════════════════════════════════════════════════════════════════
 echo ""
