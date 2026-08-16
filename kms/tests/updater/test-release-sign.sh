@@ -113,7 +113,7 @@ bash "$SIGN" --version 0.32.0 --channel stable --tarball "$ROOT/airaccount-node-
   && bad "channel 不符竟被继承(beta 污染 stable)" || \
   { grep -q "channel" "$ROOT/e9" && ok "channel 不符被拒(beta≠stable)" || bad "channel 错误信息不对: $(cat "$ROOT/e9")"; }
 
-echo "== T10 本地**领先**基线时:陈旧基线不能降 floor / 丢本地 release(finding1b/1c,门控 LOCAL_META>base)=="
+echo "== T10 本地领先 + --allow-carry-forward:陈旧基线不能降 floor / 丢本地 release(carry 需显式授权)=="
 rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
 # 本地 $OUT 连签两次 → meta=2、floor=0.31.0、releases=[0.31.0,0.30.0](operator 领先未上传的状态)
 sign --version 0.30.0 --no-baseline --rollback-floor 0.31.0 --notes l1 >/dev/null 2>&1
@@ -122,12 +122,12 @@ sign --version 0.31.0 --no-baseline --notes l2 >/dev/null 2>&1
 # 网络基线**陈旧**(meta=1 < 本地 2):floor 降回 0.28.0、releases 缺 0.31.0,但签名合法、未过期、channel 对
 jq -n '{metadata_version:1,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.28.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"stale",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:"0000000000000000000000000000000000000000000000000000000000000000",canary_ring:[]}]}' > "$PUB_BASE/stable.json"
 minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
-bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" --allow-carry-forward \
   --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v3 >/dev/null 2>"$ROOT/e10"
 nf="$(jq -r .rollback_floor "$OUT" 2>/dev/null)"
 nv="$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)"
 [ "$nf" = "0.31.0" ] && ok "floor 反回退:陈旧基线 0.28.0 未压过本地 0.31.0(结果 $nf)" || bad "floor 被降=$nf(应 0.31.0)"
-echo "$nv" | grep -q "0.31.0" && ok "releases 并集:本地 0.31.0 未被陈旧基线丢($nv)" || bad "0.31.0 丢失=$nv"
+echo "$nv" | grep -q "0.31.0" && ok "releases 并集(授权后):本地 0.31.0 未被陈旧基线丢($nv)" || bad "0.31.0 丢失=$nv"
 
 echo "== T11 本地**落后**基线时:并集**不复活**被撤销的 release(#196 R4 Blocking1,门控)=="
 rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
@@ -140,7 +140,12 @@ minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.j
 bash "$SIGN" --version 0.33.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
   --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v4 >/dev/null 2>"$ROOT/e11"
 nv2="$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)"
+nm2="$(jq -r .metadata_version "$OUT" 2>/dev/null)"; nf2="$(jq -r .rollback_floor "$OUT" 2>/dev/null)"
 echo "$nv2" | grep -q "0.32.0" && bad "被撤销的 0.32.0 被复活(本地落后仍并集)=$nv2" || ok "本地落后→尊重基线删除,0.32.0 未复活($nv2)"
+# 防变异欠断言(daemon:只查 0.32.0 缺席时,丢掉整份基线也能 PASS)——锁死内容/meta/floor
+[ "$nv2" = "0.30.0,0.33.0" ] && ok "产物=基线保留(0.30.0)+新版(0.33.0),无多无少" || bad "releases 不对=$nv2(应 0.30.0,0.33.0)"
+[ "$nm2" = 4 ] && ok "meta 前进到 4(基线 3+1)" || bad "meta=$nm2(应 4)"
+[ "$nf2" = "0.30.0" ] && ok "floor 采基线权威 0.30.0(未被压)" || bad "floor=$nf2(应 0.30.0)"
 
 echo "== T12 继承的 canary_ring **数值**元素 → schema 自检拒绝(与节点 :518 谓词对齐,防漂移)=="
 rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
@@ -150,6 +155,35 @@ bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" -
   --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v5 2>"$ROOT/e12" >/dev/null \
   && bad "数值 canary_ring 竟签发(与节点谓词漂移,会致全网 fail-closed 冻结)" || \
   { grep -q "schema" "$ROOT/e12" && ok "数值 canary_ring 被 schema 自检拒(与节点对齐)" || bad "canary 错误信息不对: $(cat "$ROOT/e12")"; }
+
+S64=0000000000000000000000000000000000000000000000000000000000000000
+echo "== T13 本地 counter 领先但内容陈旧(带被撤销的 0.32.0)→ **默认 refuse** 复活,--allow-carry-forward 才携带(#196 R5 Blocking1)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+# 本地 $OUT 手搓:meta=4(离线连签把 counter 灌水),仍带被上游撤销的 0.32.0(合法 64-hex sha)
+jq -n --arg s "$S64" '{metadata_version:4,rollback_floor:"0.28.0",releases:[
+  {version:"0.34.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
+  {version:"0.32.0",security:false,severity:"none",notes:"revoked-upstream",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
+  {version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+jq -n --arg s "$S64" '{metadata_version:3,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.30.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"auth",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.35.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v5 2>"$ROOT/e13" >/dev/null \
+  && bad "默认竟携带复活(应 refuse)" || \
+  { grep -qE "allow-carry-forward|补回" "$ROOT/e13" && ok "默认 refuse 并提示 --allow-carry-forward" || bad "refuse 信息不对: $(cat "$ROOT/e13")"; }
+grep -q "0.32.0" "$ROOT/e13" && ok "refuse 明示了被撤销的 0.32.0" || bad "未列出 0.32.0: $(cat "$ROOT/e13")"
+bash "$SIGN" --version 0.35.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" --allow-carry-forward \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v5 >/dev/null 2>&1
+jq -r '[.releases[].version]' "$OUT" 2>/dev/null | grep -q "0.32.0" && ok "--allow-carry-forward 后 0.32.0 被携带(显式担保)" || bad "授权后仍未携带"
+
+echo "== T14 本地未领先但 floor 更高 → floor 被基线覆盖时**告警**到 stderr,不静默(#196 R5 Blocking3)=="
+rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minisig"
+jq -n --arg s "$S64" '{metadata_version:2,rollback_floor:"0.31.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+jq -n --arg s "$S64" '{metadata_version:3,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.28.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"auth",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.33.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v6 >/dev/null 2>"$ROOT/e14"
+grep -qE "本地 floor 0.31.0.*高于|floor.*被覆盖" "$ROOT/e14" && ok "floor 下调有 stderr 告警(不静默覆写本地锚点)" || bad "floor 下调无告警: $(cat "$ROOT/e14")"
+[ "$(jq -r .rollback_floor "$OUT" 2>/dev/null)" = "0.28.0" ] && ok "LOCAL_AHEAD=0 采基线 floor 0.28.0" || bad "floor=$(jq -r .rollback_floor "$OUT" 2>/dev/null)"
 
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"

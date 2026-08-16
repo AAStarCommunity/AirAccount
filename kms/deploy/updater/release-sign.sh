@@ -46,6 +46,7 @@ OUT=""
 DRY_RUN=0
 BASE_URL="${AU_MANIFEST_BASE:-https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/updater/channels}"
 NO_BASELINE=0
+ALLOW_CARRY_FORWARD=0   # 允许把「基线没有、本地有」的版本补回(默认拒:无法与被撤销区分,#196 R5)
 REPO="AAStarCommunity/AirAccount"
 NOTES_MAX=280   # 节点 load_manifest 对 notes 的硬上限(与之保持一致)
 
@@ -78,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --out)            OUT="$2"; shift 2 ;;
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --no-baseline)    NO_BASELINE=1; shift ;;
+    --allow-carry-forward) ALLOW_CARRY_FORWARD=1; shift ;;   # 担保补回的版本非被撤销(否则默认拒)
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        usage 0 ;;
     *) echo "未知参数: $1" >&2; usage 1 ;;
@@ -178,20 +180,36 @@ if [ "$NO_BASELINE" != 1 ]; then
   base_exp_epoch="$(date -u -d "$BASE_EXP" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$BASE_EXP" +%s 2>/dev/null || echo 0)"
   [ "$base_exp_epoch" -gt 0 ] || die "读回基线 expires 无法解析($BASE_EXP)—— 拒绝(fail-closed)"
   [ "$(date -u +%s)" -gt "$base_exp_epoch" ] && die "读回基线已过期($BASE_EXP)—— 疑重放旧签名 manifest 撤销撤销,拒绝(首发/离线用 --no-baseline)"
-  # (finding1b/1c 门控)只有**本地领先于已验签基线**(LOCAL_META > 基线 meta)时,才用本地做反回退
-  # 锚点:并集本地 releases + floor 取 max。否则(本地落后/相等)**基线权威** —— 它的删除就是撤销
-  # (删 releases 条目是本体系唯一的撤销机制),无门控地并集会把被撤销的坏 release **复活**
-  # (#196 R4 Blocking1:同签名合法产物里 auto_apply=true)。metadata_version 是现成的来源信号,
-  # 同时门控并集与 floor 棘轮。此处 PREV_META 仍是基线 meta(下一行才 max)。
-  if [ "$LOCAL_META" -gt "$PREV_META" ]; then
+  # 存基线**原值**(门控/并集前)—— 日志与告警必须按**已验签基线**的真实值打,不能打并集后的
+  # (#196 R5 Blocking2:旧日志打并集后 meta/releases 却标"已验签基线",正是复活没被发现的直接原因)。
+  BASE_META="$PREV_META"; BASE_COUNT="$(printf '%s' "$PREV_RELEASES" | jq length)"
+  echo "读回并**验签**已发布基线:metadata_version=$BASE_META releases=$BASE_COUNT rollback_floor=${BASE_FLOOR:-<none>}" >&2
+
+  # 门控:仅**本地 counter 领先基线**(LOCAL_META > BASE_META)才考虑用本地做反回退锚点。⚠️但
+  # metadata_version 只是**计数器不是内容新鲜度**:离线 --no-baseline 连签能把本地 counter 灌过基线、
+  # 内容却停在撤销前(#196 R5 Blocking1)。故"补回基线没有的版本"**无法**与"复活被撤销的版本"区分
+  # —— 默认 refuse 并逐条列出,除非显式 --allow-carry-forward(operator 担保非撤销)。彻底解需
+  # revoked:[] 墓碑字段(signer+node,另开 PR)。此处 PREV_META 仍是基线 meta。
+  if [ "$LOCAL_META" -gt "$BASE_META" ]; then
     LOCAL_AHEAD=1
-    # 并集:基线缺、本地有的补回(按 version 去重、基线优先)。
-    PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
-      ($base | map(.version)) as $bv
-      | $base + ($local | map(select((.version as $v | $bv | index($v)) | not)))')"
+    CARRY="$(jq -rn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
+      ($base|map(.version)) as $bv | [ $local[] | select((.version as $v|$bv|index($v))|not) | .version ] | join(",")')"
+    if [ -n "$CARRY" ]; then
+      [ "$ALLOW_CARRY_FORWARD" = 1 ] || die "本地领先基线(meta $LOCAL_META > $BASE_META),要把基线**没有**的版本补回:$CARRY —— 这些可能是基线**刻意撤销**的(删 releases 条目=唯一撤销机制),补回=复活。确认非撤销 → 显式加 --allow-carry-forward;否则先对齐基线。彻底解见 revoked:[] 墓碑方案。"
+      PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" '
+        ($base|map(.version)) as $bv | $base + ($local | map(select((.version as $v|$bv|index($v))|not)))')"
+      echo "⚠️ --allow-carry-forward:并集补回基线没有的版本:$CARRY(operator 担保非撤销)" >&2
+    fi
     PREV_META="$LOCAL_META"   # counter 推到本地(保单调)
+  else
+    # (#196 R5 Blocking3)本地未领先 → 基线权威。若本地有条目将被丢弃 / meta 相等 split-brain,**告警**
+    # 后再覆写 $OUT —— 否则本地锚点无痕消失(节点 floor 无高水位,签出即全网即刻生效)。floor 覆盖告警在下方。
+    DROP="$(jq -rn --argjson local "$LOCAL_RELEASES" --argjson base "$PREV_RELEASES" '
+      ($base|map(.version)) as $bv | [ $local[] | select((.version as $v|$bv|index($v))|not) | .version ] | join(",")')"
+    [ -z "$DROP" ] || echo "⚠️ 本地 release 未进产物(基线权威,LOCAL_AHEAD=0):$DROP —— 若非预期请核对基线新鲜度" >&2
+    { [ "$LOCAL_META" = "$BASE_META" ] && [ -n "$LOCAL_RELEASES" ] && [ "$LOCAL_RELEASES" != "[]" ]; } \
+      && echo "⚠️ 本地与基线 meta 相等($LOCAL_META):split-brain 无法仲裁,已倒向基线" >&2
   fi
-  echo "读回并**验签**已发布 manifest:metadata_version=$PREV_META releases=$(printf '%s' "$PREV_RELEASES" | jq length)" >&2
 fi
 NEW_META=$((PREV_META + 1))
 
@@ -210,7 +228,14 @@ _highest_field() { # <field-name> <fallback>
 # 时才对本地 floor 取 semver_max 反回退(与并集同门控:本地落后/相等时基线权威,不用本地覆盖 ——
 # 否则新 clone 无 $OUT 会误判、或让陈旧本地压过权威基线)。要真降 floor 须先清本地 $OUT。
 [ -n "$ROLLBACK_FLOOR" ] || ROLLBACK_FLOOR="${BASE_FLOOR:-0.28.0}"
-[ "${LOCAL_AHEAD:-0}" = 1 ] && ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
+if [ "${LOCAL_AHEAD:-0}" = 1 ]; then
+  ROLLBACK_FLOOR="$(semver_max "$ROLLBACK_FLOOR" "${LOCAL_FLOOR:-0.0.0}")"
+elif [ "$NO_BASELINE" != 1 ] && [ -n "${LOCAL_FLOOR:-}" ] \
+     && [ "$(semver_max "$LOCAL_FLOOR" "$ROLLBACK_FLOOR")" = "$LOCAL_FLOOR" ] && [ "$LOCAL_FLOOR" != "$ROLLBACK_FLOOR" ]; then
+  # LOCAL_AHEAD=0 且读了基线:本地 floor 更高被基线覆盖 → 告警(#196 R5 Blocking3;顺带把旧的裸尾
+  # `&&` 改成 if/fi,免日后加 set -e 时 LOCAL_AHEAD=0 让脚本静默 exit 1 —— nit :213)。
+  echo "⚠️ 本地 floor $LOCAL_FLOOR > 将签发 $ROLLBACK_FLOOR,本地未领先基线(LOCAL_AHEAD=0)→ 采基线 floor,本地更高 floor 被覆盖。请核对基线新鲜度。" >&2
+fi
 
 # 跨 mac/linux 的 UTC 时间戳
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -307,8 +332,10 @@ cat <<EOF
   1. 把 tarball 传到 release:
        gh release create airaccount-node-v$VERSION "$TARBALL" -t "airaccount-node v$VERSION" -n "$NOTES"
      (或 gh release upload airaccount-node-v$VERSION "$TARBALL")
-  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE = $BASE_URL)——**先传签名再传正文**,
-     与上面原子写入同序,避免出现「新正文 + 旧签名」窗口(期间节点 fail-closed 拒绝):
+  2. 把签名 manifest 传到节点会拉的 URL(AU_MANIFEST_BASE = $BASE_URL)。两文件非单次原子切换 →
+     **任何顺序都有一个有界 fail-closed 窗口**(先传 .minisig=「新签名+旧正文」,先传 .json=「新正文+
+     旧签名」,节点两种都验签失败、拒绝重试,不砖)。彻底消除需单次原子切换(发到带版本号的路径 +
+     原子改指针)。当前建议先传 .minisig(与本地原子写入同序,窗口方向一致):
        $OUT.minisig   ← 先
        $OUT           ← 后
   ⚠️ metadata_version / rollback_floor / releases 是防回滚的**权威来源**:反回退锚点靠本地 $OUT,
