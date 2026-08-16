@@ -151,6 +151,7 @@ rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minis
 jq -n --arg s "$S64" '{metadata_version:3,rollback_floor:"0.30.0",revoked:["0.32.0"],releases:[
   {version:"0.32.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
   {version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1   # 签本地 $OUT(#196 R8:读 LOCAL_* 前要验签)
 # 网络基线**陈旧**(meta=2 < 本地 3):revoked 空(撤销发生前),releases 含 0.32.0
 jq -n --arg s "$S64" '{metadata_version:2,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.32.0",security:false,severity:"none",notes:"stale",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
 minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
@@ -185,6 +186,7 @@ rm -f "$OUT" "$OUT.minisig" "$PUB_BASE/stable.json" "$PUB_BASE/stable.json.minis
 jq -n --arg s "$S64" '{metadata_version:2,rollback_floor:"0.30.0",revoked:[],releases:[
   {version:"0.31.0",security:false,severity:"none",notes:"local-only",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
   {version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1   # 签本地 $OUT(#196 R8:读 LOCAL_* 前要验签)
 # 基线**无 revoked 字段**(墓碑之前),0.31.0 已用老式删条目撤销(releases 只 0.30.0)
 jq -n --arg s "$S64" '{metadata_version:3,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.30.0",releases:[{version:"0.30.0",security:false,severity:"none",notes:"auth",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
 minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
@@ -199,6 +201,31 @@ rm -f "$OUT" "$OUT.minisig"
 sign --version 0.30.0 --no-baseline --notes a >/dev/null 2>&1
 sign --version 0.31.0 --no-baseline --notes b 2>"$ROOT/e17" >/dev/null
 grep -q "no-baseline.*revoked 仅来自本地" "$ROOT/e17" && ok "--no-baseline 缩 revoked 有响亮告警" || bad "无 --no-baseline 告警: $(cat "$ROOT/e17")"
+
+echo "== T18 本地 \$OUT 未签名/被篡改 → 读 LOCAL_* 前验签门拦下(#196 R8 finding1/2:防未签名无界驱动 counter=永久砖化)=="
+rm -f "$OUT" "$OUT.minisig"
+# (a) 无 .minisig 的本地 $OUT(meta=9e9)→ 默认拒
+jq -n --arg s "$S64" '{metadata_version:999999999,rollback_floor:"0.28.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" --no-baseline \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --notes v 2>"$ROOT/e18" >/dev/null \
+  && bad "未签名本地 \$OUT(meta=9e9)竟被信任(可永久砖化)" || \
+  { grep -qE "无 .minisig|拒绝静默信任" "$ROOT/e18" && ok "无 .minisig 的本地 \$OUT 被拒(默认不信任)" || bad "错误信息不对: $(cat "$ROOT/e18")"; }
+# (b) 签好后篡改 counter(不重签)→ 验签失败被拒
+rm -f "$OUT" "$OUT.minisig"
+sign --version 0.30.0 --no-baseline --notes a >/dev/null 2>&1
+jq '.metadata_version=999999999' "$OUT" > "$OUT.t" && mv "$OUT.t" "$OUT"   # 篡改,不重签 → .minisig 不匹配
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" --no-baseline \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --notes v 2>"$ROOT/e18b" >/dev/null \
+  && bad "篡改的本地 \$OUT 竟被信任" || \
+  { grep -q "验签失败" "$ROOT/e18b" && ok "篡改的本地 \$OUT 验签失败被拒" || bad "错误信息不对: $(cat "$ROOT/e18b")"; }
+
+echo "== T19 撤销**最后一个** release → releases:[] 合法(镜像节点)+ 空告警(#196 R8 finding3)=="
+rm -f "$OUT" "$OUT.minisig"
+sign --version 0.30.0 --no-baseline --notes a >/dev/null 2>&1   # channel 只有 0.30.0
+bash "$SIGN" --out "$OUT" --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --no-baseline --revoke 0.30.0 --notes r 2>"$ROOT/e19" >/dev/null && rc19=0 || rc19=1
+[ "$rc19" = 0 ] && ok "撤销最后一版 rc=0(不再被 schema length>0 卡死)" || bad "撤销最后一版失败 rc=$rc19: $(cat "$ROOT/e19")"
+[ "$(jq -r '.releases|length' "$OUT" 2>/dev/null)" = 0 ] && ok "releases:[](全撤销,与节点一致)" || bad "releases=$(jq -c .releases "$OUT")"
+grep -q "无任何 release" "$ROOT/e19" && ok "空 releases 有告警" || bad "无空告警: $(cat "$ROOT/e19")"
 
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"

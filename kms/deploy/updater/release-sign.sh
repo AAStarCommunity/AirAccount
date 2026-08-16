@@ -20,6 +20,9 @@
 #   --no-baseline    跳过读回(离线/首发;此时 metadata_version 仅从本地 $OUT 取,慎用)。
 #   --revoke VER[,VER…]  撤销版本:写进单调 revoked[] 墓碑,并从 releases 剔除。撤销的唯一机制
 #                    (不是"删 releases 条目")。被撤销的版本不能再 --version 重签。可重复/逗号列表。
+#                    可单独用(不带 --version)做**纯撤销**;撤销最后一版会得到 releases:[](合法)。
+#   --trust-unsigned-local  本地 $OUT 无 .minisig 时显式信任(首发/迁移)。默认拒:未签名本地 $OUT
+#                    无界驱动 metadata_version/floor/revoked(全单调)→ 改一下就能**永久砖化全网**。
 #
 # 私钥默认 ~/.ssh/aastar-updater.key(密码加密;minisign 会交互提示输密码)。绝不入库。
 set -euo pipefail
@@ -49,6 +52,7 @@ DRY_RUN=0
 BASE_URL="${AU_MANIFEST_BASE:-https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/updater/channels}"
 NO_BASELINE=0
 REVOKE_LIST=""          # --revoke <ver>[,...] 累积:写进 revoked[] 墓碑,从 releases 剔除(#196 R6 撤销机制)
+TRUST_UNSIGNED_LOCAL=0  # 本地 $OUT 无 .minisig 时是否信任(默认拒:未签名本地无界驱动 counter=永久砖化,#196 R8)
 REPO="AAStarCommunity/AirAccount"
 NOTES_MAX=280   # 节点 load_manifest 对 notes 的硬上限(与之保持一致)
 
@@ -82,6 +86,7 @@ while [ "$#" -gt 0 ]; do
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --no-baseline)    NO_BASELINE=1; shift ;;
     --revoke)         REVOKE_LIST="${REVOKE_LIST:+$REVOKE_LIST,}$2"; shift 2 ;;   # 撤销版本 → revoked[] 墓碑
+    --trust-unsigned-local) TRUST_UNSIGNED_LOCAL=1; shift ;;   # 首发/迁移:显式信任无 .minisig 的本地 $OUT
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        usage 0 ;;
     *) echo "未知参数: $1" >&2; usage 1 ;;
@@ -150,6 +155,22 @@ semver_max() {
 # 把 rollback_floor 悄悄降回 0.28.0)。读回失败(网络/端点)一律 fail-closed,首发须显式 --no-baseline。
 LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""; LOCAL_REVOKED='[]'
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
+  # ⚠️ 本地 $OUT 无界驱动 metadata_version/rollback_floor/revoked(全**单调只增**),被改一下就能**永久
+  # 砖化全网**(节点 ratchet 后 counter/floor/revoked 再也压不回来,持钥人自己也回不去)。默认 $OUT 在
+  # **仓库工作树**、且收尾建议入库 → "能写 $OUT"的主体(仓库/CI merge 权限)严格大于持钥人。故信任本地
+  # 4 个 LOCAL_* 之前,先验签**同目录的 $OUT.minisig**(签名就在旁边、零成本)—— 与读回基线同一道
+  # "先验签后继承"(#196 R8 finding1/2:那道防线之前只加在读回路径,本地路径一道都没有)。
+  PUB_LOCAL="${PUBKEY_FILE:-$HERE/updater-pubkey.pub}"
+  if [ -f "$OUT.minisig" ]; then
+    command -v minisign >/dev/null || die "验本地 $OUT 需 minisign"
+    [ -f "$PUB_LOCAL" ] || die "验本地 $OUT 缺公钥 $PUB_LOCAL(或删除 $OUT 首发)"
+    minisign -V -p "$PUB_LOCAL" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1 \
+      || die "本地 $OUT 验签失败(疑篡改)—— 拒绝把未验证的 counter/floor/revoked/releases 洗进真钥签名产物"
+  elif [ "$TRUST_UNSIGNED_LOCAL" = 1 ]; then
+    echo "⚠️ --trust-unsigned-local:本地 $OUT 无 .minisig,按显式授权信任(首发/迁移场景)" >&2
+  else
+    die "本地 $OUT 无 .minisig —— 拒绝静默信任其 counter/floor/revoked/releases(未签名本地无界驱动 counter=永久砖化;用 --trust-unsigned-local 显式信任,或删除 $OUT 走首发)"
+  fi
   LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
   LOCAL_RELEASES="$(jq -c '.releases // []' "$OUT")"
   LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
@@ -309,7 +330,7 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
   # 撤销执行的强不变量:releases 里**不得**含 revoked 里的版本(墓碑 = 唯一撤销机制,#196 R6)
   and (((.revoked // []) | map(ltrimstr("v"))) as $rv
        | (.releases | all((.version|ltrimstr("v")) as $vv | ($rv | index($vv)) == null)))
-  and (.releases|type=="array" and length>0)
+  and (.releases|type=="array")   # 允许空 releases:撤销最后一版是合法的(镜像节点 —— 节点接受 releases:[]);#196 R8 finding3
   and (all(.releases[];
         (.version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
         and (.sha256|test("^[0-9a-fA-F]{64}$"))
@@ -326,6 +347,7 @@ echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
         and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))
       ))
 ' >/dev/null || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
+[ "$(printf '%s' "$MANIFEST" | jq '.releases|length')" -eq 0 ] && echo "⚠️ 本次签发后 channel **无任何 release**(全部被撤销)—— 节点将无更新可装;确认这是预期(如全版本投毒的紧急撤销)。" >&2
 
 # 进度/摘要一律 → stderr,让 dry-run 的 **stdout 是干净的 manifest JSON**(可直接 `| jq`)。
 {
