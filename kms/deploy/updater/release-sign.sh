@@ -86,7 +86,7 @@ while [ "$#" -gt 0 ]; do
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --no-baseline)    NO_BASELINE=1; shift ;;
     --revoke)         REVOKE_LIST="${REVOKE_LIST:+$REVOKE_LIST,}$2"; shift 2 ;;   # 撤销版本 → revoked[] 墓碑
-    --trust-unsigned-local) TRUST_UNSIGNED_LOCAL=1; shift ;;   # 首发/迁移:显式信任无 .minisig 的本地 $OUT
+    --trust-unsigned-local) TRUST_UNSIGNED_LOCAL=1; shift ;;   # 显式信任无 .minisig 的本地 $OUT(唯一存活用途=配 --no-baseline;有基线时仍拒绝其抬高不可逆字段)
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        usage 0 ;;
     *) echo "未知参数: $1" >&2; usage 1 ;;
@@ -153,25 +153,38 @@ semver_max() {
 # 节点 ratchet 后永久拒绝一切后续版本(把本工具要防的砖化搬到了上游)。故:**先验签,后继承**,
 # 且 counter/releases/floor **全部**从验签副本取(只取 counter 会在新 clone 上丢掉所有旧 release +
 # 把 rollback_floor 悄悄降回 0.28.0)。读回失败(网络/端点)一律 fail-closed,首发须显式 --no-baseline。
-LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""; LOCAL_REVOKED='[]'
+LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""; LOCAL_REVOKED='[]'; LOCAL_VERIFIED=0
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   # ⚠️ 本地 $OUT 无界驱动 metadata_version/rollback_floor/revoked(全**单调只增**),被改一下就能**永久
   # 砖化全网**(节点 ratchet 后 counter/floor/revoked 再也压不回来,持钥人自己也回不去)。默认 $OUT 在
   # **仓库工作树**、且收尾建议入库 → "能写 $OUT"的主体(仓库/CI merge 权限)严格大于持钥人。故信任本地
   # 4 个 LOCAL_* 之前,先验签**同目录的 $OUT.minisig**(签名就在旁边、零成本)—— 与读回基线同一道
   # "先验签后继承"(#196 R8 finding1/2:那道防线之前只加在读回路径,本地路径一道都没有)。
+  # (#196 R9)把"已验证"提成一等变量 LOCAL_VERIFIED:验签≠验身份,还要 channel 匹配(B2);下方不可逆
+  # 字段只认这个变量,不认"文件在哪"。R8 只判"文件签没签"、把三个不可逆字段的注入通道原样留着,正是漏洞。
   PUB_LOCAL="${PUBKEY_FILE:-$HERE/updater-pubkey.pub}"
   if [ -f "$OUT.minisig" ]; then
     command -v minisign >/dev/null || die "验本地 $OUT 需 minisign"
     [ -f "$PUB_LOCAL" ] || die "验本地 $OUT 缺公钥 $PUB_LOCAL(或删除 $OUT 首发)"
     minisign -V -p "$PUB_LOCAL" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1 \
       || die "本地 $OUT 验签失败(疑篡改)—— 拒绝把未验证的 counter/floor/revoked/releases 洗进真钥签名产物"
+    # (#196 R9 B2) 签名保真不保来源:一份**合法签名**的 beta.json 被(误)放到 stable 路径,不需要任何
+    # flag 就能整份洗进 stable(低 floor 冻结全网 + 好版本被墓碑 + 预发布 releases 混入)。channel 必须
+    # 匹配,宽严与读回路径 :203 逐字对齐(-z 承重:手写首发种子文件合法地无 .channel 键)。不搬 expires
+    # 新鲜度(单调字段无法缩水,拦它只会打断"放了一周的工作树里签发")。
+    LOCAL_CHANNEL="$(jq -r '.channel // empty' "$OUT")"
+    [ -z "$LOCAL_CHANNEL" ] || [ "$LOCAL_CHANNEL" = "$CHANNEL" ] \
+      || die "本地 $OUT 的 channel=$LOCAL_CHANNEL != 目标 $CHANNEL —— 拒绝(签名保真不保来源;疑 $LOCAL_CHANNEL 被喂到 $CHANNEL 的路径)"
+    LOCAL_VERIFIED=1   # 验签 + channel 双过 → 唯一可信来源;下方 max/union/releases 只信这个变量
   elif [ "$TRUST_UNSIGNED_LOCAL" = 1 ]; then
-    echo "⚠️ --trust-unsigned-local:本地 $OUT 无 .minisig,按显式授权信任(首发/迁移场景)" >&2
+    echo "⚠️ --trust-unsigned-local:本地 $OUT 无 .minisig,按显式授权信任(唯一存活用途=配 --no-baseline 首发/迁移;有基线时仍拒绝其抬高任一不可逆字段)" >&2
   else
     die "本地 $OUT 无 .minisig —— 拒绝静默信任其 counter/floor/revoked/releases(未签名本地无界驱动 counter=永久砖化;用 --trust-unsigned-local 显式信任,或删除 $OUT 走首发)"
   fi
   LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
+  # (#196 R9 F2 加固)未验证本地的 counter 也可能是 2^63-1 溢出 → 数字且有上界,否则 die(镜像节点)。
+  [[ "$LOCAL_META" =~ ^[0-9]+$ ]] && [ "$LOCAL_META" -le 1000000000 ] \
+    || die "本地 $OUT metadata_version=$LOCAL_META 非法(需 0..1000000000 整数)—— 拒绝(疑溢出/注入)"
   LOCAL_RELEASES="$(jq -c '.releases // []' "$OUT")"
   LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
   LOCAL_REVOKED="$(jq -c '.revoked // []' "$OUT")"
@@ -193,6 +206,9 @@ if [ "$NO_BASELINE" != 1 ]; then
   jq empty "$RB_DIR/m.json" 2>/dev/null || die "已发布 manifest 非合法 JSON"
   # 已验签 = 可信 → 作权威基线:counter/releases/floor 全从这里来。
   PREV_META="$(jq -r '(.metadata_version // 0) | floor' "$RB_DIR/m.json")"
+  # (#196 R9 F2 加固)基线虽已验签,仍卡数字上界:防陈旧签名基线的越界 counter 让下方 -gt 比较崩(set -e)。
+  [[ "$PREV_META" =~ ^[0-9]+$ ]] && [ "$PREV_META" -le 1000000000 ] \
+    || die "读回基线 metadata_version=$PREV_META 非法(需 0..1000000000 整数)—— 拒绝"
   PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
   BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
   BASE_REVOKED="$(jq -c '.revoked // []' "$RB_DIR/m.json")"
@@ -218,7 +234,25 @@ if [ "$NO_BASELINE" != 1 ]; then
   # (#196 R5 Blocking2:旧日志打并集后 meta/releases 却标"已验签基线",正是复活没被发现的直接原因)。
   BASE_META="$PREV_META"; BASE_COUNT="$(printf '%s' "$PREV_RELEASES" | jq length)"
   echo "读回并**验签**已发布基线:metadata_version=$BASE_META releases=$BASE_COUNT rollback_floor=${BASE_FLOOR:-<none>} revoked=$(printf '%s' "$BASE_REVOKED" | jq length)" >&2
-  # counter 单调:max(本地,基线)。releases/revoked 的合并在 fi 之后统一做(墓碑方案 #196 R6,下方)。
+  # ── (#196 R9 B1) 未验证的本地 $OUT 绝不驱动不可逆字段 ───────────────────────────
+  # 有已验签基线时,三个单调且全网永久的字段(metadata_version/rollback_floor/revoked)**只**来自
+  # 已验签基线 + 显式 flag。未验证本地(= --trust-unsigned-local 的无签名 $OUT)若会**抬高**其中任一 →
+  # **响亮 die 并点名该打哪个 flag**,绝不静默丢弃 —— 静默丢=镜像漏洞(被悄悄解除的撤销/被悄悄降低的
+  # 围栏)。判据是**验证状态**不是来源:LOCAL_VERIFIED=1(签名+channel 双过)的本地照常参与 max/union
+  # (它是脚本自己 :385 签的,counter 更高是诚实的;取基线反会在同一 counter 上产出两份合法签名 →
+  # 节点 :534 只拒 `<` 不拒 `=`,两份都收)。此守卫只在 NO_BASELINE != 1 生效(--no-baseline 无基线可护,
+  # flag 正是那时的合法播种途径)。
+  if [ "$LOCAL_VERIFIED" != 1 ]; then
+    [ "$LOCAL_META" -le "$PREV_META" ] \
+      || die "未验证的本地 $OUT metadata_version=$LOCAL_META > 已验签基线 $PREV_META —— 拒绝(未签名本地不得抬高全网单调计数;要提 counter 请签名 $OUT,或 --no-baseline 首发)"
+    [ "$(printf '%s' "$LOCAL_REVOKED" | jq 'length')" = 0 ] \
+      || die "未验证的本地 $OUT 带 revoked=$(printf '%s' "$LOCAL_REVOKED" | jq -c .) —— 拒绝(撤销是全网永久操作,不接受未签名来源;请改用 --revoke <版本> 显式声明)"
+    if [ -n "$LOCAL_FLOOR" ] && [ "$(semver_max "${BASE_FLOOR:-0.0.0}" "$LOCAL_FLOOR" | sed 's/^v//')" != "$(printf '%s' "${BASE_FLOOR:-0.0.0}" | sed 's/^v//')" ]; then
+      die "未验证的本地 $OUT rollback_floor=$LOCAL_FLOOR 高于已验签基线 ${BASE_FLOOR:-<none>} —— 拒绝(围栏是全网永久单调操作;请改用 --rollback-floor $LOCAL_FLOOR 显式声明)"
+    fi
+  fi
+  # counter 单调:max(本地,基线)。守卫已保证未验证本地到此处 LOCAL_META ≤ PREV_META(不会污染);
+  # 已验证本地(T24 正控)的更高 counter 在此正当生效。releases/revoked 合并在 fi 之后统一做(#196 R6)。
   [ "$LOCAL_META" -gt "$PREV_META" ] && PREV_META="$LOCAL_META"
 fi
 
@@ -236,14 +270,20 @@ LOCAL_ONLY="$(jq -rn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_REL
 # 可能仍在生效且不可探测 → **不把本地独有条目并入**(它可能正是被老式撤销的),要求 --version/--revoke
 # 重新声明。has("revoked")==false 与空数组区分开。
 MERGE_LOCAL=1
-if [ "$NO_BASELINE" != 1 ] && [ "$BASE_HAS_REVOKED" != true ] && [ -n "$LOCAL_ONLY" ]; then
+if [ "$NO_BASELINE" != 1 ] && [ "$LOCAL_VERIFIED" != 1 ] && [ -n "$LOCAL_ONLY" ]; then
+  # (#196 R9 B1 path4) 未验证本地**永远**不贡献 releases[](与 BASE_HAS_REVOKED 无关) —— releases 是
+  # 可逆字段(丢了可 --version 重签),故 warn+drop 而非 die;不可逆的 counter/floor/revoked 已在上方守卫 die。
+  MERGE_LOCAL=0
+  echo "⚠️ 未验证的本地 $OUT 独有 release **不并入**产物:$LOCAL_ONLY(确为有效版本请签名 $OUT 或 --version 重签)" >&2
+elif [ "$NO_BASELINE" != 1 ] && [ "$BASE_HAS_REVOKED" != true ] && [ -n "$LOCAL_ONLY" ]; then
+  # 迁移:已验签基线**无 revoked 字段**(墓碑之前发布)→ 本地独有条目可能正是老式『删条目』撤销的,不并入。
   MERGE_LOCAL=0
   echo "⚠️ 迁移:已验签基线**无 revoked 字段**(墓碑之前发布)→ 本地独有条目**不并入**产物:$LOCAL_ONLY" >&2
   echo "   (可能是老式『删条目』撤销的;确为有效版本请 --version 重签,确为撤销请 --revoke 声明)" >&2
 fi
 # releases = 基线(+ 视 MERGE_LOCAL 并本地独有),再**滤掉 revoked**。堵死三条复活路 + 未签名条目不静默洗入。
 if [ "$MERGE_LOCAL" = 1 ]; then
-  [ -n "$LOCAL_ONLY" ] && echo "并入本地独有(未签名 \$OUT)条目:$LOCAL_ONLY(基线为墓碑纪元,可判定)" >&2
+  [ -n "$LOCAL_ONLY" ] && echo "并入本地独有 \$OUT 条目:$LOCAL_ONLY($([ "$LOCAL_VERIFIED" = 1 ] && echo 已验签本地 || echo --no-baseline 播种),可判定)" >&2
   PREV_RELEASES="$(jq -cn --argjson base "$PREV_RELEASES" --argjson local "$LOCAL_RELEASES" --argjson rev "$REVOKED" '
     ($base | map(.version)) as $bv
     | ($base + ($local | map(select((.version as $v|$bv|index($v))|not))))
@@ -264,6 +304,10 @@ if [ -n "$VERSION" ] && printf '%s' "$REVOKED" | jq -e --arg v "${VERSION#v}" 'i
   die "版本 $VERSION 在 revoked 墓碑里(已被撤销)—— 不能重新签发。要恢复需人工从 channel 的 revoked[] 移除(慎重)。"
 fi
 NEW_META=$((PREV_META + 1))
+# (#196 R9 F2 加固)--no-baseline 下 PREV_META 全来自本地 $OUT,2^63-1 会溢出成负数并被真钥签出。
+# LOCAL_META 读入已卡上界,这里再断言产物 counter 在合法区间(镜像节点 ratchet 语义,永不签负/越界)。
+[ "$NEW_META" -gt 0 ] && [ "$NEW_META" -le 1000000001 ] \
+  || die "metadata_version 越界(NEW_META=$NEW_META)—— 拒绝签发(疑 counter 溢出/注入)"
 
 # 缺省 min_version / requires_ta:从 prev releases 里**按 semver 取最高版本**那条继承
 # (不是最近签发的 [0] —— 否则先签 0.30 再签热修 0.29.1 会让后续 0.31 静默继承 0.29.1 的

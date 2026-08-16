@@ -227,6 +227,74 @@ bash "$SIGN" --out "$OUT" --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --no
 [ "$(jq -r '.releases|length' "$OUT" 2>/dev/null)" = 0 ] && ok "releases:[](全撤销,与节点一致)" || bad "releases=$(jq -c .releases "$OUT")"
 grep -q "无任何 release" "$ROOT/e19" && ok "空 releases 有告警" || bad "无空告警: $(cat "$ROOT/e19")"
 
+# ── #196 R9:未验证本地不得驱动不可逆字段(B1)+ 验签≠验身份(B2)────────────────
+# 已验签 stable 基线:meta=9,floor=0.30.0,revoked=[],releases=[0.30.0]。给 B1/B2 用例复用。
+mk_signed_stable_base() {  # 落到 $PUB_BASE/stable.json(+ .minisig)
+  jq -n --arg s "$S64" '{metadata_version:9,generated_at:"2035-01-01T00:00:00Z",expires:"2035-01-08T00:00:00Z",channel:"stable",rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$PUB_BASE/stable.json"
+  minisign -S -s "$ROOT/sec.key" -m "$PUB_BASE/stable.json" -x "$PUB_BASE/stable.json.minisig" >/dev/null 2>&1
+}
+
+echo "== T20 有基线 + 未签名本地 meta=9e9 + --trust-unsigned-local(不带 --no-baseline)→ die,stderr 同时含 9 和 999999999(#196 R9 B1)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+jq -n --arg s "$S64" '{metadata_version:999999999,rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"  # 未签名
+bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --trust-unsigned-local --notes v 2>"$ROOT/e20" >/dev/null \
+  && bad "未验证本地 meta=9e9 竟抬高了 counter(可永久砖化)" || \
+  { grep -q "999999999" "$ROOT/e20" && grep -qw "9" "$ROOT/e20" && ok "未验证本地抬 counter 被 die 且报出两个数" || bad "错误信息未含 9 与 999999999: $(cat "$ROOT/e20")"; }
+
+echo "== T21 有基线 + 未签名本地 floor=99.0.0 + flag → die,stderr 含字面量 --rollback-floor(#196 R9 B1)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+jq -n --arg s "$S64" '{metadata_version:9,rollback_floor:"99.0.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --trust-unsigned-local --notes v 2>"$ROOT/e21" >/dev/null \
+  && bad "未验证本地 floor=99.0.0 竟抬高了 rollback_floor(可冻结全网)" || \
+  { grep -q -- "--rollback-floor" "$ROOT/e21" && ok "未验证本地抬 floor 被 die 且指向 --rollback-floor" || bad "错误信息未指向 --rollback-floor: $(cat "$ROOT/e21")"; }
+
+echo "== T22 有基线 + 未签名本地 revoked=[7.7.7] + flag → die,stderr 含 --revoke(#196 R9 B1)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+jq -n --arg s "$S64" '{metadata_version:9,rollback_floor:"0.30.0",revoked:["7.7.7"],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --trust-unsigned-local --notes v 2>"$ROOT/e22" >/dev/null \
+  && bad "未验证本地 revoked 竟并入墓碑(可永久墓碑好版本)" || \
+  { grep -q -- "--revoke" "$ROOT/e22" && ok "未验证本地带 revoked 被 die 且指向 --revoke" || bad "错误信息未指向 --revoke: $(cat "$ROOT/e22")"; }
+
+echo "== T23 有基线(**有** revoked 字段)+ 未验证本地独有 release → 不并入产物(补 T16 只覆盖无 revoked 字段那支)(#196 R9 B1 path4)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+jq -n --arg s "$S64" '{metadata_version:9,rollback_floor:"0.30.0",revoked:[],releases:[
+  {version:"0.31.0",security:false,severity:"none",notes:"local-only",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]},
+  {version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"  # 未签名
+bash "$SIGN" --version 0.32.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --trust-unsigned-local --notes v 2>"$ROOT/e23" >/dev/null
+nv23="$(jq -r '[.releases[].version]|sort|join(",")' "$OUT" 2>/dev/null)"
+echo "$nv23" | grep -q "0.31.0" && bad "未验证本地独有 0.31.0 被洗入(基线有 revoked 字段也不该)=$nv23" || ok "未验证本地独有 0.31.0 不并入($nv23)"
+
+echo "== T24 正控:有基线 meta=9 + **已签名**本地 meta=12 → rc=0 且产物 meta=13(已验签本地的 max 必须活着,防改过头)(#196 R9)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+jq -n --arg s "$S64" '{metadata_version:12,channel:"stable",rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1   # **已签名**本地(验签+channel 双过 → 可信)
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.31.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v 2>"$ROOT/e24" >/dev/null && rc24=0 || rc24=1
+{ [ "$rc24" = 0 ] && [ "$(jq -r '.metadata_version' "$OUT" 2>/dev/null)" = 13 ]; } \
+  && ok "已验签本地 meta=12 正当参与 max → 产物 13(未改过头)" || bad "已验签本地 max 被误杀 rc=$rc24 meta=$(jq -r .metadata_version "$OUT" 2>/dev/null): $(cat "$ROOT/e24")"
+
+echo "== T25 --no-baseline + 未签名本地 meta=2^63-1 + flag → die(counter 上界,防溢出签出负数)(#196 R9 F2)=="
+rm -f "$OUT" "$OUT.minisig"
+jq -n --arg s "$S64" '{metadata_version:9223372036854775807,rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"  # 未签名
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" --no-baseline \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --trust-unsigned-local --notes v 2>"$ROOT/e25" >/dev/null \
+  && bad "2^63-1 counter 竟被签发(溢出成负数)" || \
+  { grep -qE "非法|越界" "$ROOT/e25" && ok "2^63-1 counter 被上界拦下(不签负数/越界)" || bad "错误信息不对: $(cat "$ROOT/e25")"; }
+
+echo "== T26 B2:**合法签名**的 beta manifest 放到 stable 路径(不带任何 flag)→ die,stderr 含 channel(#196 R9 B2)=="
+rm -f "$OUT" "$OUT.minisig"; mk_signed_stable_base
+# 用**真钥**签一份 channel:beta 的 manifest 放到 stable 的 $OUT —— 验签会过,但来源不是 stable
+jq -n --arg s "$S64" '{metadata_version:500,channel:"beta",rollback_floor:"9.9.9",revoked:["0.30.0"],releases:[{version:"0.99.0",security:false,severity:"none",notes:"beta",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1   # 合法签名(真钥)
+bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" --out "$OUT" \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --base-url "file://$PUB_BASE" --notes v 2>"$ROOT/e26" >/dev/null \
+  && bad "合法签名的 beta manifest 放 stable 路径竟被整份继承(全网冻结+墓碑好版本)" || \
+  { grep -q "channel" "$ROOT/e26" && ok "beta manifest 放 stable 路径被 channel 门拦下(签名保真不保来源)" || bad "错误信息未含 channel: $(cat "$ROOT/e26")"; }
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]
