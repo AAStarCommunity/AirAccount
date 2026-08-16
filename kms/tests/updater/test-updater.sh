@@ -1219,6 +1219,34 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T68 num_knob 校验非法/越界数值旋钮(#195 R7:防 set -e 崩 + 防静默撤销安全机制)=="
+eval "$(sed -n '/^num_knob()/,/^}/p' "$UPDATER")"   # 抽出函数单测(无依赖)
+[ "$(num_knob abc 2 1 100)" = 2 ] && ok "abc→default 2(AU_DENY_THRESHOLD 不静默永不拉黑)" || bad "abc=$(num_knob abc 2 1 100)"
+[ "$(num_knob 0 2 1 100)" = 2 ]   && ok "0→default 2(不退回单击即拉黑)"                 || bad "0=$(num_knob 0 2 1 100)"
+[ "$(num_knob 60s 60 1 3600)" = 60 ] && ok "60s→default 60(算术不崩)"                    || bad "60s=$(num_knob 60s 60 1 3600)"
+[ "$(num_knob -5 60 1 3600)" = 60 ]  && ok "-5→default 60"                                || bad "-5=$(num_knob -5 60 1 3600)"
+[ "$(num_knob 5 2 1 100)" = 5 ]   && ok "5→5(合法值透传)"                                || bad "5=$(num_knob 5 2 1 100)"
+[ "$(num_knob 999 2 1 100)" = 2 ] && ok "越界 999→default 2"                              || bad "999=$(num_knob 999 2 1 100)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T69 内置 run_health **grace 轮询实跑**(禁 AU_HEALTH_CMD)→ 失败回滚、不 abort/不卡损坏版本(#195 R7 覆盖 grace 循环)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node tgrace 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 14 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# AU_HEALTH_CMD= 禁 hook → 走内置 _health_probe/deadline/while/sleep;grace=1 让循环快速走完
+run_updater "$NR" "$NS" check AU_HEALTH_CMD= AU_HEALTH_GRACE_SECS=1 >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "内置健康门(无服务,轮询到 deadline)失败 → 回滚 0.28.0,不卡损坏版本" || bad "卡在=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]

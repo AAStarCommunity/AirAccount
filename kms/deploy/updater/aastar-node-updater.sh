@@ -193,6 +193,18 @@ lock_contended() { # apply/recovery(LOCK_FATAL=1)硬失败;check 静默退 0 等
   if [ "${LOCK_FATAL:-0}" = 1 ]; then die "$1 —— 中止(未做任何更改)"; fi
   warn "$1,退出"; exit 0
 }
+# 数值 env 旋钮校验:空/非数字/前导零/超长/越界 → 用 default;否则 clamp 到 [min,max]。
+# 七轮 #4/#5 建立的惯例(原只在 lock_stale_min);#195 R7 抽通用,让 AU_DENY_THRESHOLD /
+# AU_HEALTH_GRACE_SECS / KEEP_RELEASES 都走它 —— 关掉「未校验数值旋钮在 set -e 下崩脚本(换软链后
+# 无 rollback)/ 静默撤销本轮安全机制」这一整类,而不是逐个实例。
+num_knob() { # num_knob <raw> <default> <min> <max> → 打印校验后的整数
+  local raw="$1" def="$2" min="$3" max="$4"
+  case "$raw" in ''|*[!0-9]*|0[0-9]*) echo "$def"; return ;; esac   # 空/非数字/前导零(含裸 0)
+  [ "${#raw}" -gt 9 ] && { echo "$def"; return; }                   # 超长防 10# 溢出
+  raw=$(( 10#$raw ))
+  { [ "$raw" -lt "$min" ] || [ "$raw" -gt "$max" ]; } && { echo "$def"; return; }
+  echo "$raw"
+}
 lock_stale_min() {  # 秒→分,兜非法/前导零/超长(防 10# 溢出报错崩脚本,codex Low),clamp 到 60s..7d
   local secs="${LOCK_STALE_SECS:-86400}"
   case "$secs" in ''|*[!0-9]*|0*) secs=86400 ;; esac
@@ -341,8 +353,9 @@ clear_failures() { # clear_failures <ver>:成功后清该版本失败计数
   mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
 }
 auto_fail_deny() { # auto_fail_deny <ver>:自动路径失败 → 计数+1,达阈值才 deny;通知带次数
-  local v="$1" fc thr="${AU_DENY_THRESHOLD:-2}"
-  fc="$(record_failure "$v")"
+  local v="$1" fc thr
+  thr="$(num_knob "${AU_DENY_THRESHOLD:-2}" 2 1 100)"      # 校验:abc→2 不静默永不拉黑;0→2 不单击拉黑
+  fc="$(num_knob "$(record_failure "$v")" 0 0 1000000)"    # state 损坏 fc 空 → 0(安全向:不误拉黑)
   if [ "$fc" -ge "$thr" ]; then
     deny_version "$v"
     notify warn "$v 连续第 $fc 次健康门/restart 失败 → 已拉黑不再自动重装(node=$AU_NODE_ID);确认修好后手动 apply $v 解除。"
@@ -389,7 +402,8 @@ run_health() {
   # 内置默认:HTTP 层检查,**轮询到 AU_HEALTH_GRACE_SECS(默认 60s)**再判失败 —— Type=simple 的
   # restart 在 exec 之后、端口 bind **之前**就返回 active,单次 curl 会误判失败;有界重试让「启动慢」
   # 根本不算一次失败(#195 R6:否则一次慢启动就永久拉黑好版本)。TA session 重建也要数秒才 ready。
-  local grace="${AU_HEALTH_GRACE_SECS:-60}" deadline
+  local grace deadline
+  grace="$(num_knob "${AU_HEALTH_GRACE_SECS:-60}" 60 1 3600)"   # 校验:abc/60s/-5→60,不在换软链后 abort
   deadline=$(( $(date +%s) + grace ))
   while :; do
     if _health_probe; then return 0; fi
@@ -469,7 +483,7 @@ apply_version() { # apply_version <ver> <bundle_dir>
     clear_failures "$ver"    # 成功 → 清失败计数(之前的偶发失败不累积)
     state_set previous "$prev" current "$ver" pending ""
     notify info "更新成功 $prev → $ver(node=$AU_NODE_ID)"
-    vacuum "${KEEP_RELEASES:-3}"
+    vacuum "$(num_knob "${KEEP_RELEASES:-3}" 3 1 100)"    # 校验(#195 R7:同类旋钮统一走 num_knob)
     return 0
   else
     warn "健康门未过,回滚到 $prev"
