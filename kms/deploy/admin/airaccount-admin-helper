@@ -1,0 +1,91 @@
+#!/bin/bash
+# airaccount-admin-helper —— Web 管理台(非 root)与 updater(需 root 改 /opt/airaccount)之间的
+# **唯一特权边界**。设计:auto-update-web-admin-design.md §5.4 / Codex C1。
+#
+# 为什么不是「让 Web 直接 sudo updater 脚本」:updater 行为受一大堆 env 控制(AU_RESTART_CMD /
+# AU_FETCH_CMD / AU_ROOT …)且会 source updater.env —— 若 Web 能影响 env 或拼 shell,就是提权 RCE 面。
+# 本 helper 做三件事把爆炸半径收死:
+#   1. **清空环境**：exec env -i,只放白名单里的固定变量 —— Web 传来的任何 env 一律不带入。
+#   2. **固定绝对路径**：updater / manifest 路径写死,不接受调用方指定。
+#   3. **严格 argv 白名单**：只认 status / check / list-candidates / apply <semver> / rollback 这几个定长动词,
+#      version 先过 `^v?\d+\.\d+\.\d+$` 校验;其它一律拒。TA 变更由 updater 自身拒(决策 D)。
+#
+# 部署:root 拥有、0755;Web 服务用户经**极窄 sudoers** 只能调本 helper(不能调 updater/别的):
+#   airaccount-admin ALL=(root) NOPASSWD: /opt/airaccount/updater/airaccount-admin-helper
+# helper 内部再 su 到 updater 需要的权限;绝不把裸 root/任意 argv 暴露给 Web。
+set -euo pipefail
+
+# 固定路径(不接受调用方覆盖)——
+UPDATER="/opt/airaccount/updater/aastar-node-updater.sh"
+STATE_DIR="/var/lib/airaccount/updater"
+ENV_FILE="/etc/airaccount/updater.env"
+PUBKEY="/etc/airaccount/updater-pubkey.pub"
+
+# 部署完整性自检(tripwire):凡是会被 root updater **source(env)/ 信任(pubkey)/ 执行(脚本)**
+# 的东西,以及承载它们的**目录**,都必须 root 拥有且 group/other 不可写。否则能写这些文件/目录
+# 的用户 = 拿到 root(env 被 `. $AU_ENV_FILE` 以 root 执行;pubkey 被替换即伪造验签)。
+assert_secure() {  # assert_secure <path>(文件或目录)
+  local f="$1"
+  [ -e "$f" ] || { echo "helper: 缺文件/目录 $f" >&2; exit 3; }
+  local owner; owner="$(stat -c '%u' "$f" 2>/dev/null)" || { echo "helper: stat 失败 $f" >&2; exit 3; }
+  [ "$owner" = "0" ] || { echo "helper: $f 非 root 拥有(uid=$owner),拒绝" >&2; exit 3; }
+  if find "$f" -maxdepth 0 -perm /022 -print -quit 2>/dev/null | grep -q .; then
+    echo "helper: $f 可被 group/other 写,拒绝(修 chmod go-w)" >&2; exit 3
+  fi
+}
+verb="${1:-}"   # 先取动词(下面 pubkey 断言按动词区分);实参在断言后再 shift。
+
+# 承载 trust root 的目录也查(防目录可写→绕过文件权限替换里面的 env/pubkey/updater/release)。
+# 必存在的目录(含 STATE_DIR 的父 /var/lib/airaccount,由 service ReadWritePaths 绑定保证存在)
+# 进无条件 loop;STATE_DIR / releases 在 updater 首次运行前可能尚不存在(state_init 才 mkdir),
+# 故**存在才查**,否则升级过的节点上每个动词(含只读 status)会 exit 3 挂掉整个面板。
+for d in /etc/airaccount /opt/airaccount /opt/airaccount/updater /var/lib/airaccount; do assert_secure "$d"; done
+[ -e "$STATE_DIR" ] && assert_secure "$STATE_DIR"
+[ -e /opt/airaccount/releases ] && assert_secure /opt/airaccount/releases
+assert_secure "$0"
+assert_secure "$UPDATER"
+[ -e "$ENV_FILE" ] && assert_secure "$ENV_FILE" # updater.env 可选;每个动词都 source,存在则必须安全
+# pubkey 仅 check/apply/list-candidates 需要(都走 load_manifest 验签);status/rollback 不验签,
+# 别因缺 pubkey 让整个面板挂。⚠️ list-candidates 少了这条 = 用未受保护的公钥验签。
+case "$verb" in check|apply|list-candidates) assert_secure "$PUBKEY" ;; esac
+
+shift || true
+
+# updater 以固定、干净的环境运行(env -i);只显式传它必须的几个,绝不继承 Web 的环境。
+run_updater() {  # run_updater <updater-args...>
+  exec env -i \
+    PATH="/usr/sbin:/usr/bin:/sbin:/bin" \
+    AU_ROOT="/opt/airaccount" \
+    AU_STATE_DIR="$STATE_DIR" \
+    AU_ENV_FILE="$ENV_FILE" \
+    AU_PUBKEY="$PUBKEY" \
+    bash "$UPDATER" "$@"
+}
+
+# 用 bash 整串正则匹配(`[[ =~ ]]`),**不**用 `grep`——管道 grep 是**逐行**匹配,
+# 版本参数里若含内嵌换行 `$'1.2.3\n<payload>'`,只要有一行像 semver 就通过,绕过校验。
+is_semver() { [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+case "$verb" in
+  status)
+    [ "$#" -eq 0 ] || { echo "helper: status 不接受参数" >&2; exit 2; }
+    run_updater status ;;
+  check)
+    [ "$#" -eq 0 ] || { echo "helper: check 不接受参数" >&2; exit 2; }
+    run_updater check ;;
+  list-candidates)                     # 只读:列候选不安装(面板「检查更新」走它);走 load_manifest 要验签
+    [ "$#" -eq 0 ] || { echo "helper: list-candidates 不接受参数" >&2; exit 2; }
+    run_updater list-candidates ;;
+  apply)
+    [ "$#" -eq 1 ] || { echo "helper: apply 需恰好一个版本参数" >&2; exit 2; }
+    is_semver "$1" || { echo "helper: 版本号非法(需 x.y.z)" >&2; exit 2; }
+    run_updater apply "$1" ;;      # 含 TA 变更由 updater 自身拒(决策 D:无 --allow-ta)
+  rollback)
+    # rollback 走 updater 的 **rollback** verb(无条件回到 state.previous + 正常重启),
+    # **不是** recovery(那是 boot 掉电专用,apply 成功后 pending 空会静默无操作)。无参数。
+    [ "$#" -eq 0 ] || { echo "helper: rollback 不接受参数" >&2; exit 2; }
+    run_updater rollback ;;
+  *)
+    echo "helper: 未知动词 '$verb'(只允许 status|check|list-candidates|apply <ver>|rollback)" >&2
+    exit 2 ;;
+esac

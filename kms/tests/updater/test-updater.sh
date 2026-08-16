@@ -1071,6 +1071,181 @@ else
   skip "split-brain 防护(本 host 无 flock)"
 fi
 
+echo "== T59 面板 rollback verb:apply 成功后(pending 空)无条件回到 previous + 真实 restart =="
+# 这正是 recovery 会静默 no-op 的状态(pending 空);面板按钮必须真回滚。
+NR="$ROOT/n59"; NS="$ROOT/s59"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+: > "$ROOT/rb-restart.log"
+cat > "$ROOT/rec-restart.sh" <<SH
+#!/usr/bin/env bash
+echo restarted >> "$ROOT/rb-restart.log"
+SH
+chmod +x "$ROOT/rec-restart.sh"
+# 先证明:同状态下 recovery 是空操作(pending 空 → current 不变)
+run_updater "$NR" "$NS" recovery >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "recovery 在 pending 空时确为 no-op(current 未动)" || bad "recovery 竟动了 current=$(cur_link "$NR")"
+# 再证明:rollback verb 真回滚
+run_updater "$NR" "$NS" rollback AU_RESTART_CMD="$ROOT/rec-restart.sh" >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "rollback:current 软链→0.28.0(真回滚,非空操作)" || bad "link=$(cur_link "$NR")"
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "rollback:state.current=0.28.0" || bad "current=$(st "$NS" current)"
+[ -z "$(st "$NS" previous)" ] && ok "rollback:previous 清空(去 toggle,二次点不会装回坏版本)" || bad "previous 未清=$(st "$NS" previous)"
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "rollback:坏版本 0.29.0 进 denied(阻 6h 自动重装)" || bad "denied 未含 0.29.0=$(jq -c '.denied' "$NS/state.json")"
+[ -s "$ROOT/rb-restart.log" ] && ok "rollback:执行了真实 restart(非 recovery 的 AU_RESTART_CMD=true)" || bad "rollback 未 restart"
+
+echo "== T60 rollback 无 previous → 硬失败(die),不静默成功、不动 current =="
+NR="$ROOT/n60"; NS="$ROOT/s60"; mkdir -p "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.29.0/VERSION"; ln -sfn "releases/0.29.0" "$NR/current"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"",pending:""}' > "$NS/state.json"
+if run_updater "$NR" "$NS" rollback >/dev/null 2>&1; then bad "无 previous 竟 exit 0(应 die)"; else ok "无 previous → 硬失败(exit 非0)"; fi
+[ "$(cur_link "$NR")" = "0.29.0" ] && ok "无 previous:current 未被动(0.29.0)" || bad "current 被动=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T61 连按两次面板 rollback:第二次无 previous → die,current 不 toggle 回坏版本(#195 R4)=="
+NR="$ROOT/n61"; NS="$ROOT/s61"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+run_updater "$NR" "$NS" rollback AU_RESTART_CMD=true >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "第一次 rollback→0.28.0" || bad "link=$(cur_link "$NR")"
+if run_updater "$NR" "$NS" rollback AU_RESTART_CMD=true >/dev/null 2>&1; then bad "第二次 rollback 竟 exit0(应 die,previous 已清)"; else ok "第二次 rollback 硬失败(previous 已清,不 toggle)"; fi
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "第二次后 current 仍 0.28.0(未 toggle 回坏版本 0.29.0)" || bad "current toggle 回=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T62 rollback 后 check:被 deny 的坏版本不再自动重装(#195 High:否则 timer 6h 重装)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+NR="$ROOT/n62"; NS="$ROOT/s62"; mkdir -p "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+echo x > "$NR/releases/0.28.0/VERSION"; echo x > "$NR/releases/0.29.0/VERSION"
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+jq -n '{seen_metadata_version:9,current:"0.29.0",previous:"0.28.0",pending:""}' > "$NS/state.json"
+run_updater "$NR" "$NS" rollback AU_RESTART_CMD=true >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "T62 前置:回滚到 0.28.0(deny 0.29.0)" || bad "link=$(cur_link "$NR")"
+# manifest 仍提供 0.29.0(UPDATE_POLICY=all 本会自动装)——但它已被 deny → 不装
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 10 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 0 > "$ROOT/health_result"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "check 未重装被 deny 的 0.29.0(current 软链仍 0.28.0)" || bad "坏版本被重装=$(cur_link "$NR")"
+[ "$(st "$NS" current)" = "0.28.0" ] && ok "state.current 仍 0.28.0" || bad "current=$(st "$NS" current)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T63 pending 非空时 rollback:目标取 current(非 previous),不多退一级(#195 Medium)=="
+NR="$ROOT/n63"; NS="$ROOT/s63"; mkdir -p "$NR/releases/0.27.0" "$NR/releases/0.28.0" "$NR/releases/0.29.0" "$NS"
+for v in 0.27.0 0.28.0 0.29.0; do echo x > "$NR/releases/$v/VERSION"; done
+ln -sfn "releases/0.29.0" "$NR/current"; ln -sfn "releases/0.28.0" "$NR/last-good"
+# 中断的 apply:current=0.28.0(已提交),previous=0.27.0,pending=0.29.0(半装,软链已切 0.29.0)
+jq -n '{seen_metadata_version:9,current:"0.28.0",previous:"0.27.0",pending:"0.29.0"}' > "$NS/state.json"
+run_updater "$NR" "$NS" rollback AU_RESTART_CMD=true >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "pending 时目标=current(0.28.0),未多退到 previous(0.27.0)" || bad "link=$(cur_link "$NR")"
+[ "$(st "$NS" pending)" = "" ] && ok "pending 已清(中断的 apply 已解决)" || bad "pending=$(st "$NS" pending)"
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "坏版本 pending=0.29.0 进 denied" || bad "denied=$(jq -c '.denied' "$NS/state.json")"
+[ "$(st "$NS" previous)" = "0.27.0" ] && ok "previous 未动(仍 0.27.0,pending 分支不清 previous)" || bad "previous=$(st "$NS" previous)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T64 list-candidates:只读列候选(不安装),标 action/denied(#195 finding4 只读动词)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node t64 0.28.0)
+S1="$(make_bundle 0.29.0 TA-0.28.0)"; S2="$(make_bundle 0.30.0 TA-0.28.0)"
+REL="$(jq -n --arg s1 "$S1" --arg s2 "$S2" --arg u1 "file://$SERVER/airaccount-node-0.29.0.tar.gz" --arg u2 "file://$SERVER/airaccount-node-0.30.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u1,sha256:$s1},
+    {version:"0.30.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u2,sha256:$s2}]')"
+write_manifest 11 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+jq '.denied=["0.30.0"]' "$NS/state.json" > "$NS/state.json.t" && mv "$NS/state.json.t" "$NS/state.json"   # 预先 deny 0.30.0
+OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && ok "list-candidates rc=0(helper 靠退出码判成功/失败,不能吃掉)" || bad "list-candidates rc=$rc(应 0)"
+echo "$OUT" | jq -e . >/dev/null 2>&1 && ok "list-candidates 输出合法 JSON(stdout 干净)" || bad "非法 JSON: $OUT"
+[ "$(echo "$OUT" | jq -r '.current')" = "0.28.0" ] && ok "current=0.28.0" || bad "current=$(echo "$OUT" | jq -r '.current')"
+[ "$(echo "$OUT" | jq -r '.candidates|length')" = "2" ] && ok "列出 2 个候选" || bad "候选数=$(echo "$OUT" | jq -r '.candidates|length')"
+[ "$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.30.0").action')" = "denied" ] && ok "0.30.0 标 action=denied" || bad "0.30.0 action=$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.30.0").action')"
+[ "$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.29.0").action')" = "apply" ] && ok "0.29.0 标 action=apply(policy=all)" || bad "0.29.0 action=$(echo "$OUT" | jq -r '.candidates[]|select(.version=="0.29.0").action')"
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "list-candidates 未安装(current 软链仍 0.28.0)" || bad "竟安装了=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T65 list-candidates **零候选** → 仍 rc=0 + 合法 JSON(#195 R5 finding2:『已是最新』最常见)=="
+read NR NS < <(new_node t65 0.30.0)
+write_manifest 12 "2035-01-01T00:00:00Z" "0.0.0" "[]"   # 无 release → 零候选
+OUT="$(run_updater_args "$NR" "$NS" -- list-candidates 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && ok "零候选 rc=0(不是 exit1)" || bad "零候选 rc=$rc(应 0)"
+echo "$OUT" | jq -e '.candidates==[] and .current=="0.30.0"' >/dev/null 2>&1 && ok "零候选 candidates=[] + current 正确" || bad "零候选 JSON 不对: $OUT"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T66 自动健康门失败:**连续第 2 次(阈值)才 deny**,denied 仍通知(#195 R6:一次抖动不永久拉黑)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node t66 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 13 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+echo 1 > "$ROOT/health_result"    # 健康门失败
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 1 次
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "第 1 次健康门失败 → 回滚 0.28.0" || bad "未回滚=$(cur_link "$NR")"
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" = "null" ] && ok "第 1 次**未** deny(一次抖动不永久拉黑好版本)" || bad "第 1 次就 deny 了"
+[ "$(jq -r '(.failures//{})["0.29.0"]' "$NS/state.json")" = "1" ] && ok "失败计数=1" || bad "计数=$(jq -r '(.failures//{})["0.29.0"]' "$NS/state.json")"
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 2 次 → 达阈值 deny
+[ "$(jq -r '(.denied//[])|index("0.29.0")' "$NS/state.json")" != "null" ] && ok "第 2 次失败 → 进 denied(阈值 2)" || bad "第 2 次仍未 deny=$(jq -c '.denied' "$NS/state.json")"
+echo 0 > "$ROOT/health_result"; : > "$ROOT/notify.log"
+run_updater "$NR" "$NS" check >/dev/null 2>&1   # 第 3 次:健康恢复,但已 deny
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "denied 不重装(current 仍 0.28.0)" || bad "坏版本被重装=$(cur_link "$NR")"
+grep -q "已被本节点拉黑" "$ROOT/notify.log" && ok "denied 版本**仍通知**(不从通知静默消失)" || bad "denied 未通知: $(cat "$ROOT/notify.log")"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T67 list-candidates 网络失败 → **响亮失败**(非零退出),不 fail-open 成『已是最新』(#195 R6)=="
+read NR NS < <(new_node t67 0.28.0)
+if run_updater_args "$NR" "$NS" AU_FETCH_CMD="$ROOT/fetch-net.sh" -- list-candidates >/dev/null 2>&1; then
+  bad "网络失败竟 exit 0(fail-open,面板会误显『已是最新』而安全补丁挂着)"
+else
+  ok "网络失败 → 非零退出(STRICT_FETCH=1;面板渲染『无法检查』)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T68 num_knob 校验非法/越界数值旋钮(#195 R7:防 set -e 崩 + 防静默撤销安全机制)=="
+eval "$(sed -n '/^num_knob()/,/^}/p' "$UPDATER")"   # 抽出函数单测(无依赖)
+[ "$(num_knob abc 2 1 100)" = 2 ] && ok "abc→default 2(AU_DENY_THRESHOLD 不静默永不拉黑)" || bad "abc=$(num_knob abc 2 1 100)"
+[ "$(num_knob 0 2 1 100)" = 2 ]   && ok "0→default 2(不退回单击即拉黑)"                 || bad "0=$(num_knob 0 2 1 100)"
+[ "$(num_knob 60s 60 1 3600)" = 60 ] && ok "60s→default 60(算术不崩)"                    || bad "60s=$(num_knob 60s 60 1 3600)"
+[ "$(num_knob -5 60 1 3600)" = 60 ]  && ok "-5→default 60"                                || bad "-5=$(num_knob -5 60 1 3600)"
+[ "$(num_knob 5 2 1 100)" = 5 ]   && ok "5→5(合法值透传)"                                || bad "5=$(num_knob 5 2 1 100)"
+[ "$(num_knob 999 2 1 100)" = 2 ] && ok "越界 999→default 2"                              || bad "999=$(num_knob 999 2 1 100)"
+
+# ═══════════════════════════════════════════════════════════════════
+echo "== T69 内置 run_health **grace 轮询实跑**(禁 AU_HEALTH_CMD)→ 失败回滚、不 abort/不卡损坏版本(#195 R7 覆盖 grace 循环)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node tgrace 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+REL="$(jq -n --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+write_manifest 14 "2035-01-01T00:00:00Z" "0.0.0" "$REL"
+# AU_HEALTH_CMD= 禁 hook → 走内置 _health_probe/deadline/while/sleep;grace=1 让循环快速走完
+run_updater "$NR" "$NS" check AU_HEALTH_CMD= AU_HEALTH_GRACE_SECS=1 >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "内置健康门(无服务,轮询到 deadline)失败 → 回滚 0.28.0,不卡损坏版本" || bad "卡在=$(cur_link "$NR")"
+
 # ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
