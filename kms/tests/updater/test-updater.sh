@@ -1280,6 +1280,38 @@ run_updater "$NR2" "$NS2" check AU_SCHEMA_JQ="$ROOT/no-such-schema.jq" 2>"$ROOT/
   && ok "缺 schema.jq → fail-closed 拒(current 未动 0.28.0)" || bad "未 fail-closed: cur=$(cur_link "$NR2") err=$(cat "$ROOT/e-schema")"
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T-floor-cache check 时缓存已验签 rollback_floor 进 state(供离线回滚判断)(#204)=="
+read NRC NSC < <(new_node tfc 0.30.0)
+SHAc="$(make_bundle 0.31.0 TA-0.28.0)"
+write_manifest 7 "2035-01-08T00:00:00Z" "0.29.0" \
+  "$(jq -n --arg s "$SHAc" --arg u "file://$SERVER/airaccount-node-0.31.0.tar.gz" '[{version:"0.31.0",security:false,auto_apply_allowed:false,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+echo 0 > "$ROOT/health_result"
+run_updater "$NRC" "$NSC" check >/dev/null 2>&1
+[ "$(st "$NSC" seen_rollback_floor)" = "0.29.0" ] && ok "check 缓存 seen_rollback_floor=0.29.0" || bad "未缓存 floor=$(st "$NSC" seen_rollback_floor)"
+
+echo "== T-floor-rb 离线回滚跌破缓存 rollback_floor → 拒,除非 AU_FORCE_ROLLBACK=1(#204)=="
+NRF="$ROOT/nfloor"; NSF="$ROOT/sfloor"; mkdir -p "$NRF/releases/0.28.0" "$NRF/releases/0.30.0" "$NSF"
+echo x > "$NRF/releases/0.28.0/VERSION"; echo x > "$NRF/releases/0.30.0/VERSION"
+ln -sfn "releases/0.30.0" "$NRF/current"; ln -sfn "releases/0.28.0" "$NRF/last-good"
+# 缓存 floor=0.29.0;回滚目标 previous=0.28.0 < floor → 疑已知漏洞版本
+jq -n '{seen_metadata_version:9,current:"0.30.0",previous:"0.28.0",pending:"",seen_rollback_floor:"0.29.0"}' > "$NSF/state.json"
+if run_updater "$NRF" "$NSF" rollback AU_RESTART_CMD=true 2>"$ROOT/e-floor" >/dev/null; then
+  bad "跌破 floor 的回滚竟成功(应拒)"
+else
+  { grep -q "安全地板" "$ROOT/e-floor" && [ "$(cur_link "$NRF")" = "0.30.0" ]; } \
+    && ok "跌破 floor 回滚被拒 + current 未动(0.30.0)" || bad "未正确拒: cur=$(cur_link "$NRF") $(cat "$ROOT/e-floor")"
+fi
+run_updater "$NRF" "$NSF" rollback AU_RESTART_CMD=true AU_FORCE_ROLLBACK=1 >/dev/null 2>&1
+[ "$(cur_link "$NRF")" = "0.28.0" ] && ok "AU_FORCE_ROLLBACK=1 显式放行 → 回滚到 0.28.0" || bad "force 未放行 cur=$(cur_link "$NRF")"
+# 正控:回滚目标 >= floor 不被门拦(不过度阻断)
+NRG="$ROOT/nfg"; NSG="$ROOT/sfg"; mkdir -p "$NRG/releases/0.29.0" "$NRG/releases/0.30.0" "$NSG"
+echo x > "$NRG/releases/0.29.0/VERSION"; echo x > "$NRG/releases/0.30.0/VERSION"
+ln -sfn "releases/0.30.0" "$NRG/current"; ln -sfn "releases/0.29.0" "$NRG/last-good"
+jq -n '{seen_metadata_version:9,current:"0.30.0",previous:"0.29.0",pending:"",seen_rollback_floor:"0.29.0"}' > "$NSG/state.json"
+run_updater "$NRG" "$NSG" rollback AU_RESTART_CMD=true >/dev/null 2>&1
+[ "$(cur_link "$NRG")" = "0.29.0" ] && ok "正控:回滚目标=floor(0.29.0)不被门拦" || bad "目标>=floor 却被拦 cur=$(cur_link "$NRG")"
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]
