@@ -357,6 +357,10 @@ clear_failures() { # clear_failures <ver>:成功后清该版本失败计数
   mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
 }
 auto_fail_deny() { # auto_fail_deny <ver>:自动路径失败 → 计数+1,达阈值才 deny;通知带次数
+  # 故障注入(仅 AU_TEST_MODE,同 :251 lock 接缝约定):模拟 rollback 已落地一致状态后、失败记账前
+  # 进程猝死。用来**钉住 #204 原子序**:此刻 state 必须已是 {current:prev,pending:"",软链→prev}——
+  # 若把本函数调用挪回 rollback 之前(旧序),这一刻 current 还停在坏版本、pending 非空,测试即红。
+  [ "${AU_TEST_MODE:-0}" = 1 ] && [ "${AU_TEST_CRASH_IN_FAILDENY:-0}" = 1 ] && exit 99
   local v="$1" fc thr
   thr="$(num_knob "${AU_DENY_THRESHOLD:-2}" 2 1 100)"      # 校验:abc→2 不静默永不拉黑;0→2 不单击拉黑
   fc="$(num_knob "$(record_failure "$v")" 0 0 1000000)"    # state 损坏 fc 空 → 0(安全向:不误拉黑)

@@ -1311,6 +1311,27 @@ jq -n '{seen_metadata_version:9,current:"0.30.0",previous:"0.29.0",pending:"",se
 run_updater "$NRG" "$NSG" rollback AU_RESTART_CMD=true >/dev/null 2>&1
 [ "$(cur_link "$NRG")" = "0.29.0" ] && ok "正控:回滚目标=floor(0.29.0)不被门拦" || bad "目标>=floor 却被拦 cur=$(cur_link "$NRG")"
 
+echo "== T-atomic-order 故障注入:rollback 后、失败记账前进程猝死 → state 仍一致(钉住 #204 原子序)=="
+# 正常路径两种顺序最终态相同、测不出;唯有「两次 state 写之间死掉」才有别 → 必须故障注入。
+# 桩:AU_TEST_CRASH_IN_FAILDENY=1 让 auto_fail_deny 一进入就 exit 99(= rollback 已跑完、记账未跑)。
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+ENV
+read NRA NSA < <(new_node tatomic 0.28.0)
+SHAa="$(make_bundle 0.29.0)"
+write_manifest 6 "2035-01-01T00:00:00Z" "0.0.0" \
+  "$(jq -n --arg s "$SHAa" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" '[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]')"
+echo 1 > "$ROOT/health_result"   # 健康门失败 → 触发 rollback + auto_fail_deny
+run_updater "$NRA" "$NSA" check AU_TEST_MODE=1 AU_TEST_CRASH_IN_FAILDENY=1 >/dev/null 2>&1
+rc_atomic=$?
+[ "$rc_atomic" = 99 ] && ok "故障注入生效(auto_fail_deny 入口 exit 99)" || bad "桩未触发 rc=$rc_atomic(旧序则崩在 rollback 前)"
+# rollback 先行 → 崩溃时 state 已一致:current=prev、pending 空、软链→prev
+{ [ "$(st "$NSA" current)" = "0.28.0" ] && [ -z "$(st "$NSA" pending)" ] && [ "$(cur_link "$NRA")" = "0.28.0" ]; } \
+  && ok "猝死后 state 一致:current=0.28.0 / pending 空 / 软链→0.28.0(reorder 生效)" \
+  || bad "猝死后 state 不一致 → 原子序回归:current=$(st "$NSA" current) pending='$(st "$NSA" pending)' link=$(cur_link "$NRA")"
+
 # ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
