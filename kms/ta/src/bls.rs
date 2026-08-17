@@ -103,6 +103,26 @@ fn encode_g2_eip2537(uncompressed_192: &[u8; 192]) -> [u8; 256] {
 }
 
 #[cfg(test)]
+mod co_sign_dst {
+    use super::BLS_DST;
+
+    /// #203-风格防漂移钉子(CC-103 committee):co-sign / BLS-partial 的 DST 必须与 DVT #237
+    /// committee validator 的 `_hashToG2` DST + SDK @noble **逐字节一致**。CC-98 committee **不改**
+    /// 签名原像(= userOpHash),域分离全靠这个 DST。若这里(或 #237)改了 DST,committee 签名会
+    /// **全网静默验签失败**。本常量断言捕获 KMS 侧漂移;现有 `pop_golden` 传递证明 blst+DST+hashToCurve
+    /// 与 @noble 一致。完整 co-sign 字节 golden KAT(固定 sk+userOpHash → 固定 256B/96B)见
+    /// `docs/agent/cc103-kms-committee/ACCEPTANCE.md §B`,golden 需在 TA docker 构建环境 capture。
+    #[test]
+    fn co_sign_dst_locked() {
+        assert_eq!(
+            BLS_DST,
+            b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
+            "BLS co-sign DST 漂移 —— 必须与 DVT #237 validator _hashToG2 + SDK @noble 一致(CC-103)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pop_golden {
     use super::sign_pop;
 
