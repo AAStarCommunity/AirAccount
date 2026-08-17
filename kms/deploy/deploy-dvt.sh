@@ -37,6 +37,10 @@ cfg() {
 BOARD=$(cfg community board_ssh);   KEY=$(cfg community ssh_key)
 DVT_VER=$(cfg dvt version);         PORT=$(cfg dvt port)
 POLICY=$(cfg dvt policy_enabled);   NODE_NAME=$(cfg dvt node_name); KDF=$(cfg dvt kdf)
+# CC-89 stage-2 guardian-slash watcher(opt-in,默认关):仅 guardian_watch_enabled=true 才写进 dvt.env
+GUARDIAN_WATCH=$(cfg dvt guardian_watch_enabled);  BLS_AGG=$(cfg dvt bls_aggregator_address)
+WATCH_FROM_BLOCK=$(cfg dvt guardian_watch_from_block); WATCH_DIR=$(cfg dvt guardian_watch_dir)
+WATCH_INTERVAL=$(cfg dvt guardian_watch_interval_ms)
 RPC=$(cfg chain eth_rpc_url);       ENTRY=$(cfg chain entry_point)
 ACTIVE=$(cfg contracts active)
 VALIDATOR=$(cfg "contracts_${ACTIVE}" validator)
@@ -126,6 +130,19 @@ NODE_STATE_FILE=$DVT_DIR/node_state.json
 POLICY_ENABLED=${POLICY:-false}
 EOF
 chmod 600 $DVT_DIR/dvt.env"
+
+# guardian-slash watcher env(仅 opt-in 时追加;默认关 → dvt.env 与旧版逐字节一致)
+if [ "${GUARDIAN_WATCH:-false}" = "true" ]; then
+  [ -n "$BLS_AGG" ] || { echo "guardian_watch_enabled=true 但缺 bls_aggregator_address"; exit 2; }
+  echo "▶ dvt.env += guardian-slash watcher(opt-in)"
+  $SSH "cat >> $DVT_DIR/dvt.env <<EOF
+AUDIT_GUARDIAN_WATCH_ENABLED=true
+AUDIT_BLS_AGGREGATOR_ADDRESS=$BLS_AGG
+AUDIT_GUARDIAN_WATCH_FROM_BLOCK=${WATCH_FROM_BLOCK:-0}
+AUDIT_GUARDIAN_WATCH_DIR=${WATCH_DIR:-$DVT_DIR/guardian-signer-records}
+AUDIT_GUARDIAN_WATCH_INTERVAL_MS=${WATCH_INTERVAL:-60000}
+EOF"
+fi
 
 # 7. 加固 systemd(禁开机自启:断电须人工 unlock;崩溃从 tmpfs 自动重启)
 echo "▶ dvt.service(加固 + 加密 keystore)"

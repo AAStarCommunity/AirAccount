@@ -16,7 +16,7 @@ port    = 0
 profile = "none"
 
 [dvt]
-version        = "1.12.0"
+version        = "1.13.1"
 port           = 8080
 node_name      = "REPLACE_ME-dvt"
 policy_enabled = false
