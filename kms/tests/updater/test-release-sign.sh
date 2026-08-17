@@ -295,6 +295,24 @@ bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" -
   && bad "合法签名的 beta manifest 放 stable 路径竟被整份继承(全网冻结+墓碑好版本)" || \
   { grep -q "channel" "$ROOT/e26" && ok "beta manifest 放 stable 路径被 channel 门拦下(签名保真不保来源)" || bad "错误信息未含 channel: $(cat "$ROOT/e26")"; }
 
+echo "== T27 边界:本地 meta=1e9(**读回门内**)→ 签出会 1e9+1(读回门外)→ 必须 die(签发端不产出自己读不回去的 counter)(#196 R10)=="
+rm -f "$OUT" "$OUT.minisig"
+# 已签名本地 meta=1000000000(恰在读回门 META_MAX 上)—— 读入合法,但 +1 后越过读回门
+jq -n --arg s "$S64" '{metadata_version:1000000000,channel:"stable",rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.31.0.tar.gz" --out "$OUT" --no-baseline \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --notes v 2>"$ROOT/e27" >/dev/null \
+  && bad "本地 meta=1e9 竟签出 1e9+1(自己读不回去 → 节点 ratchet 后永久冻结)" || \
+  { grep -qE "耗尽|上界" "$ROOT/e27" && ok "counter 到顶被 die(签发门=读回门,不产出读不回去的 counter)" || bad "错误信息不对: $(cat "$ROOT/e27")"; }
+# 正控:恰好 meta=999999999 → 签出 1000000000(仍在读回门内)→ rc=0
+rm -f "$OUT" "$OUT.minisig"
+jq -n --arg s "$S64" '{metadata_version:999999999,channel:"stable",rollback_floor:"0.30.0",revoked:[],releases:[{version:"0.30.0",security:false,severity:"none",notes:"x",notes_url:"u",auto_apply_allowed:true,ta_changed:false,min_version:"0.28.0",requires_ta_version:"0.28.0",proto_version:1,tarball:"t",sha256:$s,canary_ring:[]}]}' > "$OUT"
+minisign -S -s "$ROOT/sec.key" -m "$OUT" -x "$OUT.minisig" >/dev/null 2>&1
+bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.31.0.tar.gz" --out "$OUT" --no-baseline \
+  --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --notes v 2>"$ROOT/e27b" >/dev/null && rc27=0 || rc27=1
+{ [ "$rc27" = 0 ] && [ "$(jq -r '.metadata_version' "$OUT" 2>/dev/null)" = 1000000000 ]; } \
+  && ok "正控:meta=999999999 签出 1000000000(仍读得回,未误杀边界内)" || bad "边界内被误杀 rc=$rc27 meta=$(jq -r .metadata_version "$OUT" 2>/dev/null): $(cat "$ROOT/e27b")"
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

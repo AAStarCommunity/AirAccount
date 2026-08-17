@@ -153,6 +153,12 @@ semver_max() {
 # 节点 ratchet 后永久拒绝一切后续版本(把本工具要防的砖化搬到了上游)。故:**先验签,后继承**,
 # 且 counter/releases/floor **全部**从验签副本取(只取 counter 会在新 clone 上丢掉所有旧 release +
 # 把 rollback_floor 悄悄降回 0.28.0)。读回失败(网络/端点)一律 fail-closed,首发须显式 --no-baseline。
+# (#196 R10)metadata_version 上界:**读回门与签发门必须同一个常量**,否则出现「签发端产出自己读不回去
+# 的 counter」(旧 bug:读门 1e9、签门 1e9+1 → 本地 1e9 签出 1e9+1,自己读回即 rc=1;节点 ratchet 到
+# 1e9+1 后再签不出更高的 → 永久全网冻结)。不变量:**签出的 NEW_META 必须仍落在下次能读回的 [0,META_MAX]
+# 内**。到顶 = counter 空间耗尽 → die(不抬门对齐、不静默饱和停在 MAX —— 后者会让两份不同内容共享同一
+# counter,而节点只拒 < 不拒 =,是安全故障)。1e9 足够每天签发几十年。
+META_MAX=1000000000
 LOCAL_META=0; LOCAL_RELEASES='[]'; LOCAL_FLOOR=""; LOCAL_REVOKED='[]'; LOCAL_VERIFIED=0
 if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   # ⚠️ 本地 $OUT 无界驱动 metadata_version/rollback_floor/revoked(全**单调只增**),被改一下就能**永久
@@ -183,8 +189,8 @@ if [ -f "$OUT" ] && jq empty "$OUT" 2>/dev/null; then
   fi
   LOCAL_META="$(jq -r '(.metadata_version // 0) | floor' "$OUT")"
   # (#196 R9 F2 加固)未验证本地的 counter 也可能是 2^63-1 溢出 → 数字且有上界,否则 die(镜像节点)。
-  [[ "$LOCAL_META" =~ ^[0-9]+$ ]] && [ "$LOCAL_META" -le 1000000000 ] \
-    || die "本地 $OUT metadata_version=$LOCAL_META 非法(需 0..1000000000 整数)—— 拒绝(疑溢出/注入)"
+  [[ "$LOCAL_META" =~ ^[0-9]+$ ]] && [ "$LOCAL_META" -le "$META_MAX" ] \
+    || die "本地 $OUT metadata_version=$LOCAL_META 非法(需 0..$META_MAX 整数)—— 拒绝(疑溢出/注入)"
   LOCAL_RELEASES="$(jq -c '.releases // []' "$OUT")"
   LOCAL_FLOOR="$(jq -r '.rollback_floor // empty' "$OUT")"
   LOCAL_REVOKED="$(jq -c '.revoked // []' "$OUT")"
@@ -207,8 +213,8 @@ if [ "$NO_BASELINE" != 1 ]; then
   # 已验签 = 可信 → 作权威基线:counter/releases/floor 全从这里来。
   PREV_META="$(jq -r '(.metadata_version // 0) | floor' "$RB_DIR/m.json")"
   # (#196 R9 F2 加固)基线虽已验签,仍卡数字上界:防陈旧签名基线的越界 counter 让下方 -gt 比较崩(set -e)。
-  [[ "$PREV_META" =~ ^[0-9]+$ ]] && [ "$PREV_META" -le 1000000000 ] \
-    || die "读回基线 metadata_version=$PREV_META 非法(需 0..1000000000 整数)—— 拒绝"
+  [[ "$PREV_META" =~ ^[0-9]+$ ]] && [ "$PREV_META" -le "$META_MAX" ] \
+    || die "读回基线 metadata_version=$PREV_META 非法(需 0..$META_MAX 整数)—— 拒绝"
   PREV_RELEASES="$(jq -c '.releases // []' "$RB_DIR/m.json")"
   BASE_FLOOR="$(jq -r '.rollback_floor // empty' "$RB_DIR/m.json")"
   BASE_REVOKED="$(jq -c '.revoked // []' "$RB_DIR/m.json")"
@@ -306,8 +312,10 @@ fi
 NEW_META=$((PREV_META + 1))
 # (#196 R9 F2 加固)--no-baseline 下 PREV_META 全来自本地 $OUT,2^63-1 会溢出成负数并被真钥签出。
 # LOCAL_META 读入已卡上界,这里再断言产物 counter 在合法区间(镜像节点 ratchet 语义,永不签负/越界)。
-[ "$NEW_META" -gt 0 ] && [ "$NEW_META" -le 1000000001 ] \
-  || die "metadata_version 越界(NEW_META=$NEW_META)—— 拒绝签发(疑 counter 溢出/注入)"
+# NEW_META 必须仍 ≤ META_MAX(= 读回门),否则签出的东西下次自己读不回去(见 :156 不变量)。
+# 到顶 = counter 空间耗尽,响亮 die(绝不静默饱和停在 MAX:那会让两份内容共享一个 counter)。
+[ "$NEW_META" -gt 0 ] && [ "$NEW_META" -le "$META_MAX" ] \
+  || die "metadata_version 已达上界(PREV_META=$PREV_META,NEW_META=$NEW_META > META_MAX=$META_MAX)—— counter 空间耗尽,拒绝签发(签出即读不回;不抬门、不静默饱和)"
 
 # 缺省 min_version / requires_ta:从 prev releases 里**按 semver 取最高版本**那条继承
 # (不是最近签发的 [0] —— 否则先签 0.30 再签热修 0.29.1 会让后续 0.31 静默继承 0.29.1 的
