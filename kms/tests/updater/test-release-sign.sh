@@ -313,6 +313,19 @@ bash "$SIGN" --version 0.31.0 --tarball "$ROOT/airaccount-node-v0.31.0.tar.gz" -
 { [ "$rc27" = 0 ] && [ "$(jq -r '.metadata_version' "$OUT" 2>/dev/null)" = 1000000000 ]; } \
   && ok "正控:meta=999999999 签出 1000000000(仍读得回,未误杀边界内)" || bad "边界内被误杀 rc=$rc27 meta=$(jq -r .metadata_version "$OUT" 2>/dev/null): $(cat "$ROOT/e27b")"
 
+echo "== T28 共享 schema.jq(#203):两脚本同引用一份 + 缺文件 fail-closed =="
+SIGN_DIR="$(cd "$HERE/../../deploy/updater" && pwd)"
+# (a) 两脚本都 --from-file schema.jq(构造性防漂移:改一处即两处同变)
+{ grep -q -- '--from-file "\$SCHEMA_JQ"' "$SIGN_DIR/release-sign.sh" \
+  && grep -q -- '--from-file "\$AU_SCHEMA_JQ"' "$SIGN_DIR/aastar-node-updater.sh" \
+  && [ -f "$SIGN_DIR/schema.jq" ]; } \
+  && ok "signer/node 均 --from-file 共享 schema.jq(手写双份已消除)" || bad "未同引用共享 schema.jq"
+# (b) 签发端:schema.jq 缺失 → fail-closed 拒签(不静默放行)
+SCHEMA_JQ="$ROOT/nonexistent-schema.jq" bash "$SIGN" --version 0.30.0 --tarball "$ROOT/airaccount-node-v0.30.0.tar.gz" \
+  --out "$ROOT/s28.json" --seckey "$ROOT/sec.key" --pubkey "$ROOT/pub.key" --no-baseline --notes v 2>"$ROOT/e28" >/dev/null \
+  && bad "缺 schema.jq 竟签发成功(应 fail-closed)" || \
+  { grep -q "缺共享 schema" "$ROOT/e28" && ok "签发端缺 schema.jq → fail-closed 拒签" || bad "错误信息不对: $(cat "$ROOT/e28")"; }
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

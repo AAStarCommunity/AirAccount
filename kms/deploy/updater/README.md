@@ -55,6 +55,8 @@ aastar-node-updater status                # 打印当前状态
   current   -> releases/<新版>      # systemd ExecStart 指向 current/
   last-good -> releases/<回滚目标>
   updater/aastar-node-updater.sh
+  updater/schema.jq                 # manifest schema 单一事实源(#203)——必须与脚本**同目录**;
+                                    #   节点按脚本自身目录解析,缺失即 fail-closed 拒一切更新
 /var/lib/airaccount/updater/state.json   # {seen_metadata_version,current,previous,pending}
 /etc/airaccount/updater.env              # 策略
 /etc/airaccount/updater-pubkey.pub       # minisign 验签公钥
