@@ -370,35 +370,15 @@ MANIFEST="$(jq -n \
    revoked:$revoked,
    releases: (if $new == null then $prev else [$new] + ($prev | map(select(.version != $new.version))) end)}')"
 
-# ── schema 自检:**逐字段镜像**节点 aastar-node-updater.sh 的 load_manifest(fail-closed)。
-# ⚠️ 这两处 schema 是手写双份,必须同步改;下面的 test-release-sign.sh 会真跑节点 load_manifest
-# 校验本脚本产物,防二者漂移(daemon #5 根因)。
-NOTES_MAX_JQ="$NOTES_MAX"
-echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX_JQ" '
-  (.metadata_version|type=="number" and .==floor)                       # 整数(非小数)
-  and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-  and (.rollback_floor|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-  and ((.revoked // []) | type=="array" and (all(.[]; type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))))
-  # 撤销执行的强不变量:releases 里**不得**含 revoked 里的版本(墓碑 = 唯一撤销机制,#196 R6)
-  and (((.revoked // []) | map(ltrimstr("v"))) as $rv
-       | (.releases | all((.version|ltrimstr("v")) as $vv | ($rv | index($vv)) == null)))
-  and (.releases|type=="array")   # 允许空 releases:撤销最后一版是合法的(镜像节点 —— 节点接受 releases:[]);#196 R8 finding3
-  and (all(.releases[];
-        (.version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-        and (.sha256|test("^[0-9a-fA-F]{64}$"))
-        and ((.ta_changed)|type=="boolean")
-        and (.severity|test("^(none|low|medium|high|critical)$"))
-        and (.min_version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-        and (.requires_ta_version==null or (.requires_ta_version|test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
-        and (.tarball|type=="string" and length>0)
-        and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=$nmax)))
-        and ((.security // false)|type=="boolean")               # 继承的旧条目也查(节点强制这三个类型)
-        and ((.auto_apply_allowed // false)|type=="boolean")
-        # canary_ring 逐字镜像节点 :518(元素必须是**字符串** node id)——旧版只查 type==array,
-        # 一份继承的 canary_ring:[1,2](数值)signer 会签发、节点却整份拒 → fail-closed 全网更新冻结。
-        and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))
-      ))
-' >/dev/null || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
+# ── schema 自检:谓词在**共享** schema.jq(#203),与节点 load_manifest 同一份 —— 漂移在语法层不可能
+# (曾手写双份漂移 3 次,daemon #5 根因)。签发端更严:require_floor=true(floor 必是 string)+
+# check_revoked_releases=true(releases 不得含 revoked;墓碑=唯一撤销机制)。test-release-sign.sh T1
+# 仍会真跑节点 load_manifest 校验本产物,作为端到端防漂移网。缺文件 = fail-closed。
+SCHEMA_JQ="${SCHEMA_JQ:-$HERE/schema.jq}"
+[ -f "$SCHEMA_JQ" ] || { echo "缺共享 schema $SCHEMA_JQ —— 拒绝签发(应与 release-sign.sh 同目录)" >&2; exit 1; }
+echo "$MANIFEST" | jq -e --argjson nmax "$NOTES_MAX" --argjson require_floor true --argjson check_revoked_releases true \
+  --from-file "$SCHEMA_JQ" >/dev/null \
+  || { echo "组装出的 manifest 未过 schema 自检" >&2; echo "$MANIFEST" | jq . >&2; exit 1; }
 [ "$(printf '%s' "$MANIFEST" | jq '.releases|length')" -eq 0 ] && echo "⚠️ 本次签发后 channel **无任何 release**(全部被撤销)—— 节点将无更新可装;确认这是预期(如全版本投毒的紧急撤销)。" >&2
 
 # 进度/摘要一律 → stderr,让 dry-run 的 **stdout 是干净的 manifest JSON**(可直接 `| jq`)。

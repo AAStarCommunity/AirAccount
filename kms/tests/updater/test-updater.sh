@@ -1268,6 +1268,18 @@ if run_updater "$NR" "$NS" apply 0.29.0 >/dev/null 2>&1; then bad "显式 apply 
 [ "$(cur_link "$NR")" = "0.28.0" ] && ok "apply 拒后 current 未动(0.28.0)" || bad "current 被动=$(cur_link "$NR")"
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T-schema-fc 缺共享 schema.jq → 节点 fail-closed 拒绝,不静默放行(#203)=="
+read NR2 NS2 < <(new_node tschema 0.28.0)
+SHA2="$(make_bundle 0.29.0 TA-0.28.0)"
+jq -n --argjson m 6 --arg s "$SHA2" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '{metadata_version:$m, generated_at:"2026-08-01T00:00:00Z", expires:"2035-01-08T00:00:00Z", channel:"stable", rollback_floor:"0.0.0", revoked:[], releases:[{version:"0.29.0",security:true,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]}' > "$SERVER/channels/stable.json"
+MINISIGN_SECKEY="$ROOT/sec.key" "$SIGN" "$SERVER/channels/stable.json" >/dev/null 2>&1
+echo 0 > "$ROOT/health_result"
+run_updater "$NR2" "$NS2" check AU_SCHEMA_JQ="$ROOT/no-such-schema.jq" 2>"$ROOT/e-schema" >/dev/null || true
+{ grep -q "缺 manifest schema" "$ROOT/e-schema" && [ "$(cur_link "$NR2")" = "0.28.0" ]; } \
+  && ok "缺 schema.jq → fail-closed 拒(current 未动 0.28.0)" || bad "未 fail-closed: cur=$(cur_link "$NR2") err=$(cat "$ROOT/e-schema")"
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]

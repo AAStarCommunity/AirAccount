@@ -25,6 +25,10 @@ AU_ENV_FILE="${AU_ENV_FILE:-/etc/airaccount/updater.env}"
 AU_PUBKEY="${AU_PUBKEY:-/etc/airaccount/updater-pubkey.pub}"
 AU_MANIFEST_BASE="${AU_MANIFEST_BASE:-https://raw.githubusercontent.com/AAStarCommunity/AirAccount/main/kms/deploy/updater/channels}"
 AU_NODE_ID="${AU_NODE_ID:-$(hostname 2>/dev/null || echo unknown)}"
+# manifest schema 单一事实源(#203):与本脚本同目录的 schema.jq,签发端 release-sign.sh 同引用。
+# 默认按脚本自身目录解析(部署时 updater 整目录同送 /opt/airaccount/updater),env 可覆盖(测试)。
+AU_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd 2>/dev/null || echo .)"
+AU_SCHEMA_JQ="${AU_SCHEMA_JQ:-$AU_SELF_DIR/schema.jq}"
 
 # hooks(测试可覆盖)
 AU_RESTART_CMD="${AU_RESTART_CMD:-systemctl restart kms-api.service}"
@@ -639,26 +643,13 @@ load_manifest() {
   # 验签(不过绝不继续)
   verify_sig "$WORK/channel.json" "$WORK/channel.json.minisig" || \
     die "manifest 验签失败 —— 疑似投毒/损坏,拒绝"
-  # schema 校验(fail-closed)—— 放在持久化 seen_metadata_version 之前
-  jq -e '
-    (.metadata_version|type=="number" and .==floor)
-    and (.expires|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-    and (.rollback_floor==null or (.rollback_floor|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
-    and ((.revoked // []) | type=="array" and (all(.[]; type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))))
-    and (.releases|type=="array")
-    and (all(.releases[];
-          (.version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-          and (.tarball|type=="string" and (length>0))
-          and (.sha256|type=="string" and test("^[0-9a-fA-F]{64}$"))
-          and ((.security//false)|type=="boolean")
-          and ((.auto_apply_allowed//false)|type=="boolean")
-          and ((.ta_changed//false)|type=="boolean")
-          and ((.severity//"none")|type=="string" and test("^(none|low|medium|high|critical)$"))
-          and (.notes==null or (.notes|type=="string" and (test("[[:cntrl:]]")|not) and (length<=280)))
-          and ((.min_version//"0.0.0")|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))
-          and (.requires_ta_version==null or (.requires_ta_version|type=="string" and test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
-          and (.canary_ring==null or ((.canary_ring|type=="array") and (all(.canary_ring[];type=="string"))))))
-  ' "$WORK/channel.json" >/dev/null 2>&1 || die "manifest schema 非法 —— 拒绝(fail-closed)"
+  # schema 校验(fail-closed)—— 放在持久化 seen_metadata_version 之前。谓词在共享 schema.jq(#203),
+  # 与签发端 release-sign.sh 同一份;缺文件 = fail-closed 拒(与缺公钥同款,绝不静默放行)。
+  # 节点侧:允许 rollback_floor==null(兼容旧 manifest);releases-不含-revoked 由读取侧过滤,schema 不查。
+  [ -f "$AU_SCHEMA_JQ" ] || die "缺 manifest schema $AU_SCHEMA_JQ —— 拒绝(fail-closed;应与 updater 同目录部署)"
+  jq -e --argjson nmax 280 --argjson require_floor false --argjson check_revoked_releases false \
+    --from-file "$AU_SCHEMA_JQ" "$WORK/channel.json" >/dev/null 2>&1 \
+    || die "manifest schema 非法 —— 拒绝(fail-closed)"
   # 新鲜度(expires 必填)—— 防 freeze attack
   local expires now exp_epoch
   expires="$(jq -r '.expires' "$WORK/channel.json")"
