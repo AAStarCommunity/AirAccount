@@ -357,6 +357,10 @@ clear_failures() { # clear_failures <ver>:成功后清该版本失败计数
   mv -f "$STATE_FILE.tmp" "$STATE_FILE"; sync 2>/dev/null || true
 }
 auto_fail_deny() { # auto_fail_deny <ver>:自动路径失败 → 计数+1,达阈值才 deny;通知带次数
+  # 故障注入(仅 AU_TEST_MODE,同 :251 lock 接缝约定):模拟 rollback 已落地一致状态后、失败记账前
+  # 进程猝死。用来**钉住 #204 原子序**:此刻 state 必须已是 {current:prev,pending:"",软链→prev}——
+  # 若把本函数调用挪回 rollback 之前(旧序),这一刻 current 还停在坏版本、pending 非空,测试即红。
+  [ "${AU_TEST_MODE:-0}" = 1 ] && [ "${AU_TEST_CRASH_IN_FAILDENY:-0}" = 1 ] && exit 99
   local v="$1" fc thr
   thr="$(num_knob "${AU_DENY_THRESHOLD:-2}" 2 1 100)"      # 校验:abc→2 不静默永不拉黑;0→2 不单击拉黑
   fc="$(num_knob "$(record_failure "$v")" 0 0 1000000)"    # state 损坏 fc 空 → 0(安全向:不误拉黑)
@@ -479,7 +483,10 @@ apply_version() { # apply_version <ver> <bundle_dir>
   # 切 current(生产还需切 TA 固定路径,见设计文档 §3.1;此处 hook 化留待真机)
   swap_symlink "$AU_ROOT/current" "releases/$ver"
 
-  restart_service || { warn "restart 失败,回滚"; auto_fail_deny "$ver"; rollback "$prev"; return 1; }
+  # (#204 原子序)rollback **先**落地一致状态(current=prev/pending=""/FS 软链),再记失败计数。
+  # 反过来(旧序)若在两次 state 写之间崩,current 可能停在坏版本、靠 boot recovery 兜;新序崩了
+  # 至多丢一次 failures 自增(fail-safe:多允许一次重试,绝不误拉黑/绝不卡在坏版本)。与 cmd_rollback 同序。
+  restart_service || { warn "restart 失败,回滚"; rollback "$prev"; auto_fail_deny "$ver"; return 1; }
 
   log "健康门检查…"
   export AU_EXPECT_VERSION="$(ver_norm "$ver")"   # 供内置/外部健康门核对部署后版本
@@ -491,8 +498,8 @@ apply_version() { # apply_version <ver> <bundle_dir>
     return 0
   else
     warn "健康门未过,回滚到 $prev"
+    rollback "$prev"         # (#204 原子序)先落地一致回滚,再记失败计数(见上方 restart 失败分支注释)
     auto_fail_deny "$ver"    # 自动路径:计数+1,连续达阈值才 deny(#195 R6:一次慢启动不永久拉黑好版本)
-    rollback "$prev"
     return 1
   fi
 }
@@ -582,6 +589,15 @@ cmd_rollback() {
     [ -d "$AU_ROOT/releases/$prev" ] || die "回滚目标 releases/$prev 不存在 —— 走 OOB 人工救板"
     log "面板回滚:$cur → $prev(正常重启)"
   fi
+  # (#204)离线回滚跌破安全地板检查:cmd_rollback 不拉 manifest,用**缓存的**已验签 floor 判断
+  # 回滚目标是否低于 rollback_floor(= 已知漏洞版本)。镜像在线 apply 的 floor 门(:892),
+  # 跌破则 notify + 要求 AU_FORCE_ROLLBACK=1 显式放行(离线无法自证 floor,不静默跌破)。
+  local sf; sf="$(state_get seen_rollback_floor)"
+  if [ -n "$sf" ] && ! ver_ge "$target" "$sf"; then
+    notify warn "回滚目标 $target 低于缓存 rollback_floor $sf(疑已知漏洞版本;node=$AU_NODE_ID)。"
+    [ "${AU_FORCE_ROLLBACK:-0}" = 1 ] || die "回滚目标 $target < 安全地板 $sf —— 拒绝(设 AU_FORCE_ROLLBACK=1 显式放行,或走 OOB 人工救板)。"
+    warn "AU_FORCE_ROLLBACK=1:跌破 floor 仍按显式授权回滚到 ${target}。"
+  fi
   rollback "$target"                 # 换软链 + 真实 restart_service + state_set current=$target pending=""
   deny_version "$bad"                # 记录被拒版本 → cmd_check 不再 6h 后自动重装(High)
   # 去掉旧的 `state_set previous "$cur"` toggle:它把坏版本写回 previous,二次点面板回滚即重装坏
@@ -667,6 +683,12 @@ load_manifest() {
   [ "$mver" -gt "$seen" ] && state_set_num seen_metadata_version "$mver"
   # rollback_floor + 当前版本(fail-safe 归一非法 semver 到 0.0.0)
   FLOOR="$(jq -r '.rollback_floor // "0.0.0"' "$WORK/channel.json")"
+  # (#204)缓存最近一次**验签成功**的 floor:离线 cmd_rollback 无法拉 manifest,靠这个判断回滚目标
+  # 是否跌破安全地板。单调只升(floor 本就只升;陈旧/重放的低 floor 不覆盖已缓存的)。
+  if ver_valid "$FLOOR"; then
+    local _cf; _cf="$(state_get seen_rollback_floor)"
+    { [ -z "$_cf" ] || ver_ge "$FLOOR" "$_cf"; } && state_set seen_rollback_floor "$FLOOR"
+  fi
   MANIFEST_REVOKED="$(jq -c '(.revoked // []) | map(ltrimstr("v"))' "$WORK/channel.json")"   # 撤销墓碑(#196)
   CUR="$(state_get current)"; [ -z "$CUR" ] && CUR="0.0.0"
   ver_valid "$CUR" || { warn "state.current '$CUR' 非法 semver → 按 0.0.0 处理"; CUR="0.0.0"; }
