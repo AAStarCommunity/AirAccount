@@ -7,8 +7,14 @@
 **第一轮(2026-08-18,feat/cc103-kms-committee-audit)**:
 - **T1 B2 审计 ✅** — A1 accountId 构造/注入 = 0 处;A2 唯一 "account" 命中 = session 0x08 的 20B 账户绑定(防跨账户重放,非 B2 的 32B committee accountId,不违反 B2);B1 DST 在位。结论落 `kms/docs/committee-signing-boundary.md` §3。
 - **T3 边界文档 ✅** — `kms/docs/committee-signing-boundary.md` 已写(不透明签名机 + BLS 原像=userOpHash + DST 三方一致 + 两种 account 区分 + 方向红线)。
-- **T2 DST golden KAT** — 待续(下轮:找 kms-ta/host crate 加 KAT)。
-- **T4 legacy 集成盘点** — 待续。
+- **T2 DST golden KAT ✅-partial**(PR #211)— 加 `co_sign_dst_locked` 断言钉死 BLS_DST 逐字节(捕获 #1 漂移面)。完整 co-sign 字节 golden KAT 需 TA docker 构建环境 capture(TA crate 不在根 workspace,host cargo test 撞 workspace 冲突)→ 跟进项;三方 DST 对齐已由现有 pop_golden 传递证明。
+- **T4 legacy 集成盘点 ✅** — KMS 对 validator/router/factory/committee 地址 **0 引用** = **完全 address-agnostic**(只签 userOpHash,从不调 validator)。"对新地址集成"是 SDK/aggregator 的事,KMS N/A。E2E 只把 KMS 当不透明签名机 → 需 testnet+SDK+committee 激活(非 KMS)→ 跟进项。
+
+## 收尾(loop 完成,2026-08-18)
+KMS 可执行任务全部完成。**PR #210**(T1 审计+T3 边界文档+规范)/ **PR #211**(T2 DST 锁定)待评审。剩余全为环境/他仓阻塞跟进项(见 issue,非 KMS 阻塞、非本 loop 可推进):
+- T2 完整字节 golden KAT:需 TA docker 构建环境 capture golden。
+- T4 committee 正向 E2E:需 testnet + SDK per-signer wire + dvt 翻 setEpochLength。
+loop(cron 0ca0888a)已 CronDelete。
 
 - **规范定稿** 2026-08-18:airaccount-contract + dvt 逐字节答复,KMS = **签名代码零改动**(SPEC.md)。
 - CC-103 已发 [repo:kms] 确认帖(commentId 4e96e9dc):接受 dvt 两处纠正(下限 30 非 17;N=3 可激活),声明 KMS 零改动。
