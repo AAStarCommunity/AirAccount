@@ -1247,6 +1247,27 @@ run_updater "$NR" "$NS" check AU_HEALTH_CMD= AU_HEALTH_GRACE_SECS=1 >/dev/null 2
 [ "$(cur_link "$NR")" = "0.28.0" ] && ok "内置健康门(无服务,轮询到 deadline)失败 → 回滚 0.28.0,不卡损坏版本" || bad "卡在=$(cur_link "$NR")"
 
 # ═══════════════════════════════════════════════════════════════════
+echo "== T-revoked 节点跳过 manifest revoked[] 里的版本(check 不装 + 显式 apply 拒)(#196 R6 墓碑·节点侧)=="
+cat > "$ROOT/updater.env" <<'ENV'
+AUTO_UPDATE=on
+CHANNEL=stable
+UPDATE_POLICY=all
+TA_AUTO_UPDATE=off
+KEEP_RELEASES=3
+ENV
+read NR NS < <(new_node trev 0.28.0)
+SHA="$(make_bundle 0.29.0 TA-0.28.0)"
+# 防御:0.29.0 既是 auto-apply 候选、又在 revoked[](signer 本不该产出这种,节点也必须挡)
+jq -n --argjson m 5 --arg s "$SHA" --arg u "file://$SERVER/airaccount-node-0.29.0.tar.gz" \
+  '{metadata_version:$m, generated_at:"2026-08-01T00:00:00Z", expires:"2035-01-08T00:00:00Z", channel:"stable", rollback_floor:"0.0.0", revoked:["0.29.0"], releases:[{version:"0.29.0",security:false,auto_apply_allowed:true,ta_changed:false,min_version:"0.0.0",tarball:$u,sha256:$s}]}' > "$SERVER/channels/stable.json"
+MINISIGN_SECKEY="$ROOT/sec.key" "$SIGN" "$SERVER/channels/stable.json" >/dev/null 2>&1
+echo 0 > "$ROOT/health_result"
+run_updater "$NR" "$NS" check >/dev/null 2>&1
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "check 未安装 revoked 的 0.29.0(current 仍 0.28.0)" || bad "revoked 版本被自动装=$(cur_link "$NR")"
+if run_updater "$NR" "$NS" apply 0.29.0 >/dev/null 2>&1; then bad "显式 apply revoked 版本竟成功"; else ok "显式 apply revoked 版本被拒"; fi
+[ "$(cur_link "$NR")" = "0.28.0" ] && ok "apply 拒后 current 未动(0.28.0)" || bad "current 被动=$(cur_link "$NR")"
+
+# ═══════════════════════════════════════════════════════════════════
 echo ""
 echo "结果: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]

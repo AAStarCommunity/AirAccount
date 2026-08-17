@@ -39,7 +39,8 @@ aastar-node-updater status                # 打印当前状态
 |------|------|
 | `aastar-node-updater.sh` | 更新器主程序(`check` / `apply <ver>` / `recovery` / `status`) |
 | `notify-telegram.sh` | 通知 hook → Telegram(AAStarMonitorBot);作 `AU_NOTIFY_CMD` 注入,fail-safe |
-| `sign-channel.sh` | CI/测试:给 channel.json 签名(minisign) |
+| `release-sign.sh` | **发版签发**(组装+校验+签名+自验+原子写,生产用;见下「生产接线」) |
+| `sign-channel.sh` | **仅测试**:给现成 channel.json 裸签(无 schema 校验/无自验),生产发版用 `release-sign.sh` |
 | `channels/stable.json.example` | manifest 模板(真实文件由 CI 生成+签名) |
 | `updater.env.example` | 社区可改的策略配置(总开关/通道/策略/pin) |
 | `airaccount-updater.{service,timer}` | 周期检查 + 错峰(RandomizedDelaySec) |
@@ -70,8 +71,15 @@ bash kms/tests/updater/test-updater.sh
 
 ## 生产接线(评审通过后)
 
-1. CI:发版时生成 `channels/<channel>.json`(含 sha256/security/兼容字段),用 minisign 私钥(CI secret / 离线)签名 → `.minisig`;发布到节点可拉的稳定 URL(`AU_MANIFEST_BASE`)。
-2. 板子:installer 落地 `updater.env` + 验签公钥 + 版本化目录 + enable timer & recovery unit。
+1. 发版:`release-sign.sh --version X.Y.Z --tarball <bundle.tar.gz> [--severity … --security --ta-changed]`
+   —— 自动算 sha256、组装/累积 `channels/<channel>.json`(bump `metadata_version`、刷新 `expires`)、
+   jq 校验 schema、用 minisign 私钥签名并**用仓库公钥自验**。私钥默认 `~/.ssh/aastar-updater.key`
+   (密码加密,绝不入库,见 [`SIGNING-KEY.md`](./SIGNING-KEY.md))。把 `<channel>.json` + `.minisig`
+   传到节点可拉的稳定 URL(`AU_MANIFEST_BASE`),tarball 传到 GitHub release。
+2. 板子:installer 落地 `updater.env` + 验签公钥([`updater-pubkey.pub`](./updater-pubkey.pub) → `/etc/airaccount/updater-pubkey.pub`)+ 版本化目录 + enable timer & recovery unit。
+   > ⚠️ 当前 `kms/deploy/aastar-node-installer.sh` **尚未接线** minisign 公钥落地 —— 这步现需手动
+   > (`install -o root -g root -m0644 updater-pubkey.pub /etc/airaccount/`)。节点侧 fail-closed
+   > (缺公钥即拒一切更新),故不算安全漏洞,但 installer 自动化是待办项。
 3. 监控:`AU_NOTIFY_CMD` 接 `AAstarMonitorBot`(telegram);`monitor.html` 加版本/更新状态列。
 
 ## 本增量**未做**(见设计文档 §9,真机/CI 阶段接)
