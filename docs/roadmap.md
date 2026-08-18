@@ -36,7 +36,12 @@
 ### 建议(中立)
 倾向 **A 但生成式**(已有在线 Swagger UI + AWS-KMS 兼容定位 + 社区节点外部集成);若短期无真实第三方直连则 **B** 省心;**不建议 C**(已有在线 docs,砍是倒退)。
 
-**决定:______(A / B / C)· 决定人 jason · 决定后落地:A→排 utoipa 迁移 task;B→#212 合 + 停止严格同步;C→关 #212 + 删 openapi/swagger。**
+### ✅ 决定(2026-08-18,jason):**A 认真支持(生成式)**
+
+KMS 的 HTTP API 作为**公开产品契约**维护(呼应 AWS-KMS-兼容定位 + 社区节点外部集成)。落地:
+1. **utoipa 生成式迁移**(排 task/issue,post-stability):从 Rust handler 加注解生成 `openapi.yaml`,让 spec **不可能**与代码漂移(根治手写漏端点/漏版本那一类)。这是 A 的核心——手写 openapi 不划算,生成式才划算。
+2. **PR #212 作为过渡合掉**:在 utoipa 迁移前,先用"版本对齐 + 机械门(assert openapi version == KMS_VERSION)"保住版本这一维不漂移,给 SDK 一个能 diff 的信号。
+3. utoipa 迁移完成后,机械门可扩展成"生成的 spec 与入库 spec 一致"(或直接构建时生成),`/docs` Swagger UI 继续在线。
 
 ---
 
