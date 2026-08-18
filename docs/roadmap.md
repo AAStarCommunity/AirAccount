@@ -2,6 +2,44 @@
 
 *创建时间: 2025-09-27 17:58*
 
+---
+
+## 🔓 待决策(2026-08-18):OpenAPI / HTTP API 契约支持范围
+
+> 背景:SDK 反馈 KMS openapi spec 版本没跟 release 升(0.28.1 vs KMS_VERSION 0.29.0),检测不到变更(PR #212 已修版本+加机械门)。但这暴露一个**更上层的产品决策**:openapi 到底该投入多少?**待 jason 拍板 A/B/C。**
+
+### OpenAPI 是什么 / 现状
+- 一份机器可读的文件,描述 KMS **公网 HTTP API**(`/CreateKey`、`/Sign`、WebAuthn…,即"AWS KMS 兼容 API")。工具用它:①渲染可交互文档 ②codegen 客户端 ③契约测试 ④版本 diff。
+- **本仓现状**(已核代码):`kms/docs/api/openapi.yaml` **手写、不生成代码**;KMS 运行时 serve `kms.aastar.io/docs`(Swagger UI 可试跑)+ `/openapi.yaml`。**CLI 不碰它;SDK 手写、只 diff 它的 version**。
+- 不覆盖:CLI(直连 TEE/DB,不走 HTTP)、loopback 内部端点(`/pop`、`/kms/sign`)。
+
+### 谁受益
+| 消费者 | 用不用 | 价值 |
+|---|---|---|
+| 本地 CLI | ❌ | 无关 |
+| AAStar SDK(手写) | 弱(只 diff version) | 低(可用 CHANGELOG/KMS_VERSION 替代) |
+| 人(浏览/试 API) | ✅ Swagger UI | **真价值** |
+| 第三方/多语言/AWS-KMS-兼容客户端 | ✅ 契约+codegen | **取决于有没有这类人** |
+
+### 决策 = 一句话:HTTP API 是不是"公开产品契约"?
+- **是**(AWS-KMS-兼容定位、要第三方直连/多语言/审计)→ openapi 值得维护。
+- **不是**(只有第一方 CLI+SDK)→ 只剩 `/docs` 人浏览价值,严格契约是过度投入。
+
+### 三选项
+- **A 认真支持** —— **但用生成式(utoipa 从 Rust handler 生成 openapi)**,让 spec 不可能与代码漂移(手写已漏过 `/attestation`、version)。适合 HTTP API 是公开产品。
+- **B 最小支持** —— 保留 `/docs` 当尽力而为文档,不当严格契约;省版本门/逐端点同步仪式。适合"第三方以后可能"。
+- **C 砍掉** —— 换 CHANGELOG + SDK 跟 KMS_VERSION;删 openapi + Swagger UI。适合确定不做公开 HTTP 契约。
+
+### 与 PR #212 的关系
+#212(版本对齐+机械门)在 A/B 下有用、合;在 C 下不必要、关掉。**#212 合不合等本决策。**
+
+### 建议(中立)
+倾向 **A 但生成式**(已有在线 Swagger UI + AWS-KMS 兼容定位 + 社区节点外部集成);若短期无真实第三方直连则 **B** 省心;**不建议 C**(已有在线 docs,砍是倒退)。
+
+**决定:______(A / B / C)· 决定人 jason · 决定后落地:A→排 utoipa 迁移 task;B→#212 合 + 停止严格同步;C→关 #212 + 删 openapi/swagger。**
+
+---
+
 ## 🎯 项目当前状态 (Phase 7 完成)
 
 ### ✅ 已完成的里程碑
