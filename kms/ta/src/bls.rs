@@ -103,6 +103,29 @@ fn encode_g2_eip2537(uncompressed_192: &[u8; 192]) -> [u8; 256] {
 }
 
 #[cfg(test)]
+mod co_sign_dst {
+    use super::BLS_DST;
+
+    /// CC-103 committee:co-sign / BLS-partial 的 DST 必须与 DVT #237 committee validator 的
+    /// `_hashToG2` DST + SDK @noble **逐字节一致**(CC-98 committee 不改签名原像=userOpHash,域分离
+    /// 全靠此 DST;漂移则 committee 签名全网静默验签失败)。
+    ///
+    /// ⚠️ **本单测在 OP-TEE docker 构建环境外不执行**(`kms/ta` 需 OP-TEE sysroot,不进任何 CI 的
+    /// `cargo test`)。因此"改 DST 即红"的真红灯由 **`scripts/ca-ta-consistency.py` 的 BLS_DST 门**
+    /// 承担(读 bls.rs 源码 + 断言字面量,ubuntu 上跑、碰 bls.rs 的 PR 都跑;`check`/`clippy` 抓不到
+    /// 同类型常量值漂移)。本测试是 TA 环境内的第二道网。完整 co-sign 字节 golden KAT 见
+    /// `docs/agent/cc103-kms-committee/ACCEPTANCE.md §B`(golden 需在 TA docker 环境 capture)。
+    #[test]
+    fn co_sign_dst_locked() {
+        assert_eq!(
+            BLS_DST,
+            b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
+            "BLS co-sign DST 漂移 —— 必须与 DVT #237 validator _hashToG2 + SDK @noble 一致(CC-103)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pop_golden {
     use super::sign_pop;
 

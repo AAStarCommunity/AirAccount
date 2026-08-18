@@ -14,6 +14,7 @@ on:
     paths:
       - 'kms/host/src/api_server.rs'
       - 'kms/ta/src/main.rs'
+      - 'kms/ta/src/bls.rs'
       - 'scripts/ca-ta-consistency.py'
   workflow_dispatch:
 
