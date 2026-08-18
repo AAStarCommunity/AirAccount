@@ -1,11 +1,14 @@
 # AirAccount KMS — OpenAPI 3.1 specification
-# Generated: 2026-07-09 · Version 0.28.1 (Beta6)
+# Version 0.29.0 — 对齐 KMS_VERSION(api_server.rs)。公网 API 自 0.28.1 起无变更
+# (v0.29.0 新增的 /pop、/kms/sign 是 loopback 127.0.0.1:3100 内部端点,不入公网 spec)。
+# 版本号必须随每次 release 与 KMS_VERSION 同步(RELEASE-CHECKLIST §1 行5;由
+# scripts/ca-ta-consistency.py 机械门 assert 相等 —— 0.29.0 时曾漏 bump,故加门守护)。
 # Render with Swagger UI: open kms/docs/api/index.html
 # Test coverage per endpoint: see `x-tested` + kms/docs/API-TEST-MATRIX.md
 openapi: 3.1.0
 info:
   title: AirAccount KMS API
-  version: 0.28.1
+  version: 0.29.0
   summary: TEE private-key management · WebAuthn · AWS KMS-compatible
   description: |
     AirAccount KMS manages secp256k1 / P-256 keys inside an OP-TEE TrustZone secure world.
