@@ -18,19 +18,29 @@ KMS 侧 CC-98 committee 交付 = 4 项,**全绿才算完**:
 **判据**:KMS 无任何签名路径把 accountId 塞进签名输出。
 
 ```bash
-# A1 全签名路径静态审计:签名相关源码零处构造/注入 accountId 字段
+# A1 全签名路径静态审计:签名相关源码零处构造/注入 32B committee accountId
 cd <repo>
+# 过滤器只排除**测试文件**与**行首注释**(不用无锚点的 test|//|doc 子串——那会顺手吃掉
+# 含尾注释的正常代码行 `let x = ...; // for audit` 或路径带 doc 的文件,掩盖真命中):
 grep -rniE 'account_?id' kms/ta/src/ kms/proto/src/in_out.rs kms/host/src/ta_client.rs \
-  | grep -viE 'test|//|comment|doc' 
-# 期望:空(或仅出现在与签名无关的路径,需逐条人工确认非签名注入)
+  | grep -vE '(_test\.rs|/tests?/)' \
+  | grep -vE ':[0-9]+:[[:space:]]*(//|///|\*)'
+# 期望:0 命中(BLS/owner/keeper 均对 digest 盲签,无 32B accountId 通道)。
 
-# A2 BLS/owner/session/keeper 输入输出结构不含 accountId
+# A2 签名 I/O 结构里的 account 字段(命中允许,但须逐条落判据)
 grep -rniE 'struct.*(Sign|Bls|Keeper|Session).*(Input|Output)' -A8 kms/proto/src/in_out.rs \
   | grep -iE 'account'
-# 期望:空(签名 I/O 结构无 account 字段)
+# 期望:命中允许存在(现 4 处 account/account_address 字段),但**每一条必须**:
+#   ① 是 20 字节 EOA/账户地址([u8; 20]),不是 32B committee accountId;
+#   ② 不进 BLS payload(BLS `sign()` 结构上只收 [u8;32] message,无 account 通道)。
+# 逐条上溯所属 struct 分类(0x08 wire 嵌入 @289/445 · grant-session EIP-712 @462/491),
+# 均满足①②即通过。任一条是 32B 且流入 BLS payload → FAIL。
 ```
 
-**通过条件**:A1/A2 均空;审计结论写入 `kms/docs/` 边界说明(见 D)。若 A1 有命中,逐条证明是非签名路径(如日志/审计元数据),否则 **FAIL**。
+**通过条件**:
+- **A1** = 0 命中(收紧过滤器后仍 0)。
+- **A2** 命中逐条满足上述①②(20B 账户地址 + 不进 BLS payload),并在边界文档 §3 分机制记录行号;任一条违反 → **FAIL**。
+- 审计结论写入 `kms/docs/committee-signing-boundary.md`(见 D)。
 
 ---
 

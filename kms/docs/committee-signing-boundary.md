@@ -20,6 +20,10 @@ KMS 对给定 digest/message 出签名,**不组装 tier 签名、不构造委员
 - 链上验证器 `messagePoint = _hashToG2(userOpHash)`(RFC 9380);域分离全靠 **DST**:
   `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`(`kms/ta/src/bls.rs:8`,与 dvt #237 validator + SDK noble 三方 golden 一致)。
 - **committee 不改这个原像。** committee 新增的 `slot`/`merkleProof`(成员证明)与 `accountId`(抽签输入 + 账户注入 framing)**都不进 BLS 签名消息**。
+- **结构性证据(不随代码漂移,优于 grep)**:`kms/ta/src/bls.rs:19`
+  `pub fn sign(sk_bytes: &[u8; 32], message: &[u8; 32]) -> Result<([u8; 256], [u8; 96])>`
+  —— BLS 签名函数的入参就是**一个定长 32 字节 message**,没有 account 通道:accountId **注不进**,
+  不是"目前没人注入"。grep 会随代码漂移,这个函数签名不会。
 - ⇒ **KMS-TEE `bls_sign` 今天怎么签,committee 开了还怎么签,零改动。**
 
 ## 3. ⚠️ accountId 命门(B2)—— 两种"account"必须分清
@@ -28,11 +32,12 @@ KMS 对给定 digest/message 出签名,**不组装 tier 签名、不构造委员
 
 **KMS 侧审计结论(2026-08-18,feat/cc103-kms-committee-audit)**:
 - **A1**:`kms/ta/src/`、`proto/in_out.rs`、`ta_client.rs` 中 accountId 构造/注入 = **0 处**。BLS/owner/keeper 路径均对 digest 盲签,不含 account。
-- **A2**:签名 I/O 结构中唯一的 "account" 字段 = **会话签名(0x08)wire 里的 20 字节 ERC-4337 账户地址**(`proto/in_out.rs:462/491`)。**这不是 B2 的 accountId**:
-  - 它是 **20 字节**(B2 是 32 字节),是**会话密钥的账户绑定**(注释:"prevent cross-account abuse"),防会话签名跨账户重放;
-  - 它在 **session 0x08**,与 committee BLS 块**无关**;session 0x08 按规范本就**不受 committee 影响**;
-  - BLS partial(`bls_sign`)**不含任何 account**,只签 userOpHash。
-  - **∴ 不违反 B2。** 两者是正交机制,勿混淆。
+- **A2**:签名 I/O 结构中共 **4 处** 20 字节 account 字段,**分属两种机制**,均非 B2 的 32B committee accountId、均不进 BLS payload:
+  - **机制① 0x08 wire 嵌入**(`SignAgentUserOpInput.account_address` @`kms/proto/src/in_out.rs:289` · `SignP256UserOpInput.account_address` @`:445`):account **嵌在 TEE 出的会话签名 wire** 里(`[0x08][account(20)]…`),防会话签名**跨账户重放**。
+  - **机制② grant-session EIP-712 字段**(`SignGrantSessionInput.account` @`:462` · `SignP256GrantSessionInput.account` @`:491`):account 是 **owner 亲签的 EIP-712 结构体的一个字段**,把授权**绑定到指定账户**(把绑定 root 放进 owner 签名,这正是正确的绑定形状)。
+  - 四者都是 **20B EOA/账户地址**(B2 是 32B),都**不进 BLS payload**;BLS partial(`bls_sign`)结构上只收 `[u8;32]` message,无 account 通道(见 §2 函数签名)。
+  - **∴ 不违反 B2。** 两种机制均是正交的账户绑定,与 committee accountId 无关。
+  > 更正(#210 R1,daemon):此前把 `462/491` 误标为"0x08 会话 wire、唯一"——实际 462/491 是 grant-session EIP-712(机制②),0x08 wire 在 289/445(机制①),共 4 处两种机制。结论(不违反 B2)不变,证据锚点已修正。
 
 ## 4. 明确不做(方向性红线)
 
