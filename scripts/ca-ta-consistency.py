@@ -33,6 +33,16 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TA = os.path.join(ROOT, "kms/ta/src/main.rs")
 HOST = os.path.join(ROOT, "kms/host/src/api_server.rs")
+BLS = os.path.join(ROOT, "kms/ta/src/bls.rs")
+
+# CC-103: the co-sign / BLS-partial DST must stay byte-identical to the DVT #237 committee
+# validator `_hashToG2` DST + SDK @noble. A drift silently fails committee signature
+# verification network-wide. `cargo check`/`clippy` CANNOT catch a same-type constant *value*
+# change (b"..._POP_" -> b"..._NUL_" compiles fine), and the `kms/ta` crate never runs under
+# any CI `cargo test` (it needs the OP-TEE sysroot). This string gate does catch it, and runs
+# on ubuntu (no OP-TEE) for every PR touching bls.rs — the real red light behind the in-TA
+# `co_sign_dst_locked` unit test.
+EXPECTED_BLS_DST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"
 
 # --- audited mapping tables (#122) --------------------------------------------
 # Cross-named / _strict-routed ops: host handler fn -> TA verify fn it reaches.
@@ -242,6 +252,23 @@ def host_delegates():
     return host
 
 
+def bls_dst_check():
+    """CC-103 DST drift gate. Read bls.rs, extract the `pub const BLS_DST` literal, assert it
+    equals EXPECTED_BLS_DST. Returns a list of failures (empty = ok). Matches only the real
+    const declaration, not the assert_eq! literal in the test module."""
+    fails = []
+    src = open(BLS).read()
+    m = re.search(r'pub\s+const\s+BLS_DST\s*:\s*&\[u8\]\s*=\s*b"([^"]*)"', src)
+    if not m:
+        fails.append(f"BLS_DST const not found in kms/ta/src/bls.rs — CC-103 DST gate can't "
+                     f"verify (renamed/moved?); restore `pub const BLS_DST: &[u8] = b\"...\"`")
+    elif m.group(1) != EXPECTED_BLS_DST:
+        fails.append(f'BLS_DST drifted: got b"{m.group(1)}" expected b"{EXPECTED_BLS_DST}" '
+                     f"(must match DVT #237 validator _hashToG2 + SDK @noble — CC-103; "
+                     f"a drift silently fails committee signatures network-wide)")
+    return fails
+
+
 def _delegate_ok(tp, hd):
     """Invariant. TA Some(payload) (or unclassifiable `?`, treated conservatively as
     Some) => EVERY host delegate on that op must be exactly true: no `false` (a false
@@ -319,6 +346,17 @@ def main():
         print("  → verify each against docs/design/ca-ta-consistency-matrix.md (host path delegates correctly).")
     else:
         print("  (none — every TA Some/? op is auto-checked)")
+
+    # (5) CC-103: BLS co-sign DST literal must not drift (check/clippy can't catch value drift;
+    #     kms/ta never runs under CI cargo test). This is the real red light for DST drift.
+    print("\n== consistency · BLS_DST literal (CC-103 committee) ==")
+    bls_fails = bls_dst_check()
+    if bls_fails:
+        for f in bls_fails:
+            print(f"  [MISMATCH] {f}")
+        fails.extend(bls_fails)
+    else:
+        print(f'  [OK ] BLS_DST == b"{EXPECTED_BLS_DST}"')
 
     print()
     if fails:
