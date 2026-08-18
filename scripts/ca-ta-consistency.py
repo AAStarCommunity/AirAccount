@@ -34,6 +34,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TA = os.path.join(ROOT, "kms/ta/src/main.rs")
 HOST = os.path.join(ROOT, "kms/host/src/api_server.rs")
 BLS = os.path.join(ROOT, "kms/ta/src/bls.rs")
+OPENAPI = os.path.join(ROOT, "kms/docs/api/openapi.yaml")
+
+# CC-106: the public OpenAPI spec's `info.version` MUST equal KMS_VERSION (api_server.rs),
+# so downstream (SDK) can diff the version to detect API changes. RELEASE-CHECKLIST §1 row 5
+# already says to bump it every release, but it's a manual step and was MISSED at 0.29.0
+# (spec stayed 0.28.1 while KMS_VERSION went 0.29.0) → SDK couldn't detect. Manual reminders
+# get missed; this gate makes the drift a red light on every PR touching either file.
 
 # CC-103: the co-sign / BLS-partial DST must stay byte-identical to the DVT #237 committee
 # validator `_hashToG2` DST + SDK @noble. A drift silently fails committee signature
@@ -269,6 +276,31 @@ def bls_dst_check():
     return fails
 
 
+def openapi_version_check():
+    """CC-106 drift gate. openapi.yaml `info.version` must == KMS_VERSION (api_server.rs).
+    Returns a list of failures (empty = ok)."""
+    fails = []
+    kms_v = None
+    m = re.search(r'const\s+KMS_VERSION\s*:\s*&str\s*=\s*"([^"]+)"', open(HOST).read())
+    if m:
+        kms_v = m.group(1)
+    else:
+        fails.append("KMS_VERSION const not found in api_server.rs — can't check openapi drift")
+    # openapi info.version — first `version:` under a line with <=2 leading spaces (info block)
+    spec_v = None
+    for ln in open(OPENAPI):
+        mm = re.match(r'  version:\s*(\S+)\s*$', ln)
+        if mm:
+            spec_v = mm.group(1)
+            break
+    if spec_v is None:
+        fails.append(f"info.version not found in kms/docs/api/openapi.yaml")
+    if kms_v and spec_v and kms_v != spec_v:
+        fails.append(f"openapi version drift: openapi.yaml info.version={spec_v} != KMS_VERSION={kms_v} "
+                     f"(bump kms/docs/api/openapi.yaml to match; RELEASE-CHECKLIST §1 row 5 — CC-106)")
+    return fails
+
+
 def _delegate_ok(tp, hd):
     """Invariant. TA Some(payload) (or unclassifiable `?`, treated conservatively as
     Some) => EVERY host delegate on that op must be exactly true: no `false` (a false
@@ -357,6 +389,16 @@ def main():
         fails.extend(bls_fails)
     else:
         print(f'  [OK ] BLS_DST == b"{EXPECTED_BLS_DST}"')
+
+    # (6) CC-106: openapi.yaml info.version must == KMS_VERSION (downstream diff-detection)
+    print("\n== consistency · openapi version == KMS_VERSION (CC-106) ==")
+    oapi_fails = openapi_version_check()
+    if oapi_fails:
+        for f in oapi_fails:
+            print(f"  [MISMATCH] {f}")
+        fails.extend(oapi_fails)
+    else:
+        print("  [OK ] openapi.yaml info.version == KMS_VERSION")
 
     print()
     if fails:
