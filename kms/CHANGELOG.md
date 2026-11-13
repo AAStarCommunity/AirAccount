@@ -1,6 +1,13 @@
 # KMS Changelog
 
-> Updated: 2026-08-15
+> Updated: 2026-11-13
+
+## Unreleased
+
+### TA / SDK — RPMB 存储 ID 修正（生产行为不变）
+- **SDK fork `aastar-rpmb-patches` → `96c823c`**：`ObjectStorageConstants::Rpmb` 从 `0x80000003` 改成 `0x80000100`（OP-TEE `TEE_STORAGE_PRIVATE_RPMB`，和上游 teaclave v0.10.0 的 `PrivateRpmb` 一致）。旧值 OP-TEE 不认识，会返回 `TEE_ERROR_ITEM_NOT_FOUND`，被 REE-FS fallback 吞掉，所以 RPMB 防回滚计数器其实从来没有生效过。
+- **生产 TA 不受影响**：`mx93-build.sh` 编的是 `ree-fs-only`，不发任何 RPMB 调用。这是开启 RPMB（#50）的前置修复。
+- SDK 升到 v0.10.0 单独作为里程碑来做，见 `docs/agent/milestone-sdk-v0.10.0.md`。
 
 ## 0.30.0-beta.1 (组装中 · Beta7) — KMS+node+DVT 协调预发布
 
