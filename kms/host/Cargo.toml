@@ -68,7 +68,7 @@ admin-purge = []
 
 [dependencies]
 proto = { path = "../proto" }
-optee-teec = { path = "../../third_party/teaclave-trustzone-sdk/optee-teec", optional = true }
+optee-teec = { path = "../../third_party/teaclave-trustzone-sdk/crates/optee-teec", optional = true }
 
 # CLI dependencies
 structopt = "0.3"

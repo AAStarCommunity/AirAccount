@@ -26,7 +26,11 @@ mod wallet;
 use optee_utee::{
     ta_close_session, ta_create, ta_destroy, ta_invoke_command, ta_open_session, trace_println,
 };
-use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, Parameters, PersistentObject, Random, Time};
+use optee_utee::{DataFlag, Error, ErrorKind, ObjectStorageConstants, PersistentObject, Random, Time};
+// Old (pre-v0.10.0) parameter API, kept to limit this upgrade's blast radius.
+// Migrating to the typed FromRawParameters API is a separate follow-up.
+#[allow(deprecated)]
+use optee_utee::deprecated::Parameters;
 
 // SPIKE
 mod bls;
@@ -551,7 +555,7 @@ fn rpmb_read_counter_ex() -> Result<(u64, bool)> {
     }
     #[cfg(not(feature = "ree-fs-only"))]
     match PersistentObject::open(
-        ObjectStorageConstants::Rpmb,
+        ObjectStorageConstants::PrivateRpmb,
         RPMB_COUNTER_ID,
         DataFlag::ACCESS_READ | DataFlag::SHARE_READ,
     ) {
@@ -615,7 +619,7 @@ fn rpmb_write_counter(value: u64) -> Result<()> {
         | DataFlag::ACCESS_WRITE_META
         | DataFlag::OVERWRITE;
     match PersistentObject::create(
-        ObjectStorageConstants::Rpmb,
+        ObjectStorageConstants::PrivateRpmb,
         RPMB_COUNTER_ID,
         flags,
         None,
