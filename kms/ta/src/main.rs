@@ -498,7 +498,9 @@ impl P256SessionKey {
 
 // ── RPMB Anti-Rollback Counter ──
 //
-// The counter is stored in TEE_STORAGE_PRIVATE_RPMB (0x80000003), backed by the
+// The counter is stored in TEE_STORAGE_PRIVATE_RPMB (OP-TEE extension ID
+// 0x80000100; an older SDK patch wrongly used 0x80000003, which OP-TEE rejects
+// with ITEM_NOT_FOUND, so RPMB was never really reached), backed by the
 // eMMC RPMB partition. This provides hardware-enforced monotonicity: unlike REE-FS,
 // RPMB objects cannot be silently rolled back by restoring the filesystem.
 //
